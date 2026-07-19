@@ -40,6 +40,8 @@ en:
 
   label_language: 'Language:'
   label_speaker: 'Speaker detection:'
+  label_speaker_names: 'Speaker names'
+  tooltip_speaker_names: 'Names of the people in the audio, comma-separated (e.g. "Mona, Lena"). They are mapped to the speakers in order of first appearance, replacing the S00/S01 labels in the transcript.'
   label_whisper_model: 'Model:'
   label_add_custom_models: 'Add AI model...'
   label_overlapping: 'Overlapping speech:'

@@ -38,6 +38,8 @@ it:
 
   label_language: 'Lingua:'
   label_speaker: 'Rilevamento degli speaker:'
+  label_speaker_names: 'Nomi degli speaker'
+  tooltip_speaker_names: 'Nomi delle persone nell''audio, separati da virgole (es. "Mona, Lena"). Vengono assegnati agli speaker nell''ordine di prima apparizione e sostituiscono le etichette S00/S01 nella trascrizione.'
   label_whisper_model: 'Modello:'
   label_add_custom_models: 'Aggiungi modello AI...'
   label_overlapping: 'Discorso sovrapposto:'

@@ -38,6 +38,8 @@ zh-CN: &defaults
 
   label_language: '语言：'
   label_speaker: '说话人识别：'
+  label_speaker_names: '说话人姓名'
+  tooltip_speaker_names: '音频中人物的姓名，用逗号分隔（例如"Mona, Lena"）。按首次出现的顺序分配给说话人，并替换转录中的S00/S01标签。'
   label_whisper_model: '人工智能模型：'
   label_add_custom_models: '添加人工智能模型...'  
   label_overlapping: '重叠发言：'

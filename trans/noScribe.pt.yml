@@ -39,6 +39,8 @@ pt:
 
   label_language: 'Idioma:'
   label_speaker: 'Detecção de alto-falante:'
+  label_speaker_names: 'Nomes dos falantes'
+  tooltip_speaker_names: 'Nomes das pessoas no áudio, separados por vírgulas (p. ex. "Mona, Lena"). São atribuídos aos falantes pela ordem da primeira aparição e substituem as etiquetas S00/S01 na transcrição.'
   label_whisper_model: 'Modelo:'
   label_add_custom_models: 'Adicionar modelo de IA...'  
   label_overlapping: 'Sobreposição:'

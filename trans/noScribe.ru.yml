@@ -39,6 +39,8 @@ ru:
 
   label_language: 'Язык:'
   label_speaker: 'Определение диктора:'
+  label_speaker_names: 'Имена дикторов'
+  tooltip_speaker_names: 'Имена людей в аудио через запятую (например, "Mona, Lena"). Они назначаются дикторам в порядке первого появления и заменяют метки S00/S01 в транскрипте.'
   label_whisper_model: 'Модель:'
   label_add_custom_models: 'Добавить модель искусственного интеллекта...'  
   label_overlapping: 'Перекрытие речи:'
