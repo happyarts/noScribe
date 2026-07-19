@@ -31,6 +31,7 @@ zh-CN: &defaults
   label_transcript_file: '保存转录文件为：'
   label_transcript_file_name: <选择文件名> 
   output_dir_selection: '多个音频文件：请选择一个目录保存转录结果。文件名将自动生成。'
+  output_format_selection: '多个音频文件：请选择所有转录的输出格式。'
 
   label_start: '开始（hh:mm:ss）：'
   label_stop: '结束（hh:mm:ss）：'

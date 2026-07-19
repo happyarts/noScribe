@@ -31,6 +31,7 @@ fr:
   label_transcript_file: "Enregistrer la transcription sous :"
   label_transcript_file_name: <sélectionner un nom de fichier>
   output_dir_selection: 'Plusieurs fichiers audio : sélectionnez un dossier où enregistrer les transcriptions. Les noms seront générés automatiquement.'
+  output_format_selection: "Plusieurs fichiers audio : sélectionnez le format de sortie pour toutes les transcriptions."
 
   label_start: "Début (hh:mm:ss) : "
   label_stop: "Fin (hh:mm:ss) : " 
