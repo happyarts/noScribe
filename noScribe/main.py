@@ -1100,7 +1100,7 @@ class App(ctk.CTk):
         if last_whisper_model in self.whisper_models:
             self.option_menu_whisper_model.set(last_whisper_model)
         elif len(self.whisper_models) > 0:
-            self.option_menu_whisper_model.set(next(self.whisper_models.keys()))
+            self.option_menu_whisper_model.set(next(iter(self.whisper_models)))
 
         # Mark pauses
         self.label_pause = ctk.CTkLabel(self.frame_options, text=t('label_pause'))
@@ -3307,7 +3307,7 @@ def run_cli_mode(args):
             if 'precise' in app.whisper_models:
                 args.model = 'precise'
             elif app.whisper_models:
-                args.model = app.whisper_models.keys()[0]
+                args.model = next(iter(app.whisper_models))
             else:
                 print("Error: No Whisper models found.")
                 return 1
