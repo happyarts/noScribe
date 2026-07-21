@@ -1,0 +1,22 @@
+# Optional Voxtral transcription engine (Apple Silicon only).
+# Install on top of requirements_macOS_arm64.txt to enable the "voxtral-mini"
+# and "voxtral-small" models in the transcription backend:
+#
+#   pip install -r environments/requirements_voxtral_macOS_arm64.txt
+#
+# Transcription runs on the Apple Silicon GPU via MLX. When a timestamped
+# output is requested, word timestamps are recovered with CTC forced alignment
+# (transformers + torchaudio) against a German wav2vec2 model.
+#
+# mlx-voxtral is pinned: upstream is effectively unmaintained (last release
+# 2025-08), so a pin means "frozen == stable" rather than a risk. mlx and mlx-lm
+# are pinned too because voxtral_engine drives decoding through mlx_lm internals
+# (generate_step + a small model adapter); a newer mlx-lm could change that API
+# or break the frozen mlx-voxtral. These are the versions the engine and its
+# byte-identity tests were validated against -- bump them deliberately, together.
+mlx==0.32.0
+mlx-lm==0.31.3
+mlx-voxtral==0.0.4
+transformers>=4.56
+torchaudio
+soundfile

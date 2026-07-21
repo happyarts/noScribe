@@ -39,6 +39,9 @@ fr:
   label_language: "Langue :"
   label_speaker: "Détection des locuteurs :"
   label_whisper_model: "Modèle :"
+  voxtral_path_long: "Moteur Voxtral : transcription avec horodatage des mots (alignement forcé)."
+  voxtral_path_short: "Moteur Voxtral : transcription rapide sans horodatage."
+  voxtral_no_disfluencies: "Remarque : le moteur Voxtral ne prend pas en charge l'option des disfluences ; les hésitations sont transcrites telles que le modèle les entend."
   label_add_custom_models: "Ajouter un modèle d'IA..."
   label_overlapping: 'Chevauchements de parole'
   label_pause: 'Marquer les pauses :'

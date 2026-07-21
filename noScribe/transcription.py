@@ -13,10 +13,16 @@ class WhisperModel:
     """
     Represents a whisper model or more specifically a model that can be used
     for transcriptions.
+
+    `engine` selects the backend: "whisper" (faster-whisper, the default) or
+    "voxtral" (Mistral Voxtral via mlx-voxtral). For the Voxtral engine `repo`
+    holds the model repository/path and `path` is only a display placeholder.
     """
 
     name: str
     path: Path
+    engine: str = "whisper"
+    repo: str = None
 
 
 class WhisperModelManager:
@@ -58,13 +64,19 @@ class WhisperModelManager:
                 )
                 continue
 
-            # Check here whether a `model.bin` file is present in
-            # the directory. This is necessary for a whisper model.
+            # faster-whisper models have a `model.bin`. A directory without one
+            # is either a different model format -- e.g. an MLX/Voxtral build,
+            # which uses safetensors and is registered separately by its own
+            # engine -- in which case skip it silently, or an incomplete/broken
+            # faster-whisper download, which is worth flagging. Only warn about
+            # the latter: a warning for the expected (non-Whisper) case is noise.
             if not (entry / "model.bin").exists():
-                logger.warning(
-                    "Missing `model.bin` in model dir: %s. Ignoring.",
-                    entry.absolute(),
-                )
+                if not any(entry.glob("*.safetensors")):
+                    logger.warning(
+                        "Model directory has no `model.bin` (incomplete download?): "
+                        "%s. Ignoring.",
+                        entry.absolute(),
+                    )
                 continue
 
             self.models[entry.name] = WhisperModel(
