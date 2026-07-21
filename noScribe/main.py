@@ -975,9 +975,9 @@ class App(ctk.CTk):
         # configure window
         self.title('noScribe - ' + t('app_header'))
         if platform.system() in ("Darwin", "Linux"):
-            self.geometry(f"{1100}x{765}")
+            self.geometry(f"{1100}x{810}")
         else:
-            self.geometry(f"{1100}x{690}")
+            self.geometry(f"{1100}x{735}")
 
         if platform.system() in ("Darwin", "Windows"):
             self.iconbitmap(impres.files("img") / "noScribeLogo.ico")
@@ -1152,7 +1152,7 @@ class App(ctk.CTk):
         self.label_speaker = ctk.CTkLabel(self.frame_options, text=t('label_speaker'))
         self.label_speaker.grid(column=0, row=5, sticky='w', pady=5)
 
-        self.option_menu_speaker = ctk.CTkOptionMenu(self.frame_options, width=100, values=['none', 'auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
+        self.option_menu_speaker = ctk.CTkOptionMenu(self.frame_options, width=100, values=['none', 'auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], command=self._on_speaker_detection_changed)
         self.option_menu_speaker.grid(column=1, row=5, sticky='e', pady=5)
         self.option_menu_speaker.set(get_config('last_speaker', 'auto'))
 
@@ -1201,6 +1201,8 @@ class App(ctk.CTk):
         self.entry_speaker_names.grid(column=1, row=6, sticky='e', pady=5)
         self.entry_speaker_names.insert(0, get_config('last_speaker_names', ''))
         CTkToolTip(self.entry_speaker_names, text=t('tooltip_speaker_names'))
+        # Hide the names field when speaker detection is off (nothing to map to).
+        self._on_speaker_detection_changed()
 
         # Start control: single CTkOptionMenu styled like a button
         # Create a container so we can show/hide as one control
@@ -2221,8 +2223,18 @@ class App(ctk.CTk):
                     if hasattr(row['frame'], 'set_progress'):
                         row['frame'].set_progress(progr)
 
+    def _on_speaker_detection_changed(self, value=None):
+        """Show the speaker-names field only when speaker detection is active.
+        With detection off ('none') there are no speakers to map names to."""
+        if self.option_menu_speaker.get() == 'none':
+            self.label_speaker_names.grid_remove()
+            self.entry_speaker_names.grid_remove()
+        else:
+            self.label_speaker_names.grid()
+            self.entry_speaker_names.grid()
+
     def collect_transcription_options(self) -> TranscriptionQueue:
-        """Collect all transcription options from UI and config and creates a 
+        """Collect all transcription options from UI and config and creates a
         TranscriptionQueue for each audio file"""
         # Validate required inputs
         if len(self.audio_files_list) == 0:
@@ -2249,7 +2261,7 @@ class App(ctk.CTk):
         queue = TranscriptionQueue()
         if len(self.audio_files_list) != len(self.transcript_files_list):
             self.create_default_transcript_names()
-        
+
         for i in range(len(self.audio_files_list)):
             job = create_transcription_job(
                 audio_file=self.audio_files_list[i],
@@ -2293,7 +2305,17 @@ class App(ctk.CTk):
         mapping = self._speaker_name_map
         if base not in mapping:
             idx = len(mapping)
-            mapping[base] = names[idx] if idx < len(names) else base
+            if idx < len(names):
+                mapping[base] = names[idx]
+            else:
+                # More speakers than names. This can't be caught up front with
+                # "auto" (the count is only known now), so note it in the log
+                # once — non-modal, so it never interrupts an unattended run.
+                mapping[base] = base
+                if not getattr(self, '_speaker_name_overflow_warned', False):
+                    self.logn()
+                    self.logn(t('warn_speaker_names_more_speakers', n_names=len(names)), 'error')
+                    self._speaker_name_overflow_warned = True
         name = mapping[base]
         return f'//{name}' if overlapping else name
 
@@ -2782,6 +2804,7 @@ class App(ctk.CTk):
                     # Reset the label->name map for this job (built in order of
                     # first appearance as segments stream in).
                     self._speaker_name_map = {}
+                    self._speaker_name_overflow_warned = False
 
                     def on_segment(seg):
                         nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, prev_speaker
@@ -2975,6 +2998,19 @@ class App(ctk.CTk):
             
     def create_job(self, enqueue=False):
         try:
+            # A fixed speaker count is known up front and the user is present at
+            # Start / Add-to-queue, so ask before proceeding if the number of
+            # names does not match — silently mis-assigning names is worse than a
+            # quick confirmation. With "auto" the count is not known yet, so that
+            # case is only noted in the log at runtime (see _apply_speaker_name).
+            speaker_sel = self.option_menu_speaker.get()
+            speaker_names = parse_speaker_names(self.entry_speaker_names.get())
+            if speaker_sel.isdigit() and len(speaker_names) != int(speaker_sel):
+                if not tk.messagebox.askyesno(title='noScribe', message=t(
+                        'ask_speaker_names_count',
+                        n_names=len(speaker_names), n_speakers=speaker_sel)):
+                    return
+
             show_queue_tab = enqueue
             # Collect transcription options from UI
             new_queue = self.collect_transcription_options()
