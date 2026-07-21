@@ -246,6 +246,15 @@ def version_higher(version1, version2, subversion_level=99) -> int:
     
 config['app_version'] = app_version
 
+# Transcript formats noScribe can write: extension -> description. Used both for
+# the file type list of the save dialog and for the format dialog of a batch, so
+# the user sees the same names everywhere.
+OUTPUT_FILETYPES = {
+    'html': 'noScribe Transcript',
+    'txt': 'Text only',
+    'vtt': 'WebVTT Subtitles (also for EXMARaLDA)',
+}
+
 def save_config():
     with open(config_file, 'w') as file:
         yaml.safe_dump(config, file)
@@ -1990,6 +1999,66 @@ class App(ctk.CTk):
             log_msg += f'\n{fn}'
         self.logn(log_msg)
 
+    def set_output_filetype(self, file_ext):
+        """Remember the transcript format. `default_filetype` is used to generate
+        transcript names, `last_filetype` preselects the save dialog; they must
+        stay in sync. Returns False for unsupported extensions."""
+        file_ext = (file_ext or '').lstrip('.').lower()
+        if file_ext not in OUTPUT_FILETYPES:
+            return False
+        config['default_filetype'] = file_ext
+        config['last_filetype'] = file_ext
+        return True
+
+    def ask_output_format(self):
+        """Ask which format the transcripts of a batch should have.
+
+        For a single file the format is part of the save dialog, but a batch
+        only gets a folder picker, so the format would silently stay at the
+        previous value. This small dialog fills that gap. Returns the chosen
+        extension, or None if the user cancelled.
+        """
+        if getattr(self, '_headless', False):
+            return None
+        current = config.get('last_filetype', 'html')
+        if current not in OUTPUT_FILETYPES:
+            current = 'html'
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title('noScribe')
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        chosen = {}
+
+        # Same names as the file type list of the save dialog, e.g.
+        # "WebVTT Subtitles (also for EXMARaLDA) (.vtt)".
+        labels = {f'{desc} (.{ext})': ext for ext, desc in OUTPUT_FILETYPES.items()}
+        current_label = next(lbl for lbl, ext in labels.items() if ext == current)
+
+        ctk.CTkLabel(dlg, text=t('output_format_selection'), wraplength=400,
+                     justify='left').pack(padx=20, pady=(20, 15), anchor='w')
+        fmt_var = ctk.StringVar(value=current_label)
+        ctk.CTkOptionMenu(dlg, width=400, variable=fmt_var, anchor='w',
+                          values=list(labels)).pack(padx=20, pady=(0, 20), anchor='w')
+
+        def _confirm(event=None):
+            chosen['file_ext'] = labels.get(fmt_var.get())
+            dlg.destroy()
+
+        ctk.CTkButton(dlg, width=100, text='OK', command=_confirm).pack(padx=20, pady=(0, 20))
+        dlg.bind('<Return>', _confirm)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+        # center over the main window
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + max((self.winfo_width() - dlg.winfo_width()) // 2, 0)
+        y = self.winfo_rooty() + max((self.winfo_height() - dlg.winfo_height()) // 3, 0)
+        dlg.geometry(f'+{x}+{y}')
+        dlg.grab_set()
+        dlg.focus()
+        self.wait_window(dlg)
+        return chosen.get('file_ext')
+
     def button_audio_file_event(self):
         fn = tk.filedialog.askopenfilename(initialdir=os.path.dirname(self.audio_files_list[0] if len(self.audio_files_list) > 0 else ''), 
                                            initialfile=" ".join(f'"{os.path.basename(path)}"' for path in self.audio_files_list),  
@@ -2005,6 +2074,10 @@ class App(ctk.CTk):
                 self.button_audio_file_name.configure(text=os.path.basename(self.audio_files_list[0]))
             else:
                 self.button_audio_file_name.configure(text=t('multiple_audio_files'))
+                # A batch never opens the save dialog (which carries the format
+                # list), so ask once for the format of all transcripts here.
+                # Cancelling keeps the format of the previous run.
+                self.set_output_filetype(self.ask_output_format())
             self.create_default_transcript_names()
 
     def button_transcript_file_event(self):
@@ -2020,24 +2093,22 @@ class App(ctk.CTk):
             _initialfile = ''            
         if not ('last_filetype' in config):
             config['last_filetype'] = 'html'
-        filetypes = [
-            ('noScribe Transcript','*.html'), 
-            ('Text only','*.txt'),
-            ('WebVTT Subtitles (also for EXMARaLDA)', '*.vtt')
-        ]
+        filetypes = [(desc, f'*.{ext}') for ext, desc in OUTPUT_FILETYPES.items()]
         for i, ft in enumerate(filetypes):
             if ft[1] == f'*.{config["last_filetype"]}':
                 filetypes.insert(0, filetypes.pop(i))
                 break
         
         if len(self.audio_files_list) > 1:
-            # multiple audio files, select an output directory
+            # multiple audio files, select an output directory ...
             tk.messagebox.showinfo(title='noScribe', message=t('output_dir_selection'))
             dir = tk.filedialog.askdirectory(title="noScribe", initialdir=_initialdir)
-            if dir:
-                self.create_default_transcript_names(dir)
-            else:
+            if not dir:
                 return
+            # ... and the output format as a second step (a folder picker has no
+            # file type list). Cancelling keeps the current format.
+            self.set_output_filetype(self.ask_output_format())
+            self.create_default_transcript_names(dir)
         else:
             # single audio file, select an output file name
             fn = tk.filedialog.asksaveasfilename(initialdir=_initialdir, initialfile=_initialfile, 
@@ -2045,12 +2116,11 @@ class App(ctk.CTk):
                                                 defaultextension=config['last_filetype'])
             if fn:
                 file_ext = os.path.splitext(fn)[1][1:].lower()
-                if not file_ext in ['html', 'txt', 'vtt']:
+                if not self.set_output_filetype(file_ext):
                     tk.messagebox.showerror(title='noScribe', message=t('err_unsupported_output_format', file_type=file_ext))
                     return                    
                 self.transcript_files_list = [fn]
                 self.button_transcript_file_name.configure(text=os.path.basename(fn))
-                config['last_filetype'] = file_ext
             else:
                 return
         

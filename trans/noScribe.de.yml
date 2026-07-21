@@ -32,6 +32,7 @@ de:
   label_transcript_file: 'Transkript speichern unter:'
   label_transcript_file_name: <Dateinamen auswählen> 
   output_dir_selection: 'Mehrere Audiodateien: Bitte einen Ordner wählen, in dem die Transkripte gespeichert werden. Die Dateinamen werden automatisch erzeugt.'
+  output_format_selection: 'Mehrere Audiodateien: Wählen Sie das Ausgabeformat für alle Transkripte.'
 
   label_start: 'Start (hh:mm:ss): '
   label_stop: 'Stop (hh:mm:ss): ' 

@@ -32,6 +32,7 @@ pt:
   label_transcript_file: 'Salvar transcrição como:'
   label_transcript_file_name: <selecionar nome de arquivo> 
   output_dir_selection: 'Vários arquivos de áudio: selecione um diretório onde as transcrições serão salvas. Os nomes serão gerados automaticamente.'
+  output_format_selection: 'Vários arquivos de áudio: selecione o formato de saída para todas as transcrições.'
 
   label_start: 'Início (hh:mm:ss): '
   label_stop: 'Parar (hh:mm:ss): ' 

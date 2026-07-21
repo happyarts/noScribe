@@ -33,6 +33,7 @@ en:
   label_transcript_file: 'Save transcript as:'
   label_transcript_file_name: <select filename> 
   output_dir_selection: 'Multiple audio files: Select a directory where the transcripts should be saved. The names will be generated automatically.'  
+  output_format_selection: 'Multiple audio files: Select the output format for all transcripts.'
 
   label_start: 'Start (hh:mm:ss):'
   label_stop: 'Stop (hh:mm:ss):' 
