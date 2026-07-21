@@ -39,6 +39,9 @@ it:
   label_language: 'Lingua:'
   label_speaker: 'Rilevamento degli speaker:'
   label_whisper_model: 'Modello:'
+  voxtral_path_long: 'Motore Voxtral: trascrizione con marche temporali per parola (allineamento forzato).'
+  voxtral_path_short: 'Motore Voxtral: trascrizione rapida senza marche temporali.'
+  voxtral_no_disfluencies: 'Nota: il motore Voxtral non supporta l''opzione disfluenze; gli intercalari vengono trascritti come il modello li sente.'
   label_add_custom_models: 'Aggiungi modello AI...'
   label_overlapping: 'Discorso sovrapposto:'
   label_pause: 'Segna le pause:'
@@ -87,6 +90,7 @@ it:
   start_canceling: 'Annullamento in corso... (attendere un secondo)'
   start_transcription: 'Trascrizione in corso...'
   loading_whisper: 'Caricamento di whisper'
+  loading_voxtral: 'Caricamento di Voxtral'
   pyannote_cuda_retry: 'Rilevato errore CUDA di PyAnnote. Riprovo sulla CPU.'
   whisper_cuda_retry: 'Rilevato errore CUDA di Whisper. Riprovo sulla CPU.'
   vad: "Rilevamento dell'attività vocale..."

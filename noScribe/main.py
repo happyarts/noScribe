@@ -916,6 +916,11 @@ def _init_app_state(app):
                        'See here for more information: https://github.com/kaixxx/noScribe/wiki/Add-custom-Whisper-models-for-transcription')
 
     app.queue = TranscriptionQueue()
+    # Maps each decorated picker label back to its plain model name, so the
+    # selected model is recovered by lookup rather than by string-splitting the
+    # display label on a separator (see model_key). Rebuilt whenever the dropdown
+    # is populated.
+    app._model_label_to_name = {}
     app.audio_files_list = []
     app.transcript_files_list = []
     app.log_file = None
@@ -933,6 +938,39 @@ def _init_app_state(app):
     # Get a list of available Whisper models.
     tmp = transcription.WhisperModelManager(app.user_models_dir)
     app.whisper_models = tmp.get_installed_models()
+
+    _register_voxtral_models(app)
+
+
+def _register_voxtral_models(app):
+    """Add the Voxtral engine as additional model choices (Apple Silicon only,
+    where mlx-voxtral runs on the GPU). Called at startup and again when the
+    model dropdown opens, so a build converted while the app is running
+    (tools/quantize_voxtral.py) appears without a restart."""
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return
+    try:
+        from noScribe import voxtral_engine
+        if voxtral_engine.is_available():
+            for _name, _repo in voxtral_engine.VOXTRAL_MODELS.items():
+                # Skip a (hypothetical future) local-only entry whose build is not
+                # present yet. Shipped builds download on first use, so this is
+                # currently always true for them.
+                if not voxtral_engine.has_local_build(_name):
+                    continue
+                resolved = voxtral_engine.resolve_model(_name, _repo)
+                existing = app.whisper_models.get(_name)
+                # (Re)register when new, or when the resolved repo changed -- e.g.
+                # a build converted mid-session (tools/quantize_voxtral.py) flips
+                # the resolved repo from the HF id to the now-present local path,
+                # so it is picked up on the next dropdown open without a restart
+                # (as this function's docstring promises).
+                if existing is None or getattr(existing, "repo", None) != resolved:
+                    app.whisper_models[_name] = transcription.WhisperModel(
+                        name=_name, path=Path(_name), engine="voxtral",
+                        repo=resolved)
+    except Exception as e:
+        logger.warning("Could not register Voxtral engine: %s", e)
 
 
 class App(ctk.CTk):
@@ -1069,7 +1107,15 @@ class App(ctk.CTk):
 
             def _clicked(self, event=0):
                 self.old_value = self.get()
-                self._values = list(self.noScribe_parent.whisper_models.keys())
+                # Pick up models that appeared since startup (e.g. a Voxtral
+                # build converted while the app is running).
+                _register_voxtral_models(self.noScribe_parent)
+                names = list(self.noScribe_parent.whisper_models.keys())
+                self._values = [self.noScribe_parent.model_label(n) for n in names]
+                # Remember label -> name so the selection is recovered by lookup,
+                # not by splitting the label on MODEL_LABEL_SEP.
+                self.noScribe_parent._model_label_to_name = dict(
+                    zip(self._values, names))
                 self._values.append('--------------------')
                 self._values.append(t('label_add_custom_models'))
                 self._dropdown_menu.configure(values=self._values)
@@ -2182,8 +2228,49 @@ class App(ctk.CTk):
                     if hasattr(row['frame'], 'set_progress'):
                         row['frame'].set_progress(progr)
 
+    MODEL_LABEL_SEP = '   ·   '
+
+    def model_label(self, name):
+        """Model name plus the RAM it needs.
+
+        Choosing a model that does not fit does not merely run slowly: the
+        machine starts swapping and the run stops making progress, which is
+        impossible to diagnose from the outside. Showing the requirement at the
+        point of choice is the cheapest way to prevent that.
+        """
+        model = self.whisper_models.get(name)
+        if getattr(model, 'engine', 'whisper') != 'voxtral':
+            return name
+        try:
+            from noScribe import voxtral_engine
+            need = voxtral_engine.min_ram_gb(getattr(model, 'repo', name))
+            total = voxtral_engine._total_ram_gb()
+            mark = '' if need <= total else '  ⚠'
+            return f'{name}{self.MODEL_LABEL_SEP}{need:.0f} GB RAM{mark}'
+        except Exception as e:
+            # Degrade to the bare name rather than break the picker, but leave a
+            # trail: the RAM hint (and its ⚠ overfit marker) is a memory-safety
+            # cue, so its silent absence would otherwise be undiagnosable.
+            logger.warning("Could not compute RAM hint for model %r: %s", name, e)
+            return name
+
+    def model_key(self, label):
+        """Plain model name from a decorated picker entry.
+
+        Prefers the label->name map built when the dropdown was populated, so a
+        model name that happens to contain the separator is still recovered
+        exactly. Falls back to splitting on MODEL_LABEL_SEP for values that never
+        passed through the dropdown (e.g. a plain name restored at startup, which
+        has no separator and so returns unchanged)."""
+        if not label:
+            return label
+        mapped = self._model_label_to_name.get(label)
+        if mapped is not None:
+            return mapped
+        return label.split(self.MODEL_LABEL_SEP)[0].strip()
+
     def collect_transcription_options(self) -> TranscriptionQueue:
-        """Collect all transcription options from UI and config and creates a 
+        """Collect all transcription options from UI and config and creates a
         TranscriptionQueue for each audio file"""
         # Validate required inputs
         if len(self.audio_files_list) == 0:
@@ -2204,7 +2291,7 @@ class App(ctk.CTk):
             stop_time = utils.str_to_ms(val)
         
         # Get whisper model path
-        sel_whisper_model = self.option_menu_whisper_model.get()
+        sel_whisper_model = self.model_key(self.option_menu_whisper_model.get())
         if sel_whisper_model not in self.whisper_models:
             raise FileNotFoundError(f"The whisper model '{sel_whisper_model}' does not exist.")
         queue = TranscriptionQueue()
@@ -2360,6 +2447,7 @@ class App(ctk.CTk):
             if job.stop > 0:
                 option_info += f'{t("label_stop")} {utils.ms_to_str(job.stop)} | '.replace(':', '꞉')
             option_info += f'{t("label_language")} {job.language_name} ({languages[job.language_name]}) | '
+            option_info += f'{t("label_whisper_model")} {getattr(job.whisper_model, "name", None) or str(job.whisper_model)} | '
             option_info += f'{t("label_speaker")} {job.speaker_detection} | '
             option_info += f'{t("label_overlapping")} {job.overlapping} | '
             option_info += f'{t("label_timestamps")} {job.timestamps} | '
@@ -2566,7 +2654,10 @@ class App(ctk.CTk):
 
                 self.logn()
                 self.logn(t('start_transcription'), 'highlight')
-                self.logn(t('loading_whisper'))
+                if getattr(job.whisper_model, "engine", "whisper") == "voxtral":
+                    self.logn(t('loading_voxtral'))
+                else:
+                    self.logn(t('loading_whisper'))
 
                 info = None
                 transcription_success = False
@@ -2857,7 +2948,10 @@ class App(ctk.CTk):
                             pass
                     
                     try:
-                        info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)
+                        if getattr(job.whisper_model, "engine", "whisper") == "voxtral":
+                            info = self._run_voxtral_subprocess_stream(tmp_audio_file, job, on_segment)
+                        else:
+                            info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)
                         transcription_success = True
                         # if self.cancel:
                         #    raise Exception(t('err_user_cancelation')) 
@@ -2867,7 +2961,13 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn(t('transcription_finished'), 'highlight')
                     except Exception as err:
-                        if self._handle_cuda_fallback('whisper', err):
+                        # The CUDA-on-CPU fallback only applies to the Whisper
+                        # (faster-whisper / CTranslate2) backend; Voxtral runs on
+                        # MLX and has no CUDA path, so a Voxtral error must
+                        # propagate rather than trigger a misleading "retry
+                        # Whisper on CPU" prompt and a pointless identical retry.
+                        engine = getattr(job.whisper_model, "engine", "whisper")
+                        if engine == "whisper" and self._handle_cuda_fallback('whisper', err):
                             retry_cuda = True
                         else:
                             raise
@@ -2981,48 +3081,16 @@ class App(ctk.CTk):
 
         return False
 
-    def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
-        """Spawn a subprocess to run Faster-Whisper and stream segments.
-        Calls on_segment(dict) for each segment streamed by the child.
-        Returns a simple info object (duration at least).
+    def _run_engine_subprocess_stream(self, entrypoint, args, job, on_segment):
+        """Spawn a transcription worker subprocess and pump its message queue.
+
+        Shared by the Whisper and Voxtral engines: streams log/progress/segment
+        messages back to the GUI, honors cancel, tears the child down reliably
+        and returns a simple info object (duration at least).
         """
-        global force_whisper_cpu
-        # Language code for non-auto/multilingual
-        language_code = None
-        if job.language_name not in ('Auto', 'Multilingual'):
-            try:
-                language_code = languages[job.language_name]
-            except Exception:
-                language_code = None
-
-        # VAD threshold from config
-        try:
-            vad_threshold = float(config.get('voice_activity_detection_threshold', '0.5'))
-        except Exception:
-            vad_threshold = 0.5
-
-        args = {
-            "whisper_model": job.whisper_model,
-            "device": 'cpu' if force_whisper_cpu else 'auto',
-            "compute_type": job.whisper_compute_type,
-            "cpu_threads": number_threads,
-            "local_files_only": True,
-            "audio_path": tmp_audio_file,
-            "language_name": job.language_name,
-            "language_code": language_code,
-            "disfluencies": job.disfluencies,
-            "beam_size": 5,
-            "word_timestamps": True,
-            "vad_filter": True,
-            "vad_threshold": vad_threshold,
-            "locale": config.get("locale", "en"),
-        }
-
-        # Spawn child process using spawn start method
         ctx = mp.get_context("spawn")
         q = ctx.Queue()
-        from .whisper_mp_worker import whisper_proc_entrypoint
-        proc = ctx.Process(target=whisper_proc_entrypoint, args=(args, q))
+        proc = ctx.Process(target=entrypoint, args=(args, q))
         proc.start()
         # Expose to allow cancel to terminate the child
         self._mp_proc = proc
@@ -3058,7 +3126,6 @@ class App(ctk.CTk):
                         self.logn(txt)
                 elif mtype == "progress":
                     pct = msg.get("pct")
-                    detail = msg.get("detail")
                     try:
                         if pct is not None:
                             self.set_progress(3, float(pct), job.speaker_detection)
@@ -3068,7 +3135,7 @@ class App(ctk.CTk):
                     seg = msg.get("segment") or {}
                     try:
                         on_segment(seg)
-                    except Exception as e:
+                    except Exception:
                         # If on_segment fails, stop child and raise
                         try:
                             proc.terminate()
@@ -3114,8 +3181,117 @@ class App(ctk.CTk):
             __slots__ = ("duration",)
             def __init__(self, d):
                 self.duration = d.get('duration')
-        info_obj = _Info(info or {})
-        return info_obj
+        return _Info(info or {})
+
+    @staticmethod
+    def _job_language_code(job):
+        """The ISO code for a job's language, or None for Auto/Multilingual or an
+        unmapped name. Shared by both engine paths so they never diverge on the
+        sentinel set or the lookup fallback."""
+        if job.language_name in ('Auto', 'Multilingual'):
+            return None
+        try:
+            return languages[job.language_name]
+        except Exception:
+            return None
+
+    def _run_voxtral_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
+        """Spawn a subprocess to run the Voxtral engine and stream segments.
+
+        Word/segment timestamps are only computed (via forced alignment, the
+        slower "long path") when the output can carry timing: .html/.vtt files
+        embed audio-sync anchors, so only a plain .txt transcript without
+        timestamps, speaker detection or pause marking may take the fast
+        text-only "short path" (whose segment times are approximations).
+        """
+        language_code = self._job_language_code(job)
+
+        need_timestamps = bool(
+            job.file_ext != 'txt'
+            or job.timestamps
+            or (job.speaker_detection and job.speaker_detection != 'none')
+            or (job.pause and job.pause > 0)
+        )
+        self.logn(t('voxtral_path_long') if need_timestamps else t('voxtral_path_short'),
+                  where='file')
+        if job.disfluencies:
+            # Voxtral has no prompt/hotword hook, so the disfluencies option
+            # cannot steer it; say so instead of silently ignoring the setting.
+            self.logn(t('voxtral_no_disfluencies'), where='file')
+
+        from noScribe import transcript_corrections
+        corrections_path = transcript_corrections.ensure_default_file(config_dir)
+
+        # 0 (default) -> engine sizes each pass from available RAM; set a
+        # positive value in config.yml to pin the per-pass length in seconds.
+        # Config values may come back as strings, so coerce defensively.
+        try:
+            chunk_sec = float(get_config('voxtral_chunk_sec', 0) or 0)
+        except (TypeError, ValueError):
+            chunk_sec = 0
+        # Same defensive coercion as chunk_sec: a value written as a YAML string
+        # ("0", "high") would otherwise either slip a truthy "0" through (losing
+        # the whole safety reserve -> swap) or raise ValueError deep in the
+        # engine and abort the job.
+        try:
+            ram_reserve_gb = float(get_config('voxtral_ram_reserve_gb', 0) or 0)
+        except (TypeError, ValueError):
+            ram_reserve_gb = 0
+
+        args = {
+            "audio_path": tmp_audio_file,
+            "language_code": language_code,
+            "need_timestamps": need_timestamps,
+            "voxtral_repo": getattr(job.whisper_model, "repo", None),
+            "chunk_sec": chunk_sec or None,
+            "corrections_path": corrections_path,
+            # Forward-compat: speaker-name normalization activates only once a
+            # job actually carries speaker_names. That wiring lives in the
+            # separate speaker-names feature; on this branch job.speaker_names is
+            # never set, so apply_name_corrections stays dormant by design.
+            "speaker_names": getattr(job, "speaker_names", None),
+            # 0 -> engine default; set voxtral_ram_reserve_gb in config.yml to
+            # allow longer passes when nothing else runs on the machine.
+            "ram_reserve_gb": ram_reserve_gb or None,
+        }
+
+        from .voxtral_mp_worker import voxtral_proc_entrypoint
+        return self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)
+
+    def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
+        """Spawn a subprocess to run Faster-Whisper and stream segments.
+        Calls on_segment(dict) for each segment streamed by the child.
+        Returns a simple info object (duration at least).
+        """
+        global force_whisper_cpu
+        # Language code for non-auto/multilingual
+        language_code = self._job_language_code(job)
+
+        # VAD threshold from config
+        try:
+            vad_threshold = float(config.get('voice_activity_detection_threshold', '0.5'))
+        except Exception:
+            vad_threshold = 0.5
+
+        args = {
+            "whisper_model": job.whisper_model,
+            "device": 'cpu' if force_whisper_cpu else 'auto',
+            "compute_type": job.whisper_compute_type,
+            "cpu_threads": number_threads,
+            "local_files_only": True,
+            "audio_path": tmp_audio_file,
+            "language_name": job.language_name,
+            "language_code": language_code,
+            "disfluencies": job.disfluencies,
+            "beam_size": 5,
+            "word_timestamps": True,
+            "vad_filter": True,
+            "vad_threshold": vad_threshold,
+            "locale": config.get("locale", "en"),
+        }
+
+        from .whisper_mp_worker import whisper_proc_entrypoint
+        return self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)
 
     def _run_diarize_subprocess(self, tmp_audio_file: str, job):
         """Spawn a subprocess to run diarization and return list of segments.
@@ -3270,7 +3446,7 @@ class App(ctk.CTk):
         try:
             config['last_language'] = self.option_menu_language.get()
             config['last_speaker'] = self.option_menu_speaker.get()
-            config['last_whisper_model'] = self.option_menu_whisper_model.get()
+            config['last_whisper_model'] = self.model_key(self.option_menu_whisper_model.get())
             config['last_pause'] = self.option_menu_pause.get()
             config['last_overlapping'] = self.check_box_overlapping.get()
             config['last_timestamps'] = self.check_box_timestamps.get()
