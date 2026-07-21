@@ -565,7 +565,9 @@ def parse_speaker_names(speaker_names):
     first appearance in the audio. Characters that would corrupt the
     `ts_{start}_{end}_{speaker}` audio-sync anchors (underscores split the
     anchor's field separator; quotes/angle brackets break its HTML attribute)
-    are replaced or removed.
+    are replaced or removed, and a colon is dropped because it is the
+    "Name: text" label separator (a name containing it would defeat the VTT
+    speaker-line stripping in utils.html_to_webvtt).
     """
     if not speaker_names:
         return []
@@ -574,7 +576,7 @@ def parse_speaker_names(speaker_names):
     names = []
     for n in speaker_names:
         n = (n or '').replace('_', ' ')
-        n = re.sub(r'[<>"&]', '', n)
+        n = re.sub(r'[<>"&:]', '', n)
         n = re.sub(r'\s+', ' ', n).strip()
         if n:
             names.append(n)
@@ -950,6 +952,11 @@ def _init_app_state(app):
     # display label on a separator (see model_key). Rebuilt whenever the dropdown
     # is populated.
     app._model_label_to_name = {}
+    # Per-job speaker-name mapping state. Reset at the start of each job in
+    # transcription_worker; declared here too so _apply_speaker_name never
+    # depends on that reset having run (avoids a latent AttributeError).
+    app._speaker_name_map = {}
+    app._speaker_name_overflow_warned = False
     app.audio_files_list = []
     app.transcript_files_list = []
     app.log_file = None
@@ -2313,6 +2320,11 @@ class App(ctk.CTk):
     def _on_speaker_detection_changed(self, value=None):
         """Show the speaker-names field only when speaker detection is active.
         With detection off ('none') there are no speakers to map names to."""
+        # Wired as the option-menu `command`, which is set before the names
+        # widgets are created; guard against an early callback (a customtkinter
+        # version that fires `command` on `.set()`) rather than AttributeError.
+        if not hasattr(self, 'entry_speaker_names'):
+            return
         if self.option_menu_speaker.get() == 'none':
             self.label_speaker_names.grid_remove()
             self.entry_speaker_names.grid_remove()
@@ -2380,7 +2392,7 @@ class App(ctk.CTk):
         appear, so the first person heard gets the first name — regardless of
         whether the diarization starts numbering at S00 or S01.
         """
-        names = getattr(job, 'speaker_names', None)
+        names = job.speaker_names
         if not speaker or not names:
             return speaker
         overlapping = speaker.startswith('//')
@@ -2399,7 +2411,7 @@ class App(ctk.CTk):
                 # "auto" (the count is only known now), so note it in the log
                 # once — non-modal, so it never interrupts an unattended run.
                 mapping[base] = base
-                if not getattr(self, '_speaker_name_overflow_warned', False):
+                if not self._speaker_name_overflow_warned:
                     self.logn()
                     self.logn(t('warn_speaker_names_more_speakers', n_names=len(names)), 'error')
                     self._speaker_name_overflow_warned = True
@@ -2794,7 +2806,8 @@ class App(ctk.CTk):
                     p = d.createElement('p')
                     main_body.appendChild(p)
 
-                    speaker = ''
+                    speaker = ''          # raw diarization label (identity)
+                    speaker_disp = ''     # mapped user name (display / anchor)
                     prev_speaker = ''
                     last_auto_save = datetime.datetime.now()
 
@@ -2894,7 +2907,7 @@ class App(ctk.CTk):
                     self._speaker_name_overflow_warned = False
 
                     def on_segment(seg):
-                        nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, prev_speaker
+                        nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
                         # Map dict to simple object-like for existing code
                         class _Seg:
                             __slots__ = ("start", "end", "text", "words")
@@ -2934,7 +2947,7 @@ class App(ctk.CTk):
                             orig_audio_start_pause = job.start + last_segment_end
                             orig_audio_end_pause = job.start + start
                             a = d.createElement('a')
-                            a.name = f'ts_{orig_audio_start_pause}_{orig_audio_end_pause}_{speaker}'
+                            a.name = f'ts_{orig_audio_start_pause}_{orig_audio_end_pause}_{speaker_disp}'
                             a.appendText(pause_str)
                             p.appendChild(a)
                             self.log(pause_str)
@@ -2949,16 +2962,24 @@ class App(ctk.CTk):
                         seg_html = html.escape(seg_text, quote=False)
 
                         if job.speaker_detection != 'none':
+                            # Speaker *identity* (change detection, overlap marker)
+                            # is decided on the raw diarization label; the mapped
+                            # user name is only for display. Keeping them apart
+                            # means two speakers who were given the same name still
+                            # start separate paragraphs, and a name that happens to
+                            # begin with "//" is not mistaken for the overlap marker.
                             new_speaker = find_speaker(diarization, start, end)
-                            new_speaker = self._apply_speaker_name(new_speaker, job)
+                            new_speaker_disp = self._apply_speaker_name(new_speaker, job)
                             if (speaker != new_speaker) and (new_speaker != ''): # speaker change
                                 if new_speaker[:2] == '//': # is overlapping speech, create no new paragraph
                                     prev_speaker = speaker
                                     speaker = new_speaker
-                                    seg_text = f' {speaker}:{seg_text}'
-                                    seg_html = html.escape(seg_text, quote=False)                                
-                                elif (speaker[:2] == '//') and (new_speaker == prev_speaker): # was overlapping speech and we are returning to the previous speaker 
+                                    speaker_disp = new_speaker_disp
+                                    seg_text = f' {speaker_disp}:{seg_text}'
+                                    seg_html = html.escape(seg_text, quote=False)
+                                elif (speaker[:2] == '//') and (new_speaker == prev_speaker): # was overlapping speech and we are returning to the previous speaker
                                     speaker = new_speaker
+                                    speaker_disp = new_speaker_disp
                                     seg_text = f'//{seg_text}'
                                     seg_html = html.escape(seg_text, quote=False)
                                 else: # new speaker, not overlapping
@@ -2975,18 +2996,19 @@ class App(ctk.CTk):
                                         self.logn()
                                         self.logn()
                                     speaker = new_speaker
+                                    speaker_disp = new_speaker_disp
                                     # add timestamp
                                     if job.timestamps:
-                                        seg_html = f'{speaker}: <span style="color: {job.timestamp_color}" >{ts}</span>{html.escape(seg_text, quote=False)}'
-                                        seg_text = f'{speaker}: {ts}{seg_text}'
+                                        seg_html = f'{speaker_disp}: <span style="color: {job.timestamp_color}" >{ts}</span>{html.escape(seg_text, quote=False)}'
+                                        seg_text = f'{speaker_disp}: {ts}{seg_text}'
                                         last_timestamp_ms = start
                                     else:
                                         if job.file_ext != 'vtt': # in vtt files, speaker names are added as special voice tags so skip this here
-                                            seg_text = f'{speaker}:{seg_text}'
+                                            seg_text = f'{speaker_disp}:{seg_text}'
                                             seg_html = html.escape(seg_text, quote=False)
                                         else:
                                             seg_html = html.escape(seg_text, quote=False).lstrip()
-                                            seg_text = f'{speaker}:{seg_text}'
+                                            seg_text = f'{speaker_disp}:{seg_text}'
                                         
                             else: # same speaker
                                 if job.timestamps:
@@ -3010,7 +3032,7 @@ class App(ctk.CTk):
                                 seg_html = seg_html.lstrip()
 
                         # Create bookmark with audio timestamps start to end and add the current segment.
-                        a_html = f'<a name=\"ts_{orig_audio_start}_{orig_audio_end}_{speaker}\" >{seg_html}</a>'
+                        a_html = f'<a name=\"ts_{orig_audio_start}_{orig_audio_end}_{speaker_disp}\" >{seg_html}</a>'
                         a = d.createElementFromHTML(a_html)
                         p.appendChild(a)
 
@@ -3095,13 +3117,15 @@ class App(ctk.CTk):
     def create_job(self, enqueue=False):
         try:
             # A fixed speaker count is known up front and the user is present at
-            # Start / Add-to-queue, so ask before proceeding if the number of
-            # names does not match — silently mis-assigning names is worse than a
-            # quick confirmation. With "auto" the count is not known yet, so that
-            # case is only noted in the log at runtime (see _apply_speaker_name).
+            # Start / Add-to-queue. Entering names is optional (leaving the field
+            # empty just keeps the S01/S02 labels), but IF names are given their
+            # count must match the speaker count, else they would be mis-assigned
+            # — so ask only when names were entered and the count disagrees. With
+            # "auto" the count is not known yet, so that case is only noted in the
+            # log at runtime (see _apply_speaker_name).
             speaker_sel = self.option_menu_speaker.get()
             speaker_names = parse_speaker_names(self.entry_speaker_names.get())
-            if speaker_sel.isdigit() and len(speaker_names) != int(speaker_sel):
+            if speaker_names and speaker_sel.isdigit() and len(speaker_names) != int(speaker_sel):
                 if not tk.messagebox.askyesno(title='noScribe', message=t(
                         'ask_speaker_names_count',
                         n_names=len(speaker_names), n_speakers=speaker_sel)):
