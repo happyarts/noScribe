@@ -294,7 +294,10 @@ def html_to_webvtt(html_string: str) -> str:
                 tmp = None
                 for item in attrs:
                     if item[0] == "name" and item[1].startswith("ts_"):
-                        tmp = item[1].split("_")
+                        # Anchor format: ts_{start}_{end}_{speaker}. Limit the
+                        # split so a speaker name that itself contains an
+                        # underscore is not truncated.
+                        tmp = item[1].split("_", 3)
                         break
 
                 if tmp is None:
