@@ -2543,6 +2543,7 @@ class App(ctk.CTk):
             if job.stop > 0:
                 option_info += f'{t("label_stop")} {utils.ms_to_str(job.stop)} | '.replace(':', '꞉')
             option_info += f'{t("label_language")} {job.language_name} ({languages[job.language_name]}) | '
+            option_info += f'{t("label_whisper_model")} {getattr(job.whisper_model, "name", None) or str(job.whisper_model)} | '
             option_info += f'{t("label_speaker")} {job.speaker_detection} | '
             if job.speaker_names:
                 option_info += f'{t("label_speaker_names")}: {", ".join(job.speaker_names)} | '
