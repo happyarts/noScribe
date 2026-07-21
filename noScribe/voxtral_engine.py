@@ -18,6 +18,7 @@ shape-compatible with what `whisper_mp_worker` streams to the main app:
 Long files are processed in chunks so memory and model context stay bounded.
 """
 
+import functools
 import importlib.resources as impres
 import logging
 import os
@@ -220,10 +221,10 @@ def max_safe_chunk_sec(repo):
     Raises MemoryError when even the shortest pass (HARD_MIN_CHUNK_SEC) cannot
     fit -- proceeding would not fail, it would swap forever.
     """
-    m = MEM_MODEL[_model_kind(repo)]
+    kind = _model_kind(repo)
+    m = MEM_MODEL[kind]
     total = _total_ram_gb()
     if total < min_ram_gb(repo):
-        kind = _model_kind(repo)
         est = m["fixed"] + m["slope"] * HARD_MIN_CHUNK_SEC
         raise MemoryError(
             f"Voxtral {kind} needs about {est:.0f} GB even for its shortest "
@@ -240,6 +241,30 @@ def resolve_align_model(language):
     multilingual aligner for None/"auto"/"multilingual"/unmapped languages."""
     code = (language or "").strip().lower()[:2]
     return ALIGN_MODELS.get(code, ALIGN_MODEL_MULTILINGUAL)
+
+
+def _frame_energy(window, frame):
+    """Per-frame mean squared amplitude of `window` in `frame`-sample blocks --
+    the energy curve used to find quiet spots. Trailing samples that don't fill
+    a whole frame are dropped."""
+    import numpy as np
+    nf = len(window) // frame
+    return (window[:nf * frame].reshape(nf, frame).astype(np.float32) ** 2).mean(axis=1)
+
+
+def _quietest_frame_near(audio, target, radius_sec):
+    """Sample index of the quietest 100 ms frame within +/- `radius_sec` of
+    `target`, so a cut lands in a pause rather than mid-word. Returns `target`
+    unchanged when the search window is too small to snap."""
+    frame = max(1, int(0.1 * SAMPLE_RATE))
+    lo = max(frame, target - int(radius_sec * SAMPLE_RATE))
+    hi = min(len(audio) - frame, target + int(radius_sec * SAMPLE_RATE))
+    if hi - lo <= frame:
+        return target
+    window = audio[lo:hi]
+    if len(window) // frame < 2:
+        return target
+    return lo + int(_frame_energy(window, frame).argmin()) * frame + frame // 2
 
 
 def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
@@ -285,7 +310,7 @@ def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
         else:
             window = audio[lo:hi]
             nf = len(window) // frame
-            energy = (window[:nf * frame].reshape(nf, frame).astype(np.float32) ** 2).mean(axis=1)
+            energy = _frame_energy(window, frame)
             # frames below 15% of the typical speech level count as "silence"
             thresh = float(np.percentile(energy, 75)) * 0.15 + 1e-9
             silent = energy <= thresh
@@ -389,20 +414,7 @@ def _looks_degenerate(text):
 def _quietest_split(audio):
     """Sample index nearest the middle that sits in the quietest 100 ms frame,
     so a pass is never split in the middle of a word."""
-    import numpy as np
-    n = len(audio)
-    mid = n // 2
-    frame = max(1, int(0.1 * SAMPLE_RATE))
-    lo = max(frame, mid - int(5 * SAMPLE_RATE))
-    hi = min(n - frame, mid + int(5 * SAMPLE_RATE))
-    if hi - lo <= frame:
-        return mid
-    window = audio[lo:hi]
-    nf = len(window) // frame
-    if nf < 2:
-        return mid
-    energy = (window[:nf * frame].reshape(nf, frame).astype(np.float32) ** 2).mean(axis=1)
-    return lo + int(energy.argmin()) * frame + frame // 2
+    return _quietest_frame_near(audio, len(audio) // 2, 5.0)
 
 
 def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0):
@@ -469,8 +481,14 @@ def _model_kind(repo):
     return "small6" if ("6bit" in name or "6-bit" in name) else "small"
 
 
+@functools.lru_cache(maxsize=None)
 def _total_ram_gb():
-    """Total physical RAM in GB (sysctl on macOS; psutil fallback; else 16)."""
+    """Total physical RAM in GB (sysctl on macOS; psutil fallback; else 16).
+
+    Cached: total RAM is a process constant, but this is queried once per model
+    on every model-dropdown open (via App.model_label) and again during a job,
+    so without the cache each call would spawn a `sysctl` subprocess for a value
+    that never changes."""
     try:
         import subprocess
         return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip()) / 1024**3
@@ -529,8 +547,12 @@ def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
 _SENT_SPLIT = re.compile(r"[^.!?]+[.!?]+|\S+$", re.UNICODE)
 
 
+@functools.lru_cache(maxsize=None)
 def is_available():
-    """True if the Voxtral backend and its dependencies can be imported."""
+    """True if the Voxtral backend and its dependencies can be imported.
+
+    Cached: the installed package set does not change mid-run, and this is
+    re-checked on every model-dropdown open (via _register_voxtral_models)."""
     import importlib.util
     return all(importlib.util.find_spec(m) is not None
                for m in ("mlx_voxtral", "transformers", "torchaudio", "soundfile"))
@@ -829,21 +851,14 @@ class _Aligner:
                      "end": full[i][1], "prob": full[i][2]} for i in range(n)]
 
         # Too dense: split words in half and audio at a nearby pause, recurse.
-        import numpy as np
         mid = max(1, len(words) // 2)
         first_chars = sum(len(w) for w in words[:mid]) + mid
         total_chars = sum(len(w) for w in words) + len(words)
         cut = int(len(audio) * first_chars / max(1, total_chars))
-        # snap the cut to the quietest 100 ms frame within +/- 3 s
+        # snap the cut to the quietest 100 ms frame within +/- 3 s, then keep it
+        # a valid interior split point
         fr = max(1, int(0.1 * SAMPLE_RATE))
-        lo = max(fr, cut - int(3 * SAMPLE_RATE))
-        hi = min(len(audio) - fr, cut + int(3 * SAMPLE_RATE))
-        if hi - lo > fr:
-            w = audio[lo:hi]
-            nf = len(w) // fr
-            if nf > 1:
-                e = (w[:nf * fr].reshape(nf, fr).astype(np.float32) ** 2).mean(axis=1)
-                cut = lo + int(e.argmin()) * fr + fr // 2
+        cut = _quietest_frame_near(audio, cut, 3.0)
         cut = min(max(cut, fr), len(audio) - fr)
         left = self.align_words(words[:mid], audio[:cut], t_offset, depth + 1)
         right = self.align_words(words[mid:], audio[cut:],
