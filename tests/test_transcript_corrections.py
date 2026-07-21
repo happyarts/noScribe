@@ -186,7 +186,8 @@ def test_model_ram_hint_round_trips():
     import noScribe.main as m
     from noScribe import transcription, voxtral_engine as v
 
-    stub = SimpleNamespace(whisper_models={}, MODEL_LABEL_SEP=m.App.MODEL_LABEL_SEP)
+    stub = SimpleNamespace(whisper_models={}, MODEL_LABEL_SEP=m.App.MODEL_LABEL_SEP,
+                           _model_label_to_name={})
     stub.whisper_models["voxtral-mini-8bit"] = transcription.WhisperModel(
         name="voxtral-mini-8bit", path=None, engine="voxtral",
         repo="models/voxtral-mini-8bit")
@@ -194,10 +195,15 @@ def test_model_ram_hint_round_trips():
 
     label = m.App.model_label(stub, "voxtral-mini-8bit")
     assert "GB RAM" in label
-    assert m.App.model_key(label) == "voxtral-mini-8bit"
+    # As the dropdown does, remember the label -> name mapping.
+    stub._model_label_to_name = {label: "voxtral-mini-8bit"}
+    assert m.App.model_key(stub, label) == "voxtral-mini-8bit"
+    # A decorated label not in the map still round-trips via the separator split.
+    stub._model_label_to_name = {}
+    assert m.App.model_key(stub, label) == "voxtral-mini-8bit"
     # non-Voxtral models are shown unchanged
     assert m.App.model_label(stub, "precise") == "precise"
-    assert m.App.model_key("precise") == "precise"
+    assert m.App.model_key(stub, "precise") == "precise"
 
 
 def test_model_too_large_for_the_machine_is_refused():
@@ -351,3 +357,40 @@ def test_published_builds_are_offered(monkeypatch):
 
     monkeypatch.setattr(v, "_local_copy", lambda name: f"models/{name}")
     assert v.has_local_build("some-unbuilt-experiment")
+
+
+def test_split_sentences_keeps_unpunctuated_tail():
+    """A pass whose text does not end in . ! ? must keep ALL its words, not just
+    the last one. An earlier `\\S+$` fallback dropped everything between the last
+    period and the final token (silent transcript loss on the .txt path)."""
+    from noScribe.voxtral_engine import _split_sentences
+    assert _split_sentences("das ist ein test ohne punkt") == [
+        "das ist ein test ohne punkt"]
+    assert _split_sentences("Hallo. Wie geht es dir") == [
+        "Hallo.", "Wie geht es dir"]
+    # normal punctuated text is unchanged
+    assert _split_sentences("Ein Satz. Noch einer.") == ["Ein Satz.", "Noch einer."]
+
+
+def test_koelner_phonetik_no_crash_on_uncoded_word():
+    """h and j map to no Cologne code; a token of only those letters must return
+    '' rather than IndexError on out[0] (which aborted the whole name-correction
+    pass)."""
+    from noScribe.transcript_corrections import _koelner_phonetik
+    assert _koelner_phonetik("Jhh") == ""
+    assert _koelner_phonetik("hj") == ""
+    # a normal name still encodes
+    assert _koelner_phonetik("Hallo")
+
+
+def test_model_kind_unknown_is_conservative():
+    """An unrecognised build (no mini/small/size token) must fall back to the
+    most memory-hungry profile, never the cheap `mini` one -- under-sizing only
+    runs slower, over-sizing swaps forever."""
+    from noScribe.voxtral_engine import _model_kind
+    assert _model_kind("voxtral-mini-8bit") == "mini8"
+    assert _model_kind("voxtral-small-8bit") == "small8"
+    assert _model_kind("voxtral-small-4bit") == "small"
+    assert _model_kind("totally-unknown-build") == "small8"
+    # a 24B build that forgot the "small" token is still metered as big
+    assert _model_kind("my-voxtral-24b-8bit") == "small8"

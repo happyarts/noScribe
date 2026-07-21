@@ -135,6 +135,11 @@ def _koelner_phonetik(word):
             continue
         codes.append(c)
     out = "".join(codes)
+    if not out:
+        # Every letter was uncoded (h/j only, e.g. "Jhh") -> no phonetic code.
+        # Return "" rather than indexing out[0] into an empty string (IndexError
+        # that would otherwise abort the whole correction pass).
+        return ""
     out = re.sub(r"(.)\1+", r"\1", out)          # collapse repeats
     return out[0] + out[1:].replace("0", "")      # drop vowels except a leading one
 

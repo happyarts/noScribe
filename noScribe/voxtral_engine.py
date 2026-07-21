@@ -466,6 +466,10 @@ def _model_kind(repo):
     model and shrink its passes for no reason. The bit width matters as much as
     the parameter count: a 6-bit 24B build needs ~6 GB more than the 4-bit one,
     and mistaking one for the other would size passes too long and exhaust RAM.
+
+    A name with no recognisable size token falls back to the most conservative
+    (highest-RAM) profile, never the cheap `mini` one, so an unrecognised build
+    is sized safely-short rather than metered too generously and swapped.
     """
     name = os.path.basename(os.path.normpath(str(repo))).lower()
     eight = "8bit" in name or "8-bit" in name
@@ -474,11 +478,23 @@ def _model_kind(repo):
     # still fits (mini dense-encoder measured 6.35 GB fixed vs 6.0 for uniform
     # 8-bit -- within the mini8 entry). Classify by parameter count and bit
     # width; the MEM_MODEL entries already carry a safety margin.
-    if "small" not in name:
+    if "small" in name or "24b" in name:
+        if eight:
+            return "small8"
+        return "small6" if ("6bit" in name or "6-bit" in name) else "small"
+    if "mini" in name or "3b" in name:
         return "mini8" if eight else "mini"
-    if eight:
-        return "small8"
-    return "small6" if ("6bit" in name or "6-bit" in name) else "small"
+    # Unrecognised build: the name carries no reliable size signal. Under-sizing
+    # a pass only runs slower, but over-sizing swaps forever -- so fall back to
+    # the most memory-hungry profile rather than optimistically metering an
+    # unknown model as the cheap `mini` one (which would wave a too-long pass
+    # through on a large model). The old code defaulted anything without "small"
+    # to mini; that is the direction that can swap.
+    logger.warning(
+        "Unrecognised Voxtral build %r; sizing passes with the conservative "
+        "small8 profile. Name a local build with mini/small and its bit width "
+        "(e.g. voxtral-mini-8bit) to have it sized correctly.", name)
+    return "small8"
 
 
 @functools.lru_cache(maxsize=None)
@@ -544,15 +560,21 @@ def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
     return chunk
 
 
-_SENT_SPLIT = re.compile(r"[^.!?]+[.!?]+|\S+$", re.UNICODE)
+# A sentence is a run up to and including terminal punctuation; the final
+# alternative captures a trailing run that has no terminal punctuation (the last
+# pass of a file, or text Voxtral emits unpunctuated) as ONE fragment. An earlier
+# `\S+$` fallback matched only the last whitespace token, silently dropping every
+# word between the last period and the end of the text.
+_SENT_SPLIT = re.compile(r"[^.!?]+[.!?]+|[^.!?]+$", re.UNICODE)
 
 
-@functools.lru_cache(maxsize=None)
 def is_available():
     """True if the Voxtral backend and its dependencies can be imported.
 
-    Cached: the installed package set does not change mid-run, and this is
-    re-checked on every model-dropdown open (via _register_voxtral_models)."""
+    Deliberately NOT cached: _register_voxtral_models re-checks this on every
+    dropdown open so a backend pip-installed while the app runs appears without a
+    restart. The check is four cheap importlib.util.find_spec lookups (no heavy
+    import), so re-running it per dropdown open is negligible."""
     import importlib.util
     return all(importlib.util.find_spec(m) is not None
                for m in ("mlx_voxtral", "transformers", "torchaudio", "soundfile"))
@@ -727,11 +749,16 @@ class _Aligner:
         # duplicate allocation per alignment call.
         wav = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))
         win = int(EMISSION_WINDOW_SEC * SAMPLE_RATE)
+        # wav2vec2's conv feature extractor raises on inputs shorter than its
+        # receptive field (~400 samples / 25 ms). A trailing remainder that small
+        # carries negligible alignment signal, so skip it rather than crash the
+        # whole job -- the guard is `< min_win`, not just the empty case.
+        min_win = int(0.025 * SAMPLE_RATE)
         parts = []
         with torch.inference_mode():
             for i in range(0, len(wav), win):
                 seg = wav[i:i + win]
-                if seg.numel() == 0:
+                if seg.numel() < min_win:
                     continue
                 lg = self.model(seg.unsqueeze(0)).logits[0]
                 parts.append(torch.log_softmax(lg, dim=-1))
@@ -828,17 +855,22 @@ class _Aligner:
             # first / after the last aligned word (capped at ~0.6 s per word)
             # instead of collapsing them to zero-width spans, which would turn
             # into zero-duration cues that subtitle players skip or reject.
+            # A tiny per-word floor so a lead/tail OOV word never collapses to a
+            # zero-duration cue when the first/last aligned word sits exactly on
+            # the chunk boundary (step would otherwise be 0). The resulting
+            # sub-frame overlap into neighbouring audio is harmless for cues.
+            min_step = 0.02
             if idx[0] > 0:
                 s1 = out[idx[0]][0]
                 lead = max(t_offset, s1 - 0.6 * idx[0])
-                step = (s1 - lead) / idx[0]
+                step = max((s1 - lead) / idx[0], min_step)
                 for i in range(idx[0]):
                     full[i] = [lead + step * i, lead + step * (i + 1), 0.0]
             n_tail = n - (idx[-1] + 1)
             if n_tail > 0:
                 e0 = out[idx[-1]][1]
                 tail_end = min(t_offset + len(audio) / SAMPLE_RATE, e0 + 0.6 * n_tail)
-                step = (tail_end - e0) / n_tail
+                step = max((tail_end - e0) / n_tail, min_step)
                 for k, i in enumerate(range(idx[-1] + 1, n)):
                     full[i] = [e0 + step * k, e0 + step * (k + 1), 0.0]
             for a, b in zip(idx, idx[1:]):

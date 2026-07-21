@@ -945,6 +945,11 @@ def _init_app_state(app):
                        'See here for more information: https://github.com/kaixxx/noScribe/wiki/Add-custom-Whisper-models-for-transcription')
 
     app.queue = TranscriptionQueue()
+    # Maps each decorated picker label back to its plain model name, so the
+    # selected model is recovered by lookup rather than by string-splitting the
+    # display label on a separator (see model_key). Rebuilt whenever the dropdown
+    # is populated.
+    app._model_label_to_name = {}
     app.audio_files_list = []
     app.transcript_files_list = []
     app.log_file = None
@@ -977,14 +982,22 @@ def _register_voxtral_models(app):
         from noScribe import voxtral_engine
         if voxtral_engine.is_available():
             for _name, _repo in voxtral_engine.VOXTRAL_MODELS.items():
-                # Both shipped builds download on first use; the gate stays in
-                # case a future entry is local-only (see has_local_build).
+                # Skip a (hypothetical future) local-only entry whose build is not
+                # present yet. Shipped builds download on first use, so this is
+                # currently always true for them.
                 if not voxtral_engine.has_local_build(_name):
                     continue
-                if _name not in app.whisper_models:
+                resolved = voxtral_engine.resolve_model(_name, _repo)
+                existing = app.whisper_models.get(_name)
+                # (Re)register when new, or when the resolved repo changed -- e.g.
+                # a build converted mid-session (tools/quantize_voxtral.py) flips
+                # the resolved repo from the HF id to the now-present local path,
+                # so it is picked up on the next dropdown open without a restart
+                # (as this function's docstring promises).
+                if existing is None or getattr(existing, "repo", None) != resolved:
                     app.whisper_models[_name] = transcription.WhisperModel(
                         name=_name, path=Path(_name), engine="voxtral",
-                        repo=voxtral_engine.resolve_model(_name, _repo))
+                        repo=resolved)
     except Exception as e:
         logger.warning("Could not register Voxtral engine: %s", e)
 
@@ -1126,8 +1139,12 @@ class App(ctk.CTk):
                 # Pick up models that appeared since startup (e.g. a Voxtral
                 # build converted while the app is running).
                 _register_voxtral_models(self.noScribe_parent)
-                self._values = [self.noScribe_parent.model_label(n)
-                                for n in self.noScribe_parent.whisper_models.keys()]
+                names = list(self.noScribe_parent.whisper_models.keys())
+                self._values = [self.noScribe_parent.model_label(n) for n in names]
+                # Remember label -> name so the selection is recovered by lookup,
+                # not by splitting the label on MODEL_LABEL_SEP.
+                self.noScribe_parent._model_label_to_name = dict(
+                    zip(self._values, names))
                 self._values.append('--------------------')
                 self._values.append(t('label_add_custom_models'))
                 self._dropdown_menu.configure(values=self._values)
@@ -2271,13 +2288,27 @@ class App(ctk.CTk):
             total = voxtral_engine._total_ram_gb()
             mark = '' if need <= total else '  ⚠'
             return f'{name}{self.MODEL_LABEL_SEP}{need:.0f} GB RAM{mark}'
-        except Exception:
+        except Exception as e:
+            # Degrade to the bare name rather than break the picker, but leave a
+            # trail: the RAM hint (and its ⚠ overfit marker) is a memory-safety
+            # cue, so its silent absence would otherwise be undiagnosable.
+            logger.warning("Could not compute RAM hint for model %r: %s", name, e)
             return name
 
-    @classmethod
-    def model_key(cls, label):
-        """Plain model name from a decorated picker entry."""
-        return label.split(cls.MODEL_LABEL_SEP)[0].strip() if label else label
+    def model_key(self, label):
+        """Plain model name from a decorated picker entry.
+
+        Prefers the label->name map built when the dropdown was populated, so a
+        model name that happens to contain the separator is still recovered
+        exactly. Falls back to splitting on MODEL_LABEL_SEP for values that never
+        passed through the dropdown (e.g. a plain name restored at startup, which
+        has no separator and so returns unchanged)."""
+        if not label:
+            return label
+        mapped = self._model_label_to_name.get(label)
+        if mapped is not None:
+            return mapped
+        return label.split(self.MODEL_LABEL_SEP)[0].strip()
 
     def _on_speaker_detection_changed(self, value=None):
         """Show the speaker-names field only when speaker detection is active.
@@ -3015,7 +3046,13 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn(t('transcription_finished'), 'highlight')
                     except Exception as err:
-                        if self._handle_cuda_fallback('whisper', err):
+                        # The CUDA-on-CPU fallback only applies to the Whisper
+                        # (faster-whisper / CTranslate2) backend; Voxtral runs on
+                        # MLX and has no CUDA path, so a Voxtral error must
+                        # propagate rather than trigger a misleading "retry
+                        # Whisper on CPU" prompt and a pointless identical retry.
+                        engine = getattr(job.whisper_model, "engine", "whisper")
+                        if engine == "whisper" and self._handle_cuda_fallback('whisper', err):
                             retry_cuda = True
                         else:
                             raise
@@ -3244,6 +3281,18 @@ class App(ctk.CTk):
                 self.duration = d.get('duration')
         return _Info(info or {})
 
+    @staticmethod
+    def _job_language_code(job):
+        """The ISO code for a job's language, or None for Auto/Multilingual or an
+        unmapped name. Shared by both engine paths so they never diverge on the
+        sentinel set or the lookup fallback."""
+        if job.language_name in ('Auto', 'Multilingual'):
+            return None
+        try:
+            return languages[job.language_name]
+        except Exception:
+            return None
+
     def _run_voxtral_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
         """Spawn a subprocess to run the Voxtral engine and stream segments.
 
@@ -3253,12 +3302,7 @@ class App(ctk.CTk):
         timestamps, speaker detection or pause marking may take the fast
         text-only "short path" (whose segment times are approximations).
         """
-        language_code = None
-        if job.language_name not in ('Auto', 'Multilingual'):
-            try:
-                language_code = languages[job.language_name]
-            except Exception:
-                language_code = None
+        language_code = self._job_language_code(job)
 
         need_timestamps = bool(
             job.file_ext != 'txt'
@@ -3283,6 +3327,14 @@ class App(ctk.CTk):
             chunk_sec = float(get_config('voxtral_chunk_sec', 0) or 0)
         except (TypeError, ValueError):
             chunk_sec = 0
+        # Same defensive coercion as chunk_sec: a value written as a YAML string
+        # ("0", "high") would otherwise either slip a truthy "0" through (losing
+        # the whole safety reserve -> swap) or raise ValueError deep in the
+        # engine and abort the job.
+        try:
+            ram_reserve_gb = float(get_config('voxtral_ram_reserve_gb', 0) or 0)
+        except (TypeError, ValueError):
+            ram_reserve_gb = 0
 
         args = {
             "audio_path": tmp_audio_file,
@@ -3291,10 +3343,14 @@ class App(ctk.CTk):
             "voxtral_repo": getattr(job.whisper_model, "repo", None),
             "chunk_sec": chunk_sec or None,
             "corrections_path": corrections_path,
+            # Forward-compat: speaker-name normalization activates only once a
+            # job actually carries speaker_names. That wiring lives in the
+            # separate speaker-names feature; on this branch job.speaker_names is
+            # never set, so apply_name_corrections stays dormant by design.
             "speaker_names": getattr(job, "speaker_names", None),
             # 0 -> engine default; set voxtral_ram_reserve_gb in config.yml to
             # allow longer passes when nothing else runs on the machine.
-            "ram_reserve_gb": get_config('voxtral_ram_reserve_gb', 0) or None,
+            "ram_reserve_gb": ram_reserve_gb or None,
         }
 
         from .voxtral_mp_worker import voxtral_proc_entrypoint
@@ -3307,12 +3363,7 @@ class App(ctk.CTk):
         """
         global force_whisper_cpu
         # Language code for non-auto/multilingual
-        language_code = None
-        if job.language_name not in ('Auto', 'Multilingual'):
-            try:
-                language_code = languages[job.language_name]
-            except Exception:
-                language_code = None
+        language_code = self._job_language_code(job)
 
         # VAD threshold from config
         try:
