@@ -2544,6 +2544,8 @@ class App(ctk.CTk):
                 option_info += f'{t("label_stop")} {utils.ms_to_str(job.stop)} | '.replace(':', '꞉')
             option_info += f'{t("label_language")} {job.language_name} ({languages[job.language_name]}) | '
             option_info += f'{t("label_speaker")} {job.speaker_detection} | '
+            if job.speaker_names:
+                option_info += f'{t("label_speaker_names")}: {", ".join(job.speaker_names)} | '
             option_info += f'{t("label_overlapping")} {job.overlapping} | '
             option_info += f'{t("label_timestamps")} {job.timestamps} | '
             option_info += f'{t("label_disfluencies")} {job.disfluencies} | '
