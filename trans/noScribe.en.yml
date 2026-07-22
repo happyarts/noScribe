@@ -170,6 +170,8 @@ en:
   # Queue actions
   queue_remove_waiting: 'Remove this job from the queue?'
   queue_remove_entry: 'Remove this entry from the list?'
+  queue_clear_tt: 'Remove all waiting and finished jobs from the list'
+  queue_clear_confirm: 'Remove all waiting and finished jobs from the list? A running job keeps processing.'
   queue_tt_cancel_running: 'Cancel this job'
   queue_tt_remove_waiting: 'Remove from queue'
   queue_tt_remove_entry: 'Remove from list'
