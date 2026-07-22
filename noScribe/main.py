@@ -431,7 +431,7 @@ class TranscriptionJob:
 
         # Pause threshold (map int index back to label)
         try:
-            pause_opts = ['none', '1sec+', '2sec+', '3sec+']
+            pause_opts = [t('pause_none'), '1sec+', '2sec+', '3sec+']
             pause_disp = pause_opts[self.pause] if isinstance(self.pause, int) and 0 <= self.pause < len(pause_opts) else str(self.pause)
             lines.append(f"{t('label_pause')} {pause_disp}")
         except Exception:
@@ -2551,7 +2551,7 @@ class App(ctk.CTk):
             # pause threshold as its label, so the header never mixes True/False
             # with a raw 0 (the tooltip summary already renders them this way).
             _yes, _no = t('opt_yes'), t('opt_no')
-            _pause_opts = ['none', '1sec+', '2sec+', '3sec+']
+            _pause_opts = [t('pause_none'), '1sec+', '2sec+', '3sec+']
             _pause_disp = (_pause_opts[job.pause]
                            if isinstance(job.pause, int) and 0 <= job.pause < len(_pause_opts)
                            else str(job.pause))
