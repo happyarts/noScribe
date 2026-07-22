@@ -121,6 +121,12 @@ MEM_MODEL = {
 # O(T^2) self-attention memory of the *aligner* stays bounded regardless of
 # chunk length (this is the aligner, not Voxtral).
 EMISSION_WINDOW_SEC = 20
+# Hard cap on the forced_align DP-buffer size, frames * (2*tokens + 1).
+# torchaudio's CPU kernel indexes that buffer with 32-bit ints and segfaults
+# once the product nears 2**31 (empirically: 2.10e9 cells fine, 2.17e9 crashes,
+# torchaudio 2.11, int32 and int64 targets alike). 2**30 leaves a 2x safety
+# margin and keeps a single align call under ~5 s.
+FORCED_ALIGN_MAX_CELLS = 2**30
 # When splitting a long file, snap each cut to the longest speaker pause found
 # within a *wide* radius of the target boundary. Because the passes are long we
 # have plenty of slack to hunt far for a real pause, so a cut lands between
@@ -840,7 +846,17 @@ class _Aligner:
             return self._spread(words, audio, t_offset)
 
         too_dense = len(tokens) > n_frames * 0.95
-        if not too_dense or len(words) == 1 or depth >= 12:
+        # torchaudio's CPU forced_align indexes its (frames x 2*tokens+1) DP
+        # buffer with 32-bit ints; once the product nears 2**31 the index
+        # wraps negative and the whole process dies with SIGSEGV (verified
+        # empirically on torchaudio 2.11 -- int64 targets crash too, so no
+        # dtype workaround exists). Split well below that limit; smaller
+        # windows are also much faster to align.
+        too_big = n_frames * (2 * len(tokens) + 1) > FORCED_ALIGN_MAX_CELLS
+        if too_big and (len(words) == 1 or depth >= 12):
+            # Cannot split further -- never risk the segfault.
+            return self._spread(words, audio, t_offset)
+        if not (too_dense or too_big) or len(words) == 1 or depth >= 12:
             try:
                 targets = torch.tensor(tokens, dtype=torch.int32).unsqueeze(0)
                 aligned, scores = torchaudio.functional.forced_align(
@@ -904,7 +920,8 @@ class _Aligner:
             return [{"word": words[i], "start": full[i][0],
                      "end": full[i][1], "prob": full[i][2]} for i in range(n)]
 
-        # Too dense: split words in half and audio at a nearby pause, recurse.
+        # Too dense or too big: split words in half and audio at a nearby
+        # pause, recurse.
         mid = max(1, len(words) // 2)
         first_chars = sum(len(w) for w in words[:mid]) + mid
         total_chars = sum(len(w) for w in words) + len(words)
