@@ -3,13 +3,26 @@ import os
 import platform
 import traceback
 
-import torchaudio
+import soundfile
 
 if platform.system() == "Darwin" and platform.machine() == "x86_64":
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # temp workaround for iomp5 dup
+
+def load_waveform(audio_file):
+    """Load audio as the in-memory ``(channels, frames)`` float32 tensor +
+    sample rate that pyannote's waveform input expects.
+
+    The file is always noScribe's own converted WAV (16 kHz mono pcm_s16le),
+    so plain soundfile can read it -- no torchaudio/torchcodec decoding
+    backends needed. Passing the waveform in memory also keeps pyannote's
+    own decoder out of play."""
+    import torch
+    data, sample_rate = soundfile.read(audio_file, dtype="float32", always_2d=True)
+    return torch.from_numpy(data.T.copy()), sample_rate  # -> contiguous (ch, frames)
+
 
 def pyannote_proc_entrypoint(args: dict, q):
     """Runs diarization in a child process and streams progress/logs.
@@ -75,7 +88,7 @@ def pyannote_proc_entrypoint(args: dict, q):
 
         with impres.as_file(impres.files("pyannote")) as mypath:
             pipeline = Pipeline.from_pretrained(mypath)
-        waveform, sample_rate = torchaudio.load(audio_file)        
+        waveform, sample_rate = load_waveform(audio_file)
         pipeline.to(torch.device(device))
 
         seg_list = []
