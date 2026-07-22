@@ -53,6 +53,10 @@ def voxtral_proc_entrypoint(args: dict, q):
             speaker_names=args.get("speaker_names"),
             # None -> engine default; lower it on a machine with nothing else running
             ram_reserve_gb=args.get("ram_reserve_gb"),
+            # [[start_s, end_s, label], ...] from the diarization, or None.
+            # Used to cut looping chunks at speaker-turn boundaries and to log
+            # a diarization profile when a loop resists repair.
+            speaker_turns=args.get("speaker_turns"),
             log_cb=plog,
             progress_cb=progress,
             segment_cb=send_segment,

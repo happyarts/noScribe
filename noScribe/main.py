@@ -2613,6 +2613,7 @@ class App(ctk.CTk):
 
                 # Start Diarization:
 
+                diarization = None
                 if job.speaker_detection != 'none':
                     try:
                         job.status = JobStatus.SPEAKER_IDENTIFICATION
@@ -2954,7 +2955,8 @@ class App(ctk.CTk):
                     
                     try:
                         if getattr(job.whisper_model, "engine", "whisper") == "voxtral":
-                            info = self._run_voxtral_subprocess_stream(tmp_audio_file, job, on_segment)
+                            info = self._run_voxtral_subprocess_stream(
+                                tmp_audio_file, job, on_segment, diarization=diarization)
                         else:
                             info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)
                         transcription_success = True
@@ -3205,7 +3207,8 @@ class App(ctk.CTk):
         except Exception:
             return None
 
-    def _run_voxtral_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
+    def _run_voxtral_subprocess_stream(self, tmp_audio_file: str, job, on_segment,
+                                       diarization=None):
         """Spawn a subprocess to run the Voxtral engine and stream segments.
 
         Word/segment timestamps are only computed (via forced alignment, the
@@ -3263,6 +3266,15 @@ class App(ctk.CTk):
             # 0 -> engine default; set voxtral_ram_reserve_gb in config.yml to
             # allow longer passes when nothing else runs on the machine.
             "ram_reserve_gb": ram_reserve_gb or None,
+            # Speaker turns from the diarization (same converted-WAV timeline
+            # the engine reads), in seconds. The engine prefers cutting a
+            # looping chunk at a turn boundary -- the cleanest split there is --
+            # and logs a diarization profile when a loop resists repair.
+            # Optional: without speaker detection the engine falls back to
+            # silence-based cuts, exactly as before.
+            "speaker_turns": (
+                [[seg["start"] / 1000.0, seg["end"] / 1000.0, str(seg["label"])]
+                 for seg in diarization] if diarization else None),
         }
 
         from .voxtral_mp_worker import voxtral_proc_entrypoint
