@@ -65,3 +65,22 @@ def test_token_cb_fires_throttled_without_affecting_output(monkeypatch):
 
 def test_token_cb_absent_is_fine():
     assert _consume([5, 6, 2]) == [5, 6]  # default token_cb=None path unchanged
+
+
+def test_breaker_gave_up_stops_consumption_early():
+    """When the loop breaker gives up mid-generation, _consume_tokens must stop
+    pulling tokens immediately instead of running to the stop token."""
+    class _GiveUpAfter:
+        def __init__(self, n):
+            self.n = n
+            self.reads = 0
+        @property
+        def gave_up(self):
+            self.reads += 1
+            return self.reads > self.n
+
+    v = _Voxtral.__new__(_Voxtral)
+    stream = iter([7] * 1000 + [2])
+    out = v._consume_tokens(stream, breaker=_GiveUpAfter(5))
+    assert len(out) == 5                 # truncated, not the full 1000
+    assert next(stream) == 7             # generator not exhausted

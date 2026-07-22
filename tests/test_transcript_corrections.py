@@ -129,7 +129,8 @@ VARIED_TEXT = [
 
 
 class _FakeVoxtral:
-    """Loops on long passes at penalty 1.0, transcribes anything else fine."""
+    """Loops on long passes at penalty 1.0 (any temperature), transcribes
+    anything else fine -- exercising the split stage of the ladder."""
 
     def __init__(self, always_loop=False):
         self.calls = []
@@ -137,7 +138,7 @@ class _FakeVoxtral:
         self._i = 0
 
     def transcribe_array(self, audio, language, max_new_tokens=0, repetition_penalty=1.0,
-                         token_cb=None):
+                         token_cb=None, temperature=0.0, seed=None, info=None):
         from noScribe.voxtral_engine import SAMPLE_RATE
         dur = len(audio) / SAMPLE_RATE
         self.calls.append((round(dur), repetition_penalty))
@@ -158,7 +159,9 @@ def test_looping_pass_is_split_not_penalised():
     assert not _looks_degenerate(out)
     assert "nicht nicht" in out                       # meaningful repetition survives
     assert all(p == 1.0 for _, p in vox.calls)        # no penalty was needed
-    assert [d for d, _ in vox.calls] == [200, 100, 100]
+    # greedy 200s, gentle-sampling retry 200s (this fake loops regardless of
+    # temperature), then the split resolves it at 2x100s.
+    assert [d for d, _ in vox.calls] == [200, 200, 100, 100]
 
 
 def test_penalty_is_the_last_resort_when_splitting_fails():

@@ -399,6 +399,96 @@ RETRY_REPETITION_PENALTIES = (1.01, 1.1)
 # cleanly as 2x205 s, with the doubled negation intact.
 LOOP_SPLIT_MAX_DEPTH = 3
 LOOP_SPLIT_MIN_SEC = 45
+# Gentle sampling before any penalty, Whisper's own fallback strategy: at low
+# temperature the distribution is still near-greedy, so the text barely
+# changes, but the tiny perturbation is enough to keep a self-reinforcing loop
+# from re-forming -- without deleting repeated words the way a penalty does.
+# Seeded, so retries stay reproducible.
+RETRY_TEMPERATURES = ((0.2, 0), (0.5, 1))  # (temperature, seed)
+
+# --------------------------------------------------------------------------- #
+# In-place loop breaking during generation
+# --------------------------------------------------------------------------- #
+# A degenerate loop repeats one token cycle for thousands of tokens. The
+# _LoopBreaker logits processor detects that periodicity while the tokens are
+# being generated and bans exactly the one token that would continue the
+# cycle -- everywhere else the logits pass through untouched, so a clean pass
+# stays bit-identical to plain greedy. Thresholds are deliberately strict:
+# the *entire* window must be one exact token cycle, which for a 3-token word
+# means ~64 verbatim repeats (a real mantra passage differs long before that,
+# and the transcript-level DEGENERATE_WORD_RUN=12 net stays in place).
+LOOP_BREAK_WINDOW = 192      # tail tokens that must be fully periodic
+LOOP_BREAK_MAX_PERIOD = 32   # longest token cycle we detect (~20 words)
+LOOP_BREAK_MIN_CYCLES = 6    # window/period must fit this many full cycles
+LOOP_BREAK_CHECK_EVERY = 16  # steps between periodicity checks (latency/cost)
+# A model that re-enters a loop right after being kicked out this many times
+# is beyond in-place repair: give up so the retry ladder takes over cheaply
+# (~3 windows of wasted tokens instead of a full max_tokens run).
+LOOP_BREAK_MAX_KICKS = 3
+
+
+class _LoopBreaker:
+    """Logits processor that kills degenerate repetition loops in place.
+
+    Backend-agnostic on purpose: ``tokens`` only needs ``len``/indexing and
+    ``logits`` item assignment (mlx arrays and numpy both qualify), so the
+    logic is unit-testable without weights or mlx.
+    """
+
+    def __init__(self):
+        self._tail = []       # our incremental copy of the generated tokens
+        self._step = 0
+        self._period = 0      # >0 while a ban episode is active
+        self.kicks = 0        # completed interventions (episodes)
+        self.gave_up = False
+
+    def _find_period(self):
+        tail = self._tail
+        if len(tail) < LOOP_BREAK_WINDOW:
+            return 0
+        t = tail[-LOOP_BREAK_WINDOW:]
+        for p in range(1, LOOP_BREAK_MAX_PERIOD + 1):
+            if LOOP_BREAK_WINDOW // p < LOOP_BREAK_MIN_CYCLES:
+                break
+            if all(t[i] == t[i - p] for i in range(p, LOOP_BREAK_WINDOW)):
+                return p
+        return 0
+
+    def __call__(self, tokens, logits):
+        if self.gave_up:
+            return logits
+        # Incremental sync (one new token per step); resync fully if the
+        # bookkeeping ever drifts (e.g. a first call with a non-empty prompt).
+        n = len(tokens)
+        if n == len(self._tail) + 1:
+            self._tail.append(int(tokens[-1]))
+        elif n != len(self._tail):
+            keep = LOOP_BREAK_WINDOW + LOOP_BREAK_MAX_PERIOD
+            self._tail = [int(x) for x in tokens[-keep:]]
+        del self._tail[:-(LOOP_BREAK_WINDOW + LOOP_BREAK_MAX_PERIOD)]
+        self._step += 1
+
+        if self._period:
+            # Active episode: keep banning until the model actually diverges
+            # (the divergent token breaks the window's periodicity).
+            if self._find_period() == self._period:
+                logits[:, self._tail[-self._period]] = float("-inf")
+            else:
+                self._period = 0
+            return logits
+
+        if self._step % LOOP_BREAK_CHECK_EVERY:
+            return logits
+        p = self._find_period()
+        if p:
+            self.kicks += 1
+            if self.kicks > LOOP_BREAK_MAX_KICKS:
+                self.gave_up = True
+                return logits
+            self._period = p
+            # Ban the token that would continue the cycle (the one p back).
+            logits[:, self._tail[-p]] = float("-inf")
+        return logits
 
 
 def _looks_degenerate(text):
@@ -435,39 +525,77 @@ def _quietest_split(audio):
 def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None):
     """Transcribe one pass and repair it if it collapses into a repetition loop.
 
-    Repair order matters. Splitting is tried first because the loop is a
-    long-generation effect -- the same audio in shorter pieces comes out clean --
-    and it keeps repetition_penalty at 1.0, so genuine repetitions survive.
-    A penalty is the last resort only, because it silently deletes meaningful
-    repeated words (a doubled negation flips the meaning of the sentence).
+    Repair order, gentlest first:
+
+    1. Greedy with the _LoopBreaker armed. Clean passes stay bit-identical;
+       a loop is usually repaired in place at zero extra cost.
+    2. Low-temperature sampling (Whisper's own fallback): barely deviates
+       from greedy, breaks the loop attractor, keeps repeated words.
+    3. Splitting at a pause -- the loop is a long-generation effect, shorter
+       pieces often come out clean at plain greedy.
+    4. Stronger sampling, then the windowed repetition penalty as the very
+       last resort, because a penalty silently deletes meaningful repeated
+       words (a doubled negation flips the meaning of the sentence).
+
+    Failed attempts are cheap: the breaker aborts a hopeless generation after
+    ~3 loop windows instead of running to max_new_tokens.
     """
     dur = len(audio) / SAMPLE_RATE
     max_new = min(32768, int(dur * 20) + 512)
-    text = vox.transcribe_array(audio, language, max_new_tokens=max_new,
-                                token_cb=token_cb)
-    if not _looks_degenerate(text):
+
+    def attempt(temperature=0.0, seed=None, penalty=1.0):
+        info = {}
+        text = vox.transcribe_array(audio, language, max_new_tokens=max_new,
+                                    repetition_penalty=penalty, token_cb=token_cb,
+                                    temperature=temperature, seed=seed, info=info)
+        # A gave-up attempt is truncated mid-loop; the full-text detector may
+        # miss that (a late loop gets diluted), so flag it explicitly.
+        bad = info.get("loop_gave_up", False) or _looks_degenerate(text)
+        return text, bad, info
+
+    text, bad, info = attempt()
+    if info.get("loop_kicks") and not bad:
+        _log(log_cb, "info", f"{label}: repetition loop broken in place "
+                             f"({info['loop_kicks']} intervention(s)).")
+    if not bad:
         return text
 
+    temps = list(RETRY_TEMPERATURES)
+    temperature, seed = temps.pop(0)
+    _log(log_cb, "warn", f"{label}: repetition loop; retrying with gentle "
+                         f"sampling (temperature={temperature}).")
+    retry, rbad, _ = attempt(temperature=temperature, seed=seed)
+    if not rbad:
+        return retry
+    text = min((text, retry), key=len)
+
     if depth < LOOP_SPLIT_MAX_DEPTH and dur >= 2 * LOOP_SPLIT_MIN_SEC:
-        _log(log_cb, "warn", f"{label}: repetition loop, splitting it and retrying "
-                             f"({dur:.0f}s -> 2x{dur / 2:.0f}s).")
+        _log(log_cb, "warn", f"{label}: still looping, splitting the pass and "
+                             f"retrying ({dur:.0f}s -> 2x{dur / 2:.0f}s).")
         cut = _quietest_split(audio)
         left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label, depth + 1, token_cb)
         right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label, depth + 1, token_cb)
         joined = f"{left} {right}".strip()
         if not _looks_degenerate(joined):
             return joined
-        text = joined
+        text = min((text, joined), key=len)
 
-    # Splitting did not help. Fall back to the gentlest penalty that works,
+    for temperature, seed in temps:
+        _log(log_cb, "warn", f"{label}: still looping; retrying with "
+                             f"temperature={temperature}.")
+        retry, rbad, _ = attempt(temperature=temperature, seed=seed)
+        if not rbad:
+            return retry
+        text = min((text, retry), key=len)
+
+    # Everything gentler failed. Fall back to the gentlest penalty that works,
     # because a stronger one starts deleting meaningful repeated words.
     for penalty in RETRY_REPETITION_PENALTIES:
-        _log(log_cb, "warn", f"{label}: still looping after splitting; retrying with "
+        _log(log_cb, "warn", f"{label}: still looping; retrying with "
                              f"repetition_penalty={penalty}. Note that a penalty can drop "
                              f"meaningful repeated words.")
-        retry = vox.transcribe_array(audio, language, max_new_tokens=max_new,
-                                     repetition_penalty=penalty)
-        if not _looks_degenerate(retry):
+        retry, rbad, _ = attempt(penalty=penalty)
+        if not rbad:
             return retry
         text = min((text, retry), key=len)
     _log(log_cb, "warn", f"{label}: could not resolve the loop; keeping the shorter result.")
@@ -655,7 +783,7 @@ class _Voxtral:
     # and a potential padding token.
     _STOP_TOKENS = (2, 4, 32000)
 
-    def _consume_tokens(self, token_stream, token_cb=None):
+    def _consume_tokens(self, token_stream, token_cb=None, breaker=None):
         """Collect ids from a greedy token stream up to the first stop token
         (which is dropped, matching decode(skip_special_tokens=True)). The stream
         is already length-bounded by generate_step's max_tokens.
@@ -679,6 +807,10 @@ class _Voxtral:
             t = int(t)
             if t in stops:
                 break
+            # The in-generation loop breaker has given up on this attempt:
+            # stop wasting tokens, the caller's retry ladder takes over.
+            if breaker is not None and breaker.gave_up:
+                break
             out.append(t)
             # Liveness heartbeat: Voxtral emits a whole pass at once, so without
             # this the log/progress sits silent for the entire (possibly minutes-
@@ -693,19 +825,24 @@ class _Voxtral:
                         pass
         return out
 
-    def _fast_generate(self, mi, max_new_tokens, token_cb=None):
-        """Greedy decode through the maintained mlx_lm.generate_step, returning the
+    def _fast_generate(self, mi, max_new_tokens, token_cb=None,
+                       temperature=0.0, seed=None, breaker=None):
+        """Decode through the maintained mlx_lm.generate_step, returning the
         generated token ids ([1, n]).
 
-        Output matches model.generate() (same greedy argmax) on every normal pass;
-        it is faster and -- crucially -- lower peak memory on long passes, because
-        generate_step processes the (large audio) prompt in prefill_step_size
-        chunks instead of one forward. Measured on mini-8bit at a 600s prompt:
-        ~7% faster and ~18% lower peak; near break-even on short prompts, where
-        memory is not the constraint anyway. (The one intentional divergence is on
-        a single-token repetition loop -- see _consume_tokens.)
+        At temperature 0.0 the output matches model.generate() (same greedy
+        argmax) on every normal pass; it is faster and -- crucially -- lower peak
+        memory on long passes, because generate_step processes the (large audio)
+        prompt in prefill_step_size chunks instead of one forward. Measured on
+        mini-8bit at a 600s prompt: ~7% faster and ~18% lower peak; near
+        break-even on short prompts, where memory is not the constraint anyway.
+        (The one intentional divergence is on a single-token repetition loop --
+        see _consume_tokens.)
 
-        Greedy only. The rare retry path (repetition_penalty > 1) stays on the
+        temperature > 0 samples through mlx_lm's make_sampler (the retry
+        ladder's gentle-sampling stages); a fixed `seed` keeps those retries
+        reproducible. `breaker` is an optional _LoopBreaker armed as a logits
+        processor. The rare penalty path (repetition_penalty > 1) stays on the
         library implementation.
         """
         mx = self._mx
@@ -713,20 +850,34 @@ class _Voxtral:
         from mlx_lm.models.cache import KVCache
         model = self.model
 
+        sampler = None  # greedy argmax, matching temperature 0.0
+        if temperature > 0:
+            from mlx_lm.sample_utils import make_sampler
+            if seed is not None:
+                mx.random.seed(seed)
+            sampler = make_sampler(temp=temperature)
+
         # [seq, hidden] merged audio+text embeddings; generate_step adds the batch.
         embeds = model._merge_input_embeddings(
             input_ids=mi["input_ids"], input_features=mi.get("input_features"))[0]
         cache = [KVCache() for _ in range(len(model.language_model.layers))]
-        # sampler=None -> greedy argmax, matching temperature 0.0.
         stream = generate_step(prompt=mx.array([], dtype=mx.int32),
                                input_embeddings=embeds, model=self._lm_adapter,
-                               max_tokens=max_new_tokens, sampler=None,
+                               max_tokens=max_new_tokens, sampler=sampler,
+                               logits_processors=[breaker] if breaker else None,
                                prompt_cache=cache)
-        toks = self._consume_tokens((t for t, _ in stream), token_cb=token_cb)
+        toks = self._consume_tokens((t for t, _ in stream), token_cb=token_cb,
+                                    breaker=breaker)
         return mx.array([toks], dtype=mx.uint32)
 
     def transcribe_array(self, audio, language, max_new_tokens=4096,
-                         repetition_penalty=1.0, token_cb=None):
+                         repetition_penalty=1.0, token_cb=None,
+                         temperature=0.0, seed=None, info=None):
+        """Transcribe one audio array to text.
+
+        `info`, if given, is a dict that receives loop-breaker telemetry for
+        the retry ladder: {"loop_kicks": int, "loop_gave_up": bool}.
+        """
         inp = self.proc.apply_transcrition_request(audio=audio, language=language,
                                                    sampling_rate=SAMPLE_RATE)
         mi = {"input_ids": inp.input_ids, "input_features": inp.input_features}
@@ -742,14 +893,23 @@ class _Voxtral:
         # transcripts read worse than Whisper's. Generation stays bounded by
         # max_new_tokens.
         if repetition_penalty == 1.0 and "attention_mask" not in mi:
-            # Fast greedy path: identical tokens, faster and lower peak memory on
-            # long passes. See _fast_generate. Returns the generated tokens only.
-            # Skipped when a padding mask is present (the fast path assumes a
-            # single unpadded sequence and the model's internal causal mask).
-            gen = self._fast_generate(mi, max_new_tokens, token_cb=token_cb)
+            # Fast path: identical tokens at temperature 0, faster and lower
+            # peak memory on long passes. See _fast_generate. Skipped when a
+            # padding mask is present (the fast path assumes a single unpadded
+            # sequence and the model's internal causal mask). The loop breaker
+            # rides along and repairs a repetition loop in place; if it gives
+            # up, the truncated attempt is reported degenerate via `info` so
+            # the retry ladder never mistakes it for a clean short pass.
+            breaker = _LoopBreaker()
+            gen = self._fast_generate(mi, max_new_tokens, token_cb=token_cb,
+                                      temperature=temperature, seed=seed,
+                                      breaker=breaker)
+            if info is not None:
+                info["loop_kicks"] = breaker.kicks
+                info["loop_gave_up"] = breaker.gave_up
         else:
             out = self.model.generate(**mi, max_new_tokens=max_new_tokens,
-                                      temperature=0.0,
+                                      temperature=temperature,
                                       repetition_penalty=repetition_penalty)
             gen = out[:, inp.input_ids.shape[1]:]  # drop the prompt
         return self.proc.decode(gen[0], skip_special_tokens=True).strip()
