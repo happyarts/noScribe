@@ -2547,10 +2547,18 @@ class App(ctk.CTk):
             option_info += f'{t("label_speaker")} {job.speaker_detection} | '
             if job.speaker_names:
                 option_info += f'{t("label_speaker_names")}: {", ".join(job.speaker_names)} | '
-            option_info += f'{t("label_overlapping")} {job.overlapping} | '
-            option_info += f'{t("label_timestamps")} {job.timestamps} | '
-            option_info += f'{t("label_disfluencies")} {job.disfluencies} | '
-            option_info += f'{t("label_pause")} {job.pause}'
+            # Render the on/off options consistently as localized yes/no, and the
+            # pause threshold as its label, so the header never mixes True/False
+            # with a raw 0 (the tooltip summary already renders them this way).
+            _yes, _no = t('opt_yes'), t('opt_no')
+            _pause_opts = ['none', '1sec+', '2sec+', '3sec+']
+            _pause_disp = (_pause_opts[job.pause]
+                           if isinstance(job.pause, int) and 0 <= job.pause < len(_pause_opts)
+                           else str(job.pause))
+            option_info += f'{t("label_overlapping")} {_yes if job.overlapping else _no} | '
+            option_info += f'{t("label_timestamps")} {_yes if job.timestamps else _no} | '
+            option_info += f'{t("label_disfluencies")} {_yes if job.disfluencies else _no} | '
+            option_info += f'{t("label_pause")} {_pause_disp}'
 
             # Create log file
             if not os.path.exists(f'{config_dir}/log'):
