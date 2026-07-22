@@ -20,11 +20,9 @@ from noScribe.pyannote_mp_worker import load_waveform
 @pytest.fixture()
 def converted_wav(tmp_path):
     """A WAV exactly like noScribe's conversion step writes: 16 kHz mono PCM16."""
-    rng = np.random.default_rng(0)
-    t = np.arange(16000 * 3) / 16000.0
-    signal = 0.5 * np.sin(2 * np.pi * 220 * t) + 0.05 * rng.standard_normal(t.size)
     path = tmp_path / "converted.wav"
-    sf.write(path, np.clip(signal, -1.0, 1.0), 16000, subtype="PCM_16")
+    signal = np.random.default_rng(0).uniform(-1.0, 1.0, 16000 * 3)
+    sf.write(path, signal, 16000, subtype="PCM_16")
     return path
 
 
@@ -38,6 +36,9 @@ def test_load_waveform_shape_dtype_rate(converted_wav):
 
 
 def test_load_waveform_bit_identical_to_torchaudio(converted_wav):
+    # Migration-time proof: runs only while torchaudio is still installed and
+    # may be deleted once torchaudio leaves the tested stacks. The test above
+    # keeps covering the loader on its own.
     torchaudio = pytest.importorskip("torchaudio")
     expected, expected_rate = torchaudio.load(str(converted_wav))
     actual, actual_rate = load_waveform(str(converted_wav))

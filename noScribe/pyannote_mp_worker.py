@@ -21,7 +21,9 @@ def load_waveform(audio_file):
     own decoder out of play."""
     import torch
     data, sample_rate = soundfile.read(audio_file, dtype="float32", always_2d=True)
-    return torch.from_numpy(data.T.copy()), sample_rate  # -> contiguous (ch, frames)
+    # .contiguous() is a no-op for mono (the (frames, 1) transpose is already
+    # contiguous); it only copies in the hypothetical multichannel case.
+    return torch.from_numpy(data.T).contiguous(), sample_rate  # (ch, frames)
 
 
 def pyannote_proc_entrypoint(args: dict, q):
