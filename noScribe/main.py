@@ -2362,6 +2362,12 @@ class App(ctk.CTk):
         sel_whisper_model = self.model_key(self.option_menu_whisper_model.get())
         if sel_whisper_model not in self.whisper_models:
             raise FileNotFoundError(f"The whisper model '{sel_whisper_model}' does not exist.")
+        # Persist the speaker names the moment they are actually used. Saving
+        # only in on_closing loses the change -- including a cleared field --
+        # whenever the shutdown path bails early or is bypassed (Cmd+Q).
+        config['last_speaker_names'] = self.entry_speaker_names.get()
+        save_config()
+
         queue = TranscriptionQueue()
         if len(self.audio_files_list) != len(self.transcript_files_list):
             self.create_default_transcript_names()
