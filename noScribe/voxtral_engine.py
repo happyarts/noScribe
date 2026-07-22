@@ -243,7 +243,7 @@ def max_safe_chunk_sec(repo):
         est = m["fixed"] + m["slope"] * HARD_MIN_CHUNK_SEC
         raise MemoryError(
             f"Voxtral {kind} needs about {est:.0f} GB even for its shortest "
-            f"pass, which does not fit in {total:.0f} GB. Pick a smaller model "
+            f"chunk, which does not fit in {total:.0f} GB. Pick a smaller model "
             f"(see the memory hint next to each model) or use a machine with more RAM."
         )
     if not m["slope"]:
@@ -368,6 +368,44 @@ def resolve_model(name, default_repo=None):
     """
     default_repo = default_repo or VOXTRAL_MODELS.get(name, name)
     return _local_copy(name) or default_repo
+
+
+def _quant_summary(repo):
+    """Exact quantisation of a build, read from its config.json.
+
+    Returns e.g. "8-bit, group 64, affine" -- plus every component that
+    deviates from the base width ("4-bit, group 64, affine; lm_head 8-bit"),
+    so the log states precisely what the transcript was made with instead of
+    hiding it in the model directory. Empty string when no local config is
+    readable (e.g. a not-yet-downloaded HF repo id).
+    """
+    import json
+    try:
+        with open(os.path.join(str(repo), "config.json")) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    q = cfg.get("quantization") or cfg.get("quantization_config")
+    if not isinstance(q, dict) or "bits" not in q:
+        return str(cfg.get("torch_dtype", ""))  # unquantised build
+    parts = [f"{q['bits']}-bit"]
+    if q.get("group_size"):
+        parts.append(f"group {q['group_size']}")
+    if q.get("mode"):
+        parts.append(str(q["mode"]))
+    base = ", ".join(parts)
+    # Components quantised differently from the base width (or explicitly
+    # skipped, mlx marks those `false`): report each distinct one once.
+    deviations = set()
+    for key, val in q.items():
+        leaf = key.rsplit(".", 1)[-1]
+        if isinstance(val, dict) and val.get("bits") not in (None, q["bits"]):
+            deviations.add(f"{leaf} {val['bits']}-bit")
+        elif val is False:
+            deviations.add(f"{leaf} unquantised")
+    if deviations:
+        base += "; " + ", ".join(sorted(deviations))
+    return base
 
 
 # A pass that collapses into a repetition loop ("Jetzt. Jetzt. Jetzt. ...")
@@ -570,7 +608,7 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     text = min((text, retry), key=len)
 
     if depth < LOOP_SPLIT_MAX_DEPTH and dur >= 2 * LOOP_SPLIT_MIN_SEC:
-        _log(log_cb, "warn", f"{label}: still looping, splitting the pass and "
+        _log(log_cb, "warn", f"{label}: still looping, splitting the chunk and "
                              f"retrying ({dur:.0f}s -> 2x{dur / 2:.0f}s).")
         cut = _quietest_split(audio)
         left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label, depth + 1, token_cb)
@@ -690,17 +728,17 @@ def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
     est_peak = m["fixed"] + m["slope"] * chunk
     if raw < HARD_MIN_CHUNK_SEC:
         _log(log_cb, "warn",
-             f"Low RAM for Voxtral {kind} ({total:.0f} GB total): passes forced "
+             f"Low RAM for Voxtral {kind} ({total:.0f} GB total): chunks forced "
              f"to {chunk}s (~{est_peak:.0f} GB peak) and may still swap. Consider "
              f"the mini model or a machine with more RAM.")
     elif raw < PREF_MIN_CHUNK_SEC:
         _log(log_cb, "info",
-             f"Voxtral {kind}: {total:.0f} GB RAM -> short {chunk}s passes "
-             f"(~{est_peak:.0f} GB peak). More RAM allows longer, higher-context passes.")
+             f"Voxtral {kind}: {total:.0f} GB RAM -> short {chunk}s chunks "
+             f"(~{est_peak:.0f} GB peak). More RAM allows longer, higher-context chunks.")
     else:
         _log(log_cb, "info",
              f"Voxtral {kind}: {total:.0f} GB RAM -> ~{chunk // 60}m{chunk % 60:02d}s "
-             f"passes (~{est_peak:.0f} GB peak).")
+             f"chunks (~{est_peak:.0f} GB peak).")
     return chunk
 
 
@@ -1266,7 +1304,9 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                  f"voxtral_chunk_sec={pinned:.0f}s would need {what}; "
                  f"using {chunk_sec}s.")
 
-    _log(log_cb, "info", f"Loading Voxtral model: {repo}")
+    quant = _quant_summary(repo)
+    _log(log_cb, "info", f"Loading Voxtral model: {repo}"
+                         + (f" ({quant})" if quant else ""))
     vox = _Voxtral(repo)
 
     aligner = None
@@ -1297,8 +1337,9 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     n_chunks = len(bounds) - 1
     if n_chunks > 1:
         _log(log_cb, "info",
-             f"Audio {duration / 60:.1f} min > one pass -> {n_chunks} passes "
-             f"(pause-aligned, {OVERLAP_SEC}s overlap).")
+             f"Audio {duration / 60:.1f} min exceeds the longest RAM-safe "
+             f"decode window ({chunk_sec:.0f}s) -> transcribing in {n_chunks} "
+             f"chunks (cut at pauses, {OVERLAP_SEC}s overlap).")
     # Overlap gives the model lead-in context at a seam; only used on the long
     # path where the duplicate can be dropped cleanly by timestamp.
     overlap = int(OVERLAP_SEC * SAMPLE_RATE) if aligner is not None else 0
@@ -1342,7 +1383,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             _emit_progress((_base + min(0.95, ntok / _exp) * _span) * 100)
 
         text = _transcribe_guarded(vox, chunk, language, log_cb,
-                                   f"Pass {ci + 1}/{n_chunks}", token_cb=_heartbeat)
+                                   f"Chunk {ci + 1}/{n_chunks}", token_cb=_heartbeat)
         if not text:
             continue
         if corrections:
@@ -1352,7 +1393,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                 text, speaker_names, language)
         if aligner is not None:
             words = re.findall(r"\S+", text)
-            _log(log_cb, "info", f"Pass {ci + 1}/{n_chunks}: aligning word timestamps "
+            _log(log_cb, "info", f"Chunk {ci + 1}/{n_chunks}: aligning word timestamps "
                                  f"({len(words)} words)...")
             stamps = aligner.align_words(words, chunk, t_offset=t_offset)
             if a_read < a0:
