@@ -623,12 +623,17 @@ RETRY_REPETITION_PENALTIES = (1.01, 1.1)
 # cleanly as 2x205 s, with the doubled negation intact.
 LOOP_SPLIT_MAX_DEPTH = 3
 LOOP_SPLIT_MIN_SEC = 45
-# Gentle sampling before any penalty, Whisper's own fallback strategy: at low
-# temperature the distribution is still near-greedy, so the text barely
-# changes, but the tiny perturbation is enough to keep a self-reinforcing loop
-# from re-forming -- without deleting repeated words the way a penalty does.
-# Seeded, so retries stay reproducible.
-RETRY_TEMPERATURES = ((0.2, 0), (0.5, 1))  # (temperature, seed)
+# Gentle sampling before any penalty, Whisper's own fallback strategy: a bit
+# of sampling noise keeps a self-reinforcing loop from re-forming -- without
+# deleting repeated words the way a penalty does. Seeded, so retries stay
+# reproducible. The rungs are calibrated on a real pathological 346 s window
+# (a group session where one speaker repeats the same question to many
+# people): greedy LOOP, T=0.2 LOOP, T=0.5 LOOP, T=0.8 CLEAN (fluent text,
+# zero breaker kicks) -- low temperatures
+# barely move a confident argmax, so the second rung must be high enough to
+# actually break the attractor (Whisper's own ladder goes to 0.8/1.0 too).
+# T=0.2 stays as the near-free first nudge before the split.
+RETRY_TEMPERATURES = ((0.2, 0), (0.8, 1))  # (temperature, seed)
 
 # --------------------------------------------------------------------------- #
 # In-place loop breaking during generation
