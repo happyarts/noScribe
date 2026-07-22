@@ -38,13 +38,16 @@ de:
   label_stop: 'Stop (hh:mm:ss): ' 
 
   label_language: 'Sprache:'
-  label_speaker: 'Sprecher:in erkennen:'
+  label_speaker: 'Sprecher erkennen:'
   label_whisper_model: 'Modell:'
   label_add_custom_models: 'KI-Modelle hinzufügen...'
   label_overlapping: 'Überlappende Sprache:'
   label_pause: 'Pausen markieren:'
   label_timestamps: 'Zeitmarken:'
   label_disfluencies: 'Füllworte:'
+  opt_yes: 'Ja'
+  opt_no: 'Nein'
+  pause_none: 'keine'
 
   start_button: Start
   start_queue: 'Auftrag jetzt starten'
@@ -56,7 +59,7 @@ de:
   # job status
   waiting: 'Wartend'
   audio_conversion: 'Audiokonvertierung'
-  speaker_identification: 'Sprecher:innenidentifikation'
+  speaker_identification: 'Sprecheridentifikation'
   transcription: 'Transkription'
   canceling: 'Abbruch läuft' 
   canceled: 'Abgebrochen'
@@ -83,7 +86,7 @@ de:
   start_audio_conversion: 'Audioumwandlung...'
   audio_conversion_finished: 'Umwandlung fertig.'
   audio_conversion_skipped_invalid_packets: '%{count} fehlerhafte Audiopakete wurden übersprungen.'
-  start_identifying_speakers: 'Sprecher:innen identifizieren...'
+  start_identifying_speakers: 'Sprecher identifizieren...'
   loading_pyannote: 'Pyannote laden'
   start_canceling: 'Abbrechen läuft...'
   start_transcription: 'Transkription...'
@@ -115,11 +118,11 @@ de:
   err_no_transcript_file: 'Fehler: Bitte einen Dateinamen für das fertige Transkript wählen.'
   err_ffmpeg: 'ffmpeg hat einen Fehler gemeldet.'
   err_converting_audio: Fehler im 1. Schritt - Audiokonvertierung.
-  err_identifying_speakers: Fehler im 2. Schritt - Erkennung der Sprecher:innen. 
+  err_identifying_speakers: Fehler im 2. Schritt - Erkennung der Sprecher.
   err_loading_prompt: 'Warnung: Whisper-Prompt konnte nicht geladen werden.'
   transcription_canceled: 'Transkription wirklich abbrechen?'
   queue_cancel_all_confirm: 'Dadurch werden alle unerledigten Aufträge in der Warteschlange abgebrochen. Möchtest du fortfahren?'
-  err_user_cancelation: 'Abbruch durch Nutzer:in'
+  err_user_cancelation: 'Abbruch durch Nutzer'
   err_whisper_main: 'whisper wurde mit folgendem Fehler beendet: %{e}'
   err_transcription: 'Fehler im 3. Schritt - Transkription'
   rescue_saving: 'Beim Speichern unter dem ursprünglichen Dateinamen ist ein Fehler aufgetreten. Stattdessen wurde das Transkript in dieser Datei gesichert: %{file}'
