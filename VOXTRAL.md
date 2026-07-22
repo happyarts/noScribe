@@ -155,3 +155,9 @@ find/replace list at:
 Matches are whole-word and case-insensitive. The file is created empty (with
 commented examples) on first use — add your recurring brand, product and
 programme names (e.g. from earlier podcast transcripts).
+
+## Author
+
+The Voxtral integration for noScribe (engine, forced alignment, quantised
+model builds) was created by **[Markus Kämmerer](https://markus-kaemmerer.de)**
+· [Instagram @markuskaemmerer](https://www.instagram.com/markuskaemmerer/).

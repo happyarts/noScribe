@@ -16,6 +16,9 @@ shape-compatible with what `whisper_mp_worker` streams to the main app:
      "words": [{"word": str, "start": float, "end": float, "prob": float}] | None}
 
 Long files are processed in chunks so memory and model context stay bounded.
+
+Author: Markus Kämmerer <https://markus-kaemmerer.de>
+        (Instagram: https://www.instagram.com/markuskaemmerer/)
 """
 
 import functools
