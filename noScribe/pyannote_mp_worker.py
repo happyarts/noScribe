@@ -20,7 +20,13 @@ def load_waveform(audio_file):
     backends needed. Passing the waveform in memory also keeps pyannote's
     own decoder out of play."""
     import torch
-    data, sample_rate = soundfile.read(audio_file, dtype="float32", always_2d=True)
+    try:
+        data, sample_rate = soundfile.read(audio_file, dtype="float32", always_2d=True)
+    except soundfile.LibsndfileError as e:
+        raise RuntimeError(
+            f"Could not read {audio_file!r} -- the diarization worker expects "
+            f"noScribe's own converted WAV (see noScribe/audio/convert.py): {e}"
+        ) from e
     # .contiguous() is a no-op for mono (the (frames, 1) transpose is already
     # contiguous); it only copies in the hypothetical multichannel case.
     return torch.from_numpy(data.T).contiguous(), sample_rate  # (ch, frames)

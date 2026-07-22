@@ -13,6 +13,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 sf = pytest.importorskip("soundfile")
+# Importing the worker triggers the package __init__, which pulls in the GUI --
+# on a Python built without tk, that would fail collection instead of skipping.
+pytest.importorskip("tkinter")
 
 from noScribe.pyannote_mp_worker import load_waveform
 
@@ -33,6 +36,16 @@ def test_load_waveform_shape_dtype_rate(converted_wav):
     assert waveform.ndim == 2 and waveform.shape[0] == 1  # (channels, frames)
     assert waveform.shape[1] == 16000 * 3
     assert waveform.is_contiguous()
+
+
+def test_load_waveform_rejects_unconverted_input_with_context(tmp_path):
+    # A file that never went through noScribe's conversion step must fail
+    # with an error that points at the conversion contract, not a bare
+    # libsndfile message.
+    bogus = tmp_path / "not_converted.m4a"
+    bogus.write_bytes(b"\x00\x00\x00\x20ftypM4A this is not a wav")
+    with pytest.raises(RuntimeError, match="audio/convert.py"):
+        load_waveform(str(bogus))
 
 
 def test_load_waveform_bit_identical_to_torchaudio(converted_wav):
