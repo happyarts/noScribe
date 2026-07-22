@@ -258,6 +258,150 @@ def resolve_align_model(language):
     return ALIGN_MODELS.get(code, ALIGN_MODEL_MULTILINGUAL)
 
 
+# --------------------------------------------------------------------------- #
+# Text-based language detection for the aligner choice
+# --------------------------------------------------------------------------- #
+# Voxtral auto-detects the spoken language internally but never reports it --
+# yet the *aligner* choice decides timestamp quality: a char-native
+# per-language model clearly beats the romanised multilingual fallback
+# (measured German word boundaries @50ms: ~75% for romanised MMS-CTC,
+# arXiv 2606.10675). The transcribed text of a chunk exists BEFORE that chunk
+# is aligned, so the language can be read off the text itself: function words
+# are so frequent that a handful per language decides within a few hundred
+# words. Mixed speech (e.g. German with English phrases) keeps the majority
+# language's function words dominant, so the majority model wins -- and it
+# aligns the minority-language words fine too (same Latin alphabet, and the
+# CTC emissions only anchor characters). Only when no language dominates does
+# the romanised multilingual model take over.
+_STOPWORDS = {
+    "de": {"der", "die", "das", "und", "ich", "nicht", "ist", "wir", "ein",
+           "eine", "mit", "auf", "für", "aber", "auch", "dann", "wenn",
+           "noch", "dass", "sind", "habe", "schon", "mal", "jetzt"},
+    "en": {"the", "and", "you", "that", "this", "not", "with", "for", "have",
+           "are", "was", "but", "they", "what", "just", "like", "know",
+           "then", "would", "been", "your", "about"},
+    "es": {"que", "los", "del", "las", "por", "con", "una", "para", "está",
+           "pero", "como", "más", "muy", "bien", "eso", "esta", "todo",
+           "porque", "cuando", "también"},
+    "fr": {"les", "des", "est", "que", "qui", "pas", "vous", "nous", "une",
+           "dans", "pour", "mais", "avec", "sur", "c'est", "plus", "tout",
+           "être", "fait", "comme"},
+    "it": {"che", "per", "con", "una", "sono", "non", "come", "anche",
+           "questo", "della", "più", "perché", "quindi", "cosa", "molto",
+           "quando", "questa", "hanno", "fare", "essere"},
+    "nl": {"het", "een", "van", "dat", "niet", "voor", "maar", "zijn", "ook",
+           "dan", "dus", "nog", "naar", "wel", "hebben", "deze", "worden",
+           "heeft", "kunnen", "moet"},
+    "pt": {"que", "não", "uma", "para", "com", "mais", "como", "mas", "por",
+           "isso", "você", "muito", "então", "tem", "está", "também", "vamos",
+           "fazer", "quando", "porque"},
+    "pl": {"nie", "jest", "się", "tak", "ale", "czy", "jak", "dla", "tego",
+           "być", "przez", "tylko", "bardzo", "może", "już", "gdzie",
+           "wszystko", "jeszcze", "przecież", "trzeba"},
+}
+# Non-Latin scripts identify their language directly (no stopwords needed).
+_SCRIPT_RANGES = (
+    ("ja", "぀", "ヿ"),   # hiragana + katakana (checked before han)
+    ("zh", "一", "鿿"),   # han
+    ("ru", "Ѐ", "ӿ"),   # cyrillic
+    ("ar", "؀", "ۿ"),   # arabic
+    ("el", "Ͱ", "Ͽ"),   # greek
+)
+
+
+def _detect_language(text):
+    """Best-effort language of `text` -> (code, dominance) or (None, 0.0).
+
+    Script check first (CJK/Cyrillic/Arabic/Greek are unambiguous), then
+    function-word counting for the Latin-script languages. Returns None when
+    the evidence is thin or no language dominates clearly -- the caller then
+    keeps its previous choice or the multilingual fallback.
+    """
+    if not text:
+        return None, 0.0
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 40:
+        return None, 0.0
+    for code, lo, hi in _SCRIPT_RANGES:
+        n = sum(1 for c in letters if lo <= c <= hi)
+        if n / len(letters) > 0.3:
+            return code, n / len(letters)
+    tokens = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text.lower())
+    if len(tokens) < 40:
+        return None, 0.0
+    hits = {code: sum(1 for t in tokens if t in words)
+            for code, words in _STOPWORDS.items()}
+    ranked = sorted(hits.items(), key=lambda kv: kv[1], reverse=True)
+    best_code, best = ranked[0]
+    second = ranked[1][1]
+    total = sum(hits.values())
+    # Enough absolute evidence, clear lead over the runner-up, and function
+    # words at a plausible density for connected speech.
+    if best >= 8 and best >= 1.5 * max(second, 1) and best / len(tokens) >= 0.04:
+        return best_code, best / max(total, 1)
+    return None, 0.0
+
+
+class _AlignerPool:
+    """Chooses and caches the alignment model chunk by chunk.
+
+    With an explicit language the model stays fixed (as before), but each
+    chunk's text is still checked so a wrong menu choice produces a warning
+    instead of silently degraded timestamps. With language=None
+    (Auto/Multilingual) the model follows the *detected* language of each
+    chunk -- Auto gets the char-native per-language quality automatically,
+    the language may change mid-file, and only text without a dominant
+    language falls back to the romanised multilingual model. Loaded aligners
+    are cached (bounded -- they are ~1.2 GB each) because a load costs
+    seconds and languages may alternate."""
+
+    MAX_CACHED = 2
+
+    def __init__(self, language, log_cb):
+        self._explicit = bool((language or "").strip())
+        self._language = (language or "").strip().lower()[:2]
+        self._log_cb = log_cb
+        self._cache = {}          # model name -> _Aligner, insertion-ordered
+        self._last_model = None
+        self._warned = False
+
+    def aligner_for(self, text):
+        detected, _ = _detect_language(text)
+        if self._explicit:
+            model = resolve_align_model(self._language)
+            if detected and detected != self._language and not self._warned:
+                self._warned = True
+                _log(self._log_cb, "warn",
+                     f"Language is set to '{self._language}' but the transcript "
+                     f"looks like '{detected}'. Word timestamps use the "
+                     f"'{self._language}' alignment model; check the language "
+                     f"setting if that was not intended.")
+        elif detected:
+            model = ALIGN_MODELS.get(detected, ALIGN_MODEL_MULTILINGUAL)
+            if model != self._last_model:
+                _log(self._log_cb, "info",
+                     f"Detected language '{detected}' -> alignment model: {model}")
+        else:
+            # Thin or mixed evidence: keep what worked for the previous chunk,
+            # multilingual on the very first one.
+            model = self._last_model or ALIGN_MODEL_MULTILINGUAL
+            if model != self._last_model:
+                _log(self._log_cb, "info",
+                     f"No dominant language detected -> alignment model: {model}")
+        return self._load(model)
+
+    def _load(self, model):
+        aligner = self._cache.pop(model, None)
+        if aligner is None:
+            _log(self._log_cb, "info", f"Loading alignment model: {model}")
+            aligner = _Aligner(model)
+            while len(self._cache) >= self.MAX_CACHED:
+                self._cache.pop(next(iter(self._cache)))
+        self._cache[model] = aligner   # re-insert = mark most recently used
+        self._last_model = model
+        return aligner
+
+
 def _frame_energy(window, frame):
     """Per-frame mean squared amplitude of `window` in `frame`-sample blocks --
     the energy curve used to find quiet spots. Trailing samples that don't fill
@@ -1429,11 +1573,12 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                          + (f" ({quant})" if quant else ""))
     vox = _Voxtral(repo)
 
+    # The aligner is chosen per chunk from the *transcribed text* (see
+    # _AlignerPool): the text exists before its chunk is aligned, so Auto can
+    # use the char-native per-language model instead of the weaker romanised
+    # multilingual fallback, and mid-file language changes are followed.
+    aligner_pool = _AlignerPool(language, log_cb) if need_timestamps else None
     aligner = None
-    if need_timestamps:
-        align_model = resolve_align_model(language)
-        _log(log_cb, "info", f"Loading alignment model: {align_model}")
-        aligner = _Aligner(align_model)
 
     audio, sr = sf.read(audio_path, dtype="float32")
     if audio.ndim > 1:
@@ -1473,7 +1618,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
              f"chunks (cut at pauses, {OVERLAP_SEC}s overlap).")
     # Overlap gives the model lead-in context at a seam; only used on the long
     # path where the duplicate can be dropped cleanly by timestamp.
-    overlap = int(OVERLAP_SEC * SAMPLE_RATE) if aligner is not None else 0
+    overlap = int(OVERLAP_SEC * SAMPLE_RATE) if aligner_pool is not None else 0
     all_segments = []
     # Progress is measured against the WHOLE audio (each pass contributes its own
     # share of the total duration, so a short final pass moves the bar only a
@@ -1523,7 +1668,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         if speaker_names:
             text = transcript_corrections.apply_name_corrections(
                 text, speaker_names, language)
-        if aligner is not None:
+        if aligner_pool is not None:
+            aligner = aligner_pool.aligner_for(text)
             words = re.findall(r"\S+", text)
             _log(log_cb, "info", f"Chunk {ci + 1}/{n_chunks}: aligning word timestamps "
                                  f"({len(words)} words)...")

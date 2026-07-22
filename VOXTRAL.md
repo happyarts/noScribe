@@ -20,6 +20,19 @@ pip install -r environments/requirements_voxtral_macOS_arm64.txt
 The models `voxtral-mini` and `voxtral-small` then appear in the model dropdown.
 They are downloaded on first use.
 
+## Language & word-timestamp quality
+
+Word timestamps come from a CTC forced aligner. Its model is chosen **per
+chunk from the transcribed text itself**: when one language dominates the
+chunk (function-word analysis; non-Latin scripts are recognised directly),
+the char-native model for that language is used -- so "Auto" gets the same
+alignment quality as an explicit language choice. Mixed speech with a clear
+majority language (e.g. German with English phrases) uses the majority
+model, which also anchors the minority-language words; only text without a
+dominant language falls back to the romanised multilingual aligner
+(MMS-300M, 1130+ languages). If an explicitly selected language contradicts
+what the transcript looks like, a warning is logged.
+
 ## Which model?
 
 Two builds, both quantised on Apple Silicon and published so they download on

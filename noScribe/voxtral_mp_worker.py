@@ -42,7 +42,9 @@ def voxtral_proc_entrypoint(args: dict, q):
         _, info = voxtral_engine.transcribe(
             audio_path=args["audio_path"],
             # None for Auto/Multilingual jobs -> Voxtral auto-detects the
-            # language and the multilingual aligner is used.
+            # language, and the aligner is chosen per chunk from the
+            # transcribed text (char-native model when a language dominates,
+            # romanised multilingual fallback otherwise).
             language=args.get("language_code"),
             need_timestamps=args.get("need_timestamps", True),
             voxtral_repo=args.get("voxtral_repo"),
