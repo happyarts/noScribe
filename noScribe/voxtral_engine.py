@@ -370,14 +370,43 @@ def resolve_model(name, default_repo=None):
     return _local_copy(name) or default_repo
 
 
-def _quant_summary(repo):
-    """Exact quantisation of a build, read from its config.json.
+# Friendlier names for whole-component reporting in _quant_summary.
+_COMPONENT_LABELS = {
+    "audio_tower": "audio encoder",
+    "multi_modal_projector": "projector",
+}
+_DTYPE_SHORT = {"bfloat16": "bf16", "float16": "fp16", "float32": "fp32"}
 
-    Returns e.g. "8-bit, group 64, affine" -- plus every component that
-    deviates from the base width ("4-bit, group 64, affine; lm_head 8-bit"),
-    so the log states precisely what the transcript was made with instead of
-    hiding it in the model directory. Empty string when no local config is
-    readable (e.g. a not-yet-downloaded HF repo id).
+
+def _weight_names(repo):
+    """All tensor names of a local build, from the safetensors index (sharded)
+    or the single-file safetensors header. Empty list when unreadable."""
+    import json
+    import struct
+    try:
+        with open(os.path.join(str(repo), "model.safetensors.index.json")) as f:
+            return list(json.load(f)["weight_map"])
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        with open(os.path.join(str(repo), "model.safetensors"), "rb") as f:
+            (hlen,) = struct.unpack("<Q", f.read(8))
+            header = json.loads(f.read(hlen))
+        return [k for k in header if k != "__metadata__"]
+    except (OSError, ValueError, struct.error):
+        return []
+
+
+def _quant_summary(repo):
+    """Exact quantisation of a build: config.json plus the weights themselves.
+
+    The config's quantization dict only lists what *was* quantised -- a
+    deliberately dense component (e.g. this project's bf16 audio encoder) does
+    not appear there at all and would go unreported. So the weight names are
+    checked too: any top-level component without quantisation scales is
+    reported dense. Result e.g.
+    "8-bit, group 64, affine; audio encoder & projector bf16".
+    Empty string when no local config is readable (a not-yet-downloaded repo).
     """
     import json
     try:
@@ -385,26 +414,39 @@ def _quant_summary(repo):
             cfg = json.load(f)
     except (OSError, ValueError):
         return ""
+    dtype = _DTYPE_SHORT.get(str(cfg.get("torch_dtype")), str(cfg.get("torch_dtype", "")))
     q = cfg.get("quantization") or cfg.get("quantization_config")
     if not isinstance(q, dict) or "bits" not in q:
-        return str(cfg.get("torch_dtype", ""))  # unquantised build
+        return dtype  # fully unquantised build
     parts = [f"{q['bits']}-bit"]
     if q.get("group_size"):
         parts.append(f"group {q['group_size']}")
     if q.get("mode"):
         parts.append(str(q["mode"]))
     base = ", ".join(parts)
+    deviations = []
+    # Whole components with no quantised tensors at all stay at the model
+    # dtype -- the weights are the authority here, not the quant dict.
+    names = _weight_names(repo)
+    if names:
+        tops = sorted({n.split(".")[0] for n in names})
+        quantised_tops = {n.split(".")[0] for n in names if n.endswith(".scales")}
+        dense = [t for t in tops if t not in quantised_tops]
+        if dense:
+            labels = [_COMPONENT_LABELS.get(t, t) for t in dense]
+            deviations.append(f"{' & '.join(labels)} {dtype}".strip())
     # Components quantised differently from the base width (or explicitly
     # skipped, mlx marks those `false`): report each distinct one once.
-    deviations = set()
+    per_layer = set()
     for key, val in q.items():
         leaf = key.rsplit(".", 1)[-1]
         if isinstance(val, dict) and val.get("bits") not in (None, q["bits"]):
-            deviations.add(f"{leaf} {val['bits']}-bit")
+            per_layer.add(f"{leaf} {val['bits']}-bit")
         elif val is False:
-            deviations.add(f"{leaf} unquantised")
+            per_layer.add(f"{leaf} {dtype}".strip())
+    deviations.extend(sorted(per_layer))
     if deviations:
-        base += "; " + ", ".join(sorted(deviations))
+        base += "; " + ", ".join(deviations)
     return base
 
 
