@@ -136,7 +136,8 @@ class _FakeVoxtral:
         self.always_loop = always_loop
         self._i = 0
 
-    def transcribe_array(self, audio, language, max_new_tokens=0, repetition_penalty=1.0):
+    def transcribe_array(self, audio, language, max_new_tokens=0, repetition_penalty=1.0,
+                         token_cb=None):
         from noScribe.voxtral_engine import SAMPLE_RATE
         dur = len(audio) / SAMPLE_RATE
         self.calls.append((round(dur), repetition_penalty))

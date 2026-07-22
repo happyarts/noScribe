@@ -47,3 +47,21 @@ def test_immediate_stop_gives_empty():
 
 def test_stop_tokens_are_the_library_defaults():
     assert set(_Voxtral._STOP_TOKENS) == {2, 4, 32000}
+
+
+def test_token_cb_fires_throttled_without_affecting_output(monkeypatch):
+    """The liveness heartbeat calls token_cb(collected_count), throttled by wall
+    clock, and must not change which tokens are collected."""
+    import noScribe.voxtral_engine as v
+    # advance monotonic() enough each read that the >=1.5s throttle fires
+    ticks = iter([0.0, 10.0, 20.0, 30.0, 40.0, 50.0])
+    monkeypatch.setattr(v.time, "monotonic", lambda: next(ticks, 999.0))
+    seen = []
+    vox = _Voxtral.__new__(_Voxtral)
+    out = vox._consume_tokens(iter([10, 11, 12, 2, 99]), token_cb=seen.append)
+    assert out == [10, 11, 12]          # stop token 2 (and 99 after it) dropped
+    assert seen and seen[-1] <= 3       # reports the running collected-count
+
+
+def test_token_cb_absent_is_fine():
+    assert _consume([5, 6, 2]) == [5, 6]  # default token_cb=None path unchanged
