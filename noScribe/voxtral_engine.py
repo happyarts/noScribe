@@ -23,10 +23,19 @@ import importlib.resources as impres
 import logging
 import os
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
+
+# Rough count of text tokens Voxtral generates per second of audio, used ONLY to
+# drive the intra-pass liveness estimate (German conversational speech ~2-2.5
+# words/s x ~1.3 tokens/word). It is intentionally a lower-ish bound: the
+# estimate is capped below 100% and snaps to the true position when a pass
+# finishes, so under-estimating just makes the bar move a touch fast, never past
+# the real chunk boundary.
+_EST_TOKENS_PER_SEC = 3.0
 
 # --- Long-audio chunking (reference approach: one pass up to the model's
 # context, split only beyond that) -------------------------------------------
@@ -417,7 +426,7 @@ def _quietest_split(audio):
     return _quietest_frame_near(audio, len(audio) // 2, 5.0)
 
 
-def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0):
+def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None):
     """Transcribe one pass and repair it if it collapses into a repetition loop.
 
     Repair order matters. Splitting is tried first because the loop is a
@@ -428,7 +437,8 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0):
     """
     dur = len(audio) / SAMPLE_RATE
     max_new = min(32768, int(dur * 20) + 512)
-    text = vox.transcribe_array(audio, language, max_new_tokens=max_new)
+    text = vox.transcribe_array(audio, language, max_new_tokens=max_new,
+                                token_cb=token_cb)
     if not _looks_degenerate(text):
         return text
 
@@ -436,8 +446,8 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0):
         _log(log_cb, "warn", f"{label}: repetition loop, splitting it and retrying "
                              f"({dur:.0f}s -> 2x{dur / 2:.0f}s).")
         cut = _quietest_split(audio)
-        left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label, depth + 1)
-        right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label, depth + 1)
+        left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label, depth + 1, token_cb)
+        right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label, depth + 1, token_cb)
         joined = f"{left} {right}".strip()
         if not _looks_degenerate(joined):
             return joined
@@ -639,7 +649,7 @@ class _Voxtral:
     # and a potential padding token.
     _STOP_TOKENS = (2, 4, 32000)
 
-    def _consume_tokens(self, token_stream):
+    def _consume_tokens(self, token_stream, token_cb=None):
         """Collect ids from a greedy token stream up to the first stop token
         (which is dropped, matching decode(skip_special_tokens=True)). The stream
         is already length-bounded by generate_step's max_tokens.
@@ -658,14 +668,26 @@ class _Voxtral:
         rather than truncated) on the rare single-token loop."""
         stops = self._STOP_TOKENS
         out = []
+        last_beat = 0.0
         for t in token_stream:
             t = int(t)
             if t in stops:
                 break
             out.append(t)
+            # Liveness heartbeat: Voxtral emits a whole pass at once, so without
+            # this the log/progress sits silent for the entire (possibly minutes-
+            # long) decode. Throttled to ~1.5 s so it never floods the queue.
+            if token_cb is not None:
+                now = time.monotonic()
+                if now - last_beat >= 1.5:
+                    last_beat = now
+                    try:
+                        token_cb(len(out))
+                    except Exception:
+                        pass
         return out
 
-    def _fast_generate(self, mi, max_new_tokens):
+    def _fast_generate(self, mi, max_new_tokens, token_cb=None):
         """Greedy decode through the maintained mlx_lm.generate_step, returning the
         generated token ids ([1, n]).
 
@@ -694,11 +716,11 @@ class _Voxtral:
                                input_embeddings=embeds, model=self._lm_adapter,
                                max_tokens=max_new_tokens, sampler=None,
                                prompt_cache=cache)
-        toks = self._consume_tokens(t for t, _ in stream)
+        toks = self._consume_tokens((t for t, _ in stream), token_cb=token_cb)
         return mx.array([toks], dtype=mx.uint32)
 
     def transcribe_array(self, audio, language, max_new_tokens=4096,
-                         repetition_penalty=1.0):
+                         repetition_penalty=1.0, token_cb=None):
         inp = self.proc.apply_transcrition_request(audio=audio, language=language,
                                                    sampling_rate=SAMPLE_RATE)
         mi = {"input_ids": inp.input_ids, "input_features": inp.input_features}
@@ -718,7 +740,7 @@ class _Voxtral:
             # long passes. See _fast_generate. Returns the generated tokens only.
             # Skipped when a padding mask is present (the fast path assumes a
             # single unpadded sequence and the model's internal causal mask).
-            gen = self._fast_generate(mi, max_new_tokens)
+            gen = self._fast_generate(mi, max_new_tokens, token_cb=token_cb)
         else:
             out = self.model.generate(**mi, max_new_tokens=max_new_tokens,
                                       temperature=0.0,
@@ -1104,6 +1126,25 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     # path where the duplicate can be dropped cleanly by timestamp.
     overlap = int(OVERLAP_SEC * SAMPLE_RATE) if aligner is not None else 0
     all_segments = []
+    # Progress is measured against the WHOLE audio (each pass contributes its own
+    # share of the total duration, so a short final pass moves the bar only a
+    # little), and never runs backward. _prog_max keeps it monotonic across the
+    # intra-pass estimate, the pass-complete snap, and any split-retry re-decode.
+    n_samples = max(1, len(audio))
+    _prog_max = [0]
+
+    def _emit_progress(pct):
+        pct = int(pct)
+        if pct > _prog_max[0]:
+            _prog_max[0] = pct
+        else:
+            pct = _prog_max[0]
+        if progress_cb:
+            try:
+                progress_cb(pct)
+            except Exception:
+                pass
+
     for ci in range(n_chunks):
         a0 = bounds[ci]
         a1 = bounds[ci + 1]
@@ -1112,8 +1153,19 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         t_offset = a_read / SAMPLE_RATE
         _log(log_cb, "info", f"Transcribing chunk {ci + 1}/{n_chunks} "
                              f"({a0 / SAMPLE_RATE:.0f}-{a1 / SAMPLE_RATE:.0f}s)")
+        # Intra-pass liveness: Voxtral returns the whole pass at once, so estimate
+        # how far the decode is from the token count and map it onto this pass's
+        # slice of the overall bar (capped below the pass boundary; the real
+        # position is set when the pass finishes below).
+        _base = a0 / n_samples
+        _span = max(0.0, (a1 - a0) / n_samples)
+        _exp_tokens = max(1.0, (a1 - a0) / SAMPLE_RATE * _EST_TOKENS_PER_SEC)
+
+        def _heartbeat(ntok, _base=_base, _span=_span, _exp=_exp_tokens):
+            _emit_progress((_base + min(0.95, ntok / _exp) * _span) * 100)
+
         text = _transcribe_guarded(vox, chunk, language, log_cb,
-                                   f"Pass {ci + 1}/{n_chunks}")
+                                   f"Pass {ci + 1}/{n_chunks}", token_cb=_heartbeat)
         if not text:
             continue
         if corrections:
@@ -1123,6 +1175,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                 text, speaker_names, language)
         if aligner is not None:
             words = re.findall(r"\S+", text)
+            _log(log_cb, "info", f"Pass {ci + 1}/{n_chunks}: aligning word timestamps "
+                                 f"({len(words)} words)...")
             stamps = aligner.align_words(words, chunk, t_offset=t_offset)
             if a_read < a0:
                 # Drop the *words* already covered by the previous pass (the
@@ -1148,10 +1202,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             vox._mx.clear_cache()
         except Exception:
             pass
-        if progress_cb:
-            try:
-                progress_cb(round((ci + 1) / n_chunks * 100))
-            except Exception:
-                pass
+        # Snap the bar to this pass's true end position in the whole audio
+        # (duration-weighted; the final pass lands on 100%).
+        _emit_progress(a1 / n_samples * 100)
 
     return all_segments, {"duration": duration, "language": language}
