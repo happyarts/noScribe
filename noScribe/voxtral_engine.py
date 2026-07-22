@@ -602,7 +602,61 @@ def _quietest_split(audio):
     return _quietest_frame_near(audio, len(audio) // 2, 5.0)
 
 
-def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None):
+def _clip_turns(turns, w0, w1):
+    """Speaker turns intersected with the window [w0, w1) (seconds), shifted to
+    window-relative times. None when nothing meaningful remains."""
+    out = []
+    for s, e, lbl in turns or []:
+        s2, e2 = max(s, w0), min(e, w1)
+        if e2 - s2 > 0.05:
+            out.append((s2 - w0, e2 - w0, lbl))
+    return out or None
+
+
+def _turn_gap_split(audio, turns):
+    """Sample index of the best speaker-change boundary near the middle, or
+    None when the window offers no usable one.
+
+    Cutting where the speaker changes is the cleanest split there is: the
+    context *within* a turn stays intact, and across a turn boundary it
+    matters least. Candidates are boundaries between consecutive turns of
+    *different* speakers inside the middle half of the window (keeps the
+    halves reasonably balanced); overlapping-speech boundaries are skipped
+    (cutting inside an overlap clips someone mid-word). The winner is the
+    boundary closest to the middle, snapped to the locally quietest 100 ms.
+    """
+    if not turns:
+        return None
+    lo, hi = len(audio) // 4, 3 * len(audio) // 4
+    mid = len(audio) // 2
+    ordered = sorted(turns, key=lambda t: t[0])
+    best = None
+    for (s0, e0, l0), (s1, e1, l1) in zip(ordered, ordered[1:]):
+        if l1 == l0:
+            continue                    # same speaker resuming after a pause
+        if s1 < e0 - 0.2:
+            continue                    # overlapping speech at the boundary
+        p = int((e0 + max(s1, e0)) / 2 * SAMPLE_RATE)
+        if lo <= p <= hi and (best is None or abs(p - mid) < abs(best - mid)):
+            best = p
+    if best is None:
+        return None
+    return _quietest_frame_near(audio, best, 1.0)
+
+
+def _turn_profile(turns, dur):
+    """One-line diarization profile of a window, for the escalation log."""
+    ordered = sorted(turns, key=lambda t: t[0])
+    speakers = {lbl for _, _, lbl in ordered}
+    changes = sum(1 for a, b in zip(ordered, ordered[1:]) if a[2] != b[2])
+    speech = sum(e - s for s, e, _ in ordered)
+    dur = max(dur, 1e-9)
+    return (f"{len(speakers)} speaker(s), {changes} turn change(s) "
+            f"({60.0 * changes / dur:.1f}/min), ~{min(100.0, 100.0 * speech / dur):.0f}% speech")
+
+
+def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None,
+                        turns=None):
     """Transcribe one pass and repair it if it collapses into a repetition loop.
 
     Repair order, gentlest first:
@@ -611,8 +665,12 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
        a loop is usually repaired in place at zero extra cost.
     2. Low-temperature sampling (Whisper's own fallback): barely deviates
        from greedy, breaks the loop attractor, keeps repeated words.
-    3. Splitting at a pause -- the loop is a long-generation effect, shorter
-       pieces often come out clean at plain greedy.
+    3. Splitting -- the loop is a long-generation effect, shorter pieces
+       often come out clean at plain greedy. The cut prefers a speaker-turn
+       boundary from the diarization (`turns`, window-relative seconds):
+       context within a turn stays intact, across a change it matters least.
+       Without a usable boundary the quietest frame near the middle is used,
+       as before.
     4. Stronger sampling, then the windowed repetition penalty as the very
        last resort, because a penalty silently deletes meaningful repeated
        words (a doubled negation flips the meaning of the sentence).
@@ -650,15 +708,28 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     text = min((text, retry), key=len)
 
     if depth < LOOP_SPLIT_MAX_DEPTH and dur >= 2 * LOOP_SPLIT_MIN_SEC:
-        _log(log_cb, "warn", f"{label}: still looping, splitting the chunk and "
-                             f"retrying ({dur:.0f}s -> 2x{dur / 2:.0f}s).")
-        cut = _quietest_split(audio)
-        left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label, depth + 1, token_cb)
-        right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label, depth + 1, token_cb)
+        cut = _turn_gap_split(audio, turns)
+        how = "at a speaker change" if cut is not None else "at the quietest pause"
+        if cut is None:
+            cut = _quietest_split(audio)
+        cut_sec = cut / SAMPLE_RATE
+        _log(log_cb, "warn", f"{label}: still looping, splitting the chunk {how} "
+                             f"and retrying ({dur:.0f}s -> {cut_sec:.0f}s + {dur - cut_sec:.0f}s).")
+        left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label,
+                                   depth + 1, token_cb, _clip_turns(turns, 0, cut_sec))
+        right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
+                                    depth + 1, token_cb, _clip_turns(turns, cut_sec, dur))
         joined = f"{left} {right}".strip()
         if not _looks_degenerate(joined):
             return joined
         text = min((text, joined), key=len)
+
+    # Escalating past the gentle stages: log what the diarization saw in this
+    # window -- it tells a music/no-speech hallucination apart from a
+    # repetitive many-speaker exchange without digging through the audio.
+    if turns:
+        _log(log_cb, "info", f"{label}: diarization profile of this window: "
+                             f"{_turn_profile(turns, dur)}.")
 
     for temperature, seed in temps:
         _log(log_cb, "warn", f"{label}: still looping; retrying with "
@@ -1266,6 +1337,7 @@ def _segments_text_only(text, duration):
 def transcribe(audio_path, language="de", need_timestamps=True,
                voxtral_repo=None, chunk_sec=None,
                corrections_path=None, speaker_names=None, ram_reserve_gb=None,
+               speaker_turns=None,
                log_cb=None, progress_cb=None, segment_cb=None):
     """
     Transcribe `audio_path` with Voxtral and return noScribe-compatible segments.
@@ -1283,6 +1355,12 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                         segment as soon as its pass completes, so callers can
                         stream/autosave partial transcripts instead of waiting
                         for the whole file.
+    speaker_turns    -> optional [[start_s, end_s, label], ...] from a prior
+                        diarization on the SAME audio timeline. Used to cut
+                        looping chunks at speaker-turn boundaries (the cleanest
+                        split) and to log a diarization profile when a loop
+                        resists the gentle repairs. Without it, splits fall
+                        back to the quietest pause, exactly as before.
     """
     import soundfile as sf
 
@@ -1363,6 +1441,17 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     if sr != SAMPLE_RATE:
         raise ValueError(f"Expected {SAMPLE_RATE} Hz audio, got {sr}")
     duration = len(audio) / SAMPLE_RATE
+    # Normalise the diarization turns defensively (they cross a process
+    # boundary as plain lists): sorted (start_s, end_s, label) tuples, junk
+    # dropped. None disables the turn-aware splitting.
+    turns = None
+    if speaker_turns:
+        try:
+            turns = sorted((float(s), float(e), str(lbl))
+                           for s, e, lbl in speaker_turns if float(e) > float(s))
+        except (TypeError, ValueError):
+            turns = None
+        turns = turns or None
     # Balance the passes: take the fewest passes that keep each within the
     # RAM-safe length, then split evenly. Even passes share the memory headroom
     # and avoid a tiny leftover tail (e.g. 1143s @1006 -> 2x571s, not 1006+137),
@@ -1425,7 +1514,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             _emit_progress((_base + min(0.95, ntok / _exp) * _span) * 100)
 
         text = _transcribe_guarded(vox, chunk, language, log_cb,
-                                   f"Chunk {ci + 1}/{n_chunks}", token_cb=_heartbeat)
+                                   f"Chunk {ci + 1}/{n_chunks}", token_cb=_heartbeat,
+                                   turns=_clip_turns(turns, t_offset, a1 / SAMPLE_RATE))
         if not text:
             continue
         if corrections:
