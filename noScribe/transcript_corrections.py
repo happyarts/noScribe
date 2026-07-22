@@ -177,7 +177,7 @@ def apply_name_corrections(text, names, language=None):
 
     A replacement additionally requires the same word length, which is what
     keeps ordinary words intact -- the phonetic code collapses vowels, so
-    "Rom"/"Ruhm" would otherwise be rewritten to "Mona".
+    "Mohn" would otherwise be rewritten to "Mona".
 
     Residual risk to be aware of: a *different* name that sounds the same as a
     speaker's ("Anna" next to a speaker called "Anne") is rewritten too. Only

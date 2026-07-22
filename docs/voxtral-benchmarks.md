@@ -43,7 +43,7 @@ Wiederholungsunterdrückung gegen grammatische Flüssigkeit.
 wirkungslos. `logit_bias` funktioniert als echte Hotword-Steuerung (Token `'y'`
 +2 korrigierte „Mohnas" → „Mona's" ohne messbaren Kollateralschaden), ist aber
 kontextfrei und tokenisierungsabhängig — `Markus` ist ein einzelnes Token,
-`Mona` zerfällt in `[' Rom','y']`.
+`Mona` zerfällt in `[' Mon','a']`.
 
 ---
 

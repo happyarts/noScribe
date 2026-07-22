@@ -41,7 +41,7 @@ def test_koelner_phonetik_groups_same_sounding_names():
     kp = tc._koelner_phonetik
     assert kp("Markus") == kp("Marcus")          # c/k are indistinguishable by ear
     assert kp("Mona") == kp("Mohna") == kp("Muna")
-    assert kp("Roman") != kp("Mona")
+    assert kp("Monika") != kp("Mona")
 
 
 def test_apply_name_corrections_fixes_spelling():

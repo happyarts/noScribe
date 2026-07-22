@@ -308,7 +308,7 @@ def test_html_to_webvtt():
         <p></p>
         <p><a name="ts_0_12140_s1"></a></p>
         <p><a name="ts_0_12140_s1"> </a></p>
-        <p><a name="ts_0_12140_s1">I said something about Romy's story.</a></p>
+        <p><a name="ts_0_12140_s1">I said something about Mona's story.</a></p>
     </body>
     """
     result_string = (
@@ -317,7 +317,7 @@ def test_html_to_webvtt():
         "My Information Header\n\n"
         "1\n"
         "00:00:00.000 --> 00:00:12.140\n"
-        "<v s1>I said something about Romy's story.\n\n"
+        "<v s1>I said something about Mona's story.\n\n"
     )
     assert utils.html_to_webvtt(html_string) == result_string
 
@@ -364,9 +364,9 @@ class TestApostropheFix:
         return d
 
     def test_not_escaping_apostrophes_webvtt(self):
-        result = utils._vtt_escape("Romy's story")
+        result = utils._vtt_escape("Mona's story")
 
-        assert "Romy's" in result, (
+        assert "Mona's" in result, (
             f"Expected literal apostrophe in VTT output, got: {result}"
         )
         assert "&#x27;" not in result, f"Found &#x27; entity in VTT output: {result}"
@@ -378,9 +378,9 @@ class TestApostropheFix:
         assert "&gt;" in result, "> should be escaped to &gt;"
 
     def test_not_escaping_apostrophes_txt(self):
-        d = self._build_doc_with_text("Romy's story")
+        d = self._build_doc_with_text("Mona's story")
         txt_out = utils.html_to_text(d.asHTML(), use_only_body=True)
-        assert "Romy's" in txt_out, (
+        assert "Mona's" in txt_out, (
             f"Expected literal apostrophe in TXT output, got: {txt_out}"
         )
         assert "&#x27;" not in txt_out, f"Found &#x27; entity in TXT output: {txt_out}"

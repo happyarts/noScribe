@@ -35,9 +35,9 @@ class TestApostropheFix:
 
     def test_html_output_no_entity(self):
         """HTML output should contain literal apostrophe, not &#x27;"""
-        d = _build_doc_with_text("Romy's story")
+        d = _build_doc_with_text("Mona's story")
         html_out = d.asHTML()
-        assert "Romy's" in html_out, f"Expected literal apostrophe in HTML output, got: {html_out}"
+        assert "Mona's" in html_out, f"Expected literal apostrophe in HTML output, got: {html_out}"
         assert "&#x27;" not in html_out, f"Found &#x27; entity in HTML output: {html_out}"
     def test_html_still_escapes_dangerous_chars(self):
         """Ensure that <, >, & are still properly escaped."""
@@ -60,7 +60,7 @@ class TestApostropheFix:
             "It's a test",
             "Don't worry",
             "I'm fine",
-            "That's Romy's idea",
+            "That's Mona's idea",
             "The '90s were great",
         ]
         for text in test_cases:
