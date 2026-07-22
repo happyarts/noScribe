@@ -97,6 +97,7 @@ de:
   start_canceling: 'Abbrechen läuft...'
   start_transcription: 'Transkription...'
   loading_whisper: 'Whisper laden'
+  loading_voxtral: 'Voxtral laden'
   pyannote_cuda_retry: 'PyAnnote CUDA-Fehler erkannt. Erneuter Versuch auf der CPU.'
   whisper_cuda_retry: 'Whisper CUDA-Fehler erkannt. Erneuter Versuch auf der CPU.'
   vad: 'Sprachaktivitätserkennung...'

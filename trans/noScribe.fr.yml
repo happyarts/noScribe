@@ -96,6 +96,7 @@ fr:
   start_canceling: "Annulation en cours... (veuillez patienter un instant)"
   start_transcription: "Transcription en cours..."
   loading_whisper: "Chargement de whisper"
+  loading_voxtral: "Chargement de Voxtral"
   pyannote_cuda_retry: 'Erreur CUDA PyAnnote détectée. Nouvel essai sur le CPU.'
   whisper_cuda_retry: 'Erreur CUDA Whisper détectée. Nouvel essai sur le CPU.'
   vad: "Détection d'activité vocale..."

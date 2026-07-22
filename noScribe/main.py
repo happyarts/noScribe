@@ -2760,7 +2760,10 @@ class App(ctk.CTk):
 
                 self.logn()
                 self.logn(t('start_transcription'), 'highlight')
-                self.logn(t('loading_whisper'))
+                if getattr(job.whisper_model, "engine", "whisper") == "voxtral":
+                    self.logn(t('loading_voxtral'))
+                else:
+                    self.logn(t('loading_whisper'))
 
                 info = None
                 transcription_success = False

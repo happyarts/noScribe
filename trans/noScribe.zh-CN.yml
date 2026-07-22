@@ -96,6 +96,7 @@ zh-CN: &defaults
   start_canceling: '正在取消...（请稍候）'
   start_transcription: '正在转录...'
   loading_whisper: '正在加载whisper'
+  loading_voxtral: '正在加载Voxtral'
   pyannote_cuda_retry: '检测到 PyAnnote 的 CUDA 错误。正在使用 CPU 重试。'
   whisper_cuda_retry: '检测到 Whisper 的 CUDA 错误。正在使用 CPU 重试。'
   vad: '语音活动检测...'

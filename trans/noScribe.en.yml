@@ -101,6 +101,7 @@ en:
   start_canceling: 'Canceling... (please wait a second)'
   start_transcription: 'Transcription...'
   loading_whisper: 'Loading whisper'
+  loading_voxtral: 'Loading Voxtral'
   pyannote_cuda_retry: 'PyAnnote CUDA error detected. Retrying on CPU.'
   whisper_cuda_retry: 'Whisper CUDA error detected. Retrying on CPU.'
   vad: 'Voice activity detection...'
