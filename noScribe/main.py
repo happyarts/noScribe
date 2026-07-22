@@ -2041,9 +2041,14 @@ class App(ctk.CTk):
                 if tags == 'error':
                     txt = f'ERROR: {txt}'
                 if tb != '':
-                    txt = f'{txt}\nTraceback:\n{tb}' 
+                    txt = f'{txt}\nTraceback:\n{tb}'
                 self.log_file.write(txt)
                 self.log_file.flush()
+                # Track whether the log currently ends mid-line, so status
+                # messages arriving while transcript text streams in (which is
+                # written without a trailing newline) can start on a fresh line.
+                if txt:
+                    self._log_line_open = not txt.endswith('\n')
             except Exception as e:
                 # If we get here, both screen and file logging failed
                 # As a last resort, print to stderr to not lose the error
@@ -3256,6 +3261,11 @@ class App(ctk.CTk):
                 if mtype == "log":
                     level = msg.get("level", "info")
                     txt = msg.get("msg", "")
+                    # Transcript text streams in without trailing newlines;
+                    # finish that line first so the status message does not get
+                    # glued onto the paragraph.
+                    if getattr(self, '_log_line_open', False):
+                        self.logn()
                     if level == 'error':
                         self.logn(txt, 'error')
                     else:
