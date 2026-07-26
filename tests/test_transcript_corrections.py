@@ -104,7 +104,7 @@ def test_degenerate_detector_separates_real_text_from_loops():
 # Cycles taken from loops that reached finished transcripts before the
 # detector counted cycles instead of identical neighbours. Every one of them
 # is two words long, so no two adjacent words are equal and the old run
-# counter measured 1 where the truth was 32-68 repeats.
+# counter measured 1 where the truth ran from 19 to 68 repeats.
 OBSERVED_LOOP_CYCLES = ["dass das, ", "es ist, ", "ja, ich, ", "Macht ist... "]
 
 
@@ -120,7 +120,7 @@ def test_two_word_loops_are_caught_even_when_buried_in_real_speech(cycle):
     from noScribe.voxtral_engine import _looks_degenerate
 
     clean = _clean_german_paragraph()
-    loop = cycle * 32  # the mildest of the five observed loops
+    loop = cycle * 19  # the mildest two-word loop actually observed
     assert _looks_degenerate(loop.strip())
     assert _looks_degenerate(clean + " " + loop)
     # and still when the loop is the same 4% slice of the chunk it was in the
@@ -132,19 +132,21 @@ def test_two_word_loops_are_caught_even_when_buried_in_real_speech(cycle):
 def test_real_speech_stays_clean_under_the_cycle_counter():
     """The counter must not fire on the repetition real speech does contain.
 
-    Over 120 real chunks the highest cycle count was 5, against a threshold of
-    20. The last case below is the one that set the threshold: a facilitator
-    asking the same two-word question around a group is not a loop.
+    Over 278 real units (Voxtral chunks and finished Whisper transcripts)
+    nothing that reads as speech exceeded 11 repeats, against a threshold of
+    12. The margin is thin by measurement, not by choice -- see the constant.
     """
-    from noScribe.voxtral_engine import _looks_degenerate, _longest_cycle_repeats
+    from noScribe.voxtral_engine import (DEGENERATE_CYCLE_REPEATS,
+                                         _longest_cycle_repeats, _looks_degenerate)
 
     clean = _clean_german_paragraph()
-    assert _longest_cycle_repeats(clean.split()) < 20
-    # emphatic repetition, a filler stutter, and a repeated question to a group
-    for phrase in ("Ja, ja, ja, genau so. ",
-                   "Also, also, also, ich meine. ",
-                   "Und du? Und du? Und du? Und du? "):
-        assert not _looks_degenerate(clean + " " + phrase * 4 + clean)
+    assert _longest_cycle_repeats(clean.split()) < DEGENERATE_CYCLE_REPEATS
+    # Emphatic repetition and a filler stutter, at the length real speech
+    # reaches. A longer synthetic case used to live here and was the only
+    # reason the threshold sat at 20; the corpus never produced anything like
+    # it, while a real 19-repeat loop went undetected because of it.
+    for phrase in ("Ja, ja, ja, genau so. ", "Also, also, also, ich meine. "):
+        assert not _looks_degenerate(clean + " " + phrase * 2 + clean)
 
 
 def _clean_german_paragraph():

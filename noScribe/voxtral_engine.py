@@ -604,15 +604,25 @@ def _quant_summary(repo):
 # words are ever equal and counting identical neighbours (which is what this
 # used to do) sees nothing at all.
 #
-# Counting repeats of a k-word cycle instead, measured over 120 real chunks
-# (German, Voxtral, 200-4200 words each): clean passes reach 5 repeats, the six
-# observed loops ran 32-68. Anything in that gap catches every observed loop
-# and flags nothing in the corpus; the threshold sits high in it rather than
-# just above 5, because rhetorical repetition can go further than the corpus
-# happens to show -- a facilitator asking "Und du? Und du? Und du?" around a
-# group reaches a dozen without anything being wrong. 20 tolerates that and
-# still fires 12 repeats before the mildest loop we have seen.
-DEGENERATE_CYCLE_REPEATS = 20
+# Counting repeats of a k-word cycle instead. Measured over 278 real units
+# (122 Voxtral chunks plus 139 finished Whisper transcripts, German and
+# English): everything that reads as speech stays at or below 11, and the
+# observed loops run 12, 19, 32, 39, 51, 65, 68 and 102. There is no wide gap
+# -- the two populations very nearly touch, so this threshold is a judgement
+# call, not a valley.
+#
+# It sits at 12 because a false positive costs time, not correctness: a
+# wrongly flagged pass keeps its clean prefix and re-decodes the rest, which
+# yields the same transcript by a longer route. A missed loop, by contrast,
+# ships. An earlier version used 20 to leave room for rhetorical repetition
+# that the corpus did not actually contain, and it would have let the 19-repeat
+# loop through.
+#
+# If false positives do show up in practice, the answer is not another nudge:
+# add a second signal (how much of the pass the cycle actually displaces), so
+# a twelve-word stutter and a three-thousand-word loop stop being scored the
+# same.
+DEGENERATE_CYCLE_REPEATS = 12
 # k up to 8 covers a repeated half-sentence; beyond that a verbatim repeat is
 # long enough to be deliberate.
 DEGENERATE_CYCLE_MAX_WORDS = 8
