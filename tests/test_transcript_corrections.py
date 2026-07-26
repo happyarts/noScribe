@@ -2,6 +2,8 @@
 Tests for the `transcript_corrections.py` module.
 """
 
+import pytest
+
 from noScribe import transcript_corrections as tc
 
 
@@ -89,7 +91,65 @@ def test_degenerate_detector_separates_real_text_from_loops():
     """
     from noScribe.voxtral_engine import _looks_degenerate
 
-    real = (
+    real = _clean_german_paragraph()
+    assert not _looks_degenerate(real)
+    # a pass that collapses into a loop, also when it starts out fine
+    assert _looks_degenerate("Jetzt. " * 40)
+    assert _looks_degenerate(real + " " + "Jetzt. " * 200)
+    # short passes are never judged (a brief pass is legitimate)
+    assert not _looks_degenerate("Ja ja ja ja ja.")
+    assert not _looks_degenerate("")
+
+
+# The cycles of the five loops that reached finished transcripts before the
+# detector counted cycles instead of identical neighbours. Every one of them
+# is two words long, so no two adjacent words are equal and the old run
+# counter measured 1 where the truth was 32-68 repeats.
+OBSERVED_LOOP_CYCLES = ["dass das, ", "es ist, ", "der Coachee, ",
+                        "ja, ich, ", "Macht ist... "]
+
+
+@pytest.mark.parametrize("cycle", OBSERVED_LOOP_CYCLES)
+def test_two_word_loops_are_caught_even_when_buried_in_real_speech(cycle):
+    """Regression: each of these shipped in a transcript unflagged.
+
+    The loop is checked in the shape it actually occurred -- a short burst
+    inside an otherwise clean chunk. That matters, because the compression
+    ratio is computed over the whole pass and cannot see a local loop: at the
+    real 4% ratio it moved from 2.6 to 2.8, far below the 4.0 threshold.
+    """
+    from noScribe.voxtral_engine import _looks_degenerate
+
+    clean = _clean_german_paragraph()
+    loop = cycle * 32  # the mildest of the five observed loops
+    assert _looks_degenerate(loop.strip())
+    assert _looks_degenerate(clean + " " + loop)
+    # and still when the loop is the same 4% slice of the chunk it was in the
+    # transcript that prompted this test
+    padded = " ".join([clean] * ((len(loop.split()) * 25) // len(clean.split()) + 1))
+    assert _looks_degenerate(padded + " " + loop)
+
+
+def test_real_speech_stays_clean_under_the_cycle_counter():
+    """The counter must not fire on the repetition real speech does contain.
+
+    Over 120 real chunks the highest cycle count was 5, against a threshold of
+    20. The last case below is the one that set the threshold: a facilitator
+    asking the same two-word question around a group is not a loop.
+    """
+    from noScribe.voxtral_engine import _looks_degenerate, _longest_cycle_repeats
+
+    clean = _clean_german_paragraph()
+    assert _longest_cycle_repeats(clean.split()) < 20
+    # emphatic repetition, a filler stutter, and a repeated question to a group
+    for phrase in ("Ja, ja, ja, genau so. ",
+                   "Also, also, also, ich meine. ",
+                   "Und du? Und du? Und du? Und du? "):
+        assert not _looks_degenerate(clean + " " + phrase * 4 + clean)
+
+
+def _clean_german_paragraph():
+    return (
         "Und wenn du schon ein Produkt nimmst, hervorragend, dann hast du schon einen "
         "Schritt weiter gemacht als viele andere. Meine Empfehlung wäre trotzdem, es "
         "einmal auszuprobieren. Der Test zeigt dir nämlich ganz konkret, wo deine Werte "
@@ -100,13 +160,6 @@ def test_degenerate_detector_separates_real_text_from_loops():
         "weil ich vorher jahrelang im Dunkeln getappt bin. Wer Kinder hat, sollte sie "
         "unbedingt ebenfalls testen lassen, denn die brauchen anteilig sogar mehr."
     )
-    assert not _looks_degenerate(real)
-    # a pass that collapses into a loop, also when it starts out fine
-    assert _looks_degenerate("Jetzt. " * 40)
-    assert _looks_degenerate(real + " " + "Jetzt. " * 200)
-    # short passes are never judged (a brief pass is legitimate)
-    assert not _looks_degenerate("Ja ja ja ja ja.")
-    assert not _looks_degenerate("")
 
 
 def _fake_audio(seconds=200):

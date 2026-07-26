@@ -597,11 +597,25 @@ def _quant_summary(repo):
     return base
 
 
-# A pass that collapses into a repetition loop ("Jetzt. Jetzt. Jetzt. ...")
-# repeats one word far more often than any real utterance: measured over real
-# transcripts (Whisper and Voxtral, German) the longest run of identical words
-# is 2, while an observed loop ran to 690. This is the primary, precise signal.
-DEGENERATE_WORD_RUN = 12
+# A pass that collapses into a repetition loop repeats a short cycle of words
+# far more often than any real utterance. The cycle is not always one word:
+# besides "Jetzt. Jetzt. Jetzt. ..." the observed loops ran "dass das, dass
+# das, ...", "der Coachee, der Coachee, ..." and "ja, ich, ja, ich, ..." -- two
+# words, so no two *adjacent* words are ever equal and counting identical
+# neighbours (which is what this used to do) sees nothing at all.
+#
+# Counting repeats of a k-word cycle instead, measured over 120 real chunks
+# (German, Voxtral, 200-4200 words each): clean passes reach 5 repeats, the six
+# observed loops ran 32-68. Anything in that gap catches every observed loop
+# and flags nothing in the corpus; the threshold sits high in it rather than
+# just above 5, because rhetorical repetition can go further than the corpus
+# happens to show -- a facilitator asking "Und du? Und du? Und du?" around a
+# group reaches a dozen without anything being wrong. 20 tolerates that and
+# still fires 12 repeats before the mildest loop we have seen.
+DEGENERATE_CYCLE_REPEATS = 20
+# k up to 8 covers a repeated half-sentence; beyond that a verbatim repeat is
+# long enough to be deliberate.
+DEGENERATE_CYCLE_MAX_WORDS = 8
 # Compression ratio as a secondary net, calibrated on the same files: real
 # transcripts measure 2.59-2.63, the loop measured 5.75. Whisper uses 2.4 for
 # this, which would flag good German prose here, so the threshold sits in the
@@ -648,7 +662,9 @@ RETRY_TEMPERATURES = ((0.2, 0), (0.8, 1))  # (temperature, seed)
 # stays bit-identical to plain greedy. Thresholds are deliberately strict:
 # the *entire* window must be one exact token cycle, which for a 3-token word
 # means ~64 verbatim repeats (a real mantra passage differs long before that,
-# and the transcript-level DEGENERATE_WORD_RUN=12 net stays in place).
+# and the transcript-level DEGENERATE_CYCLE_REPEATS=12 net stays in place --
+# it has to, because a single stray token ends the exact periodicity this
+# processor requires while the loop itself carries on).
 LOOP_BREAK_WINDOW = 192      # tail tokens that must be fully periodic
 LOOP_BREAK_MAX_PERIOD = 32   # longest token cycle we detect (~20 words)
 LOOP_BREAK_MIN_CYCLES = 6    # window/period must fit this many full cycles
@@ -723,14 +739,37 @@ class _LoopBreaker:
         return logits
 
 
+def _longest_cycle_repeats(words, max_k=DEGENERATE_CYCLE_MAX_WORDS):
+    """How often the most-repeated short word cycle repeats back-to-back.
+
+    A cycle of length k shows up as a run of positions where ``w[i] == w[i-k]``;
+    a run of n such positions means the k-word block was written (n + k) / k
+    times. Returns the largest count over all k, so "a a a" and "a b a b a b"
+    are both measured on the same scale.
+    """
+    best = 0
+    for k in range(1, max_k + 1):
+        run = 0
+        for i in range(k, len(words)):
+            run = run + 1 if words[i] == words[i - k] else 0
+            best = max(best, (run + k) // k)
+    return best
+
+
 def _looks_degenerate(text):
     """True if a pass collapsed into a repetition loop.
 
     Voxtral is run without a repetition penalty because that is what Mistral's
     reference transcription does and because a penalty strips punctuation from
-    verbatim speech. Rarely -- seen with the 24B model -- a pass still degenerates
-    into repeating one word thousands of times, which must not reach the
-    transcript.
+    verbatim speech. Rarely -- seen with the 24B model -- a pass still
+    degenerates into repeating the same few words thousands of times, which
+    must not reach the transcript.
+
+    The cycle count is the load-bearing signal. The compression ratio stays as
+    a net for degeneracies that are not a clean cycle, but it cannot be relied
+    on for local loops: it is computed over the whole pass, so a loop filling
+    4% of a 3300-word chunk moved the ratio from 2.6 to only 2.8 -- and even a
+    half-loop/half-prose pass measured below the threshold.
     """
     import zlib
     if not text:
@@ -738,11 +777,7 @@ def _looks_degenerate(text):
     words = text.split()
     if len(words) < 30:
         return False
-    run = best = 1
-    for a, b in zip(words, words[1:]):
-        run = run + 1 if a == b else 1
-        best = max(best, run)
-    if best >= DEGENERATE_WORD_RUN:
+    if _longest_cycle_repeats(words) >= DEGENERATE_CYCLE_REPEATS:
         return True
     raw = text.encode("utf-8")
     return len(raw) / max(1, len(zlib.compress(raw))) > DEGENERATE_COMPRESSION_RATIO
