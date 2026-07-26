@@ -842,7 +842,11 @@ def _prefix_end_index(words, loop_start):
 
 def _salvage_prefix(text, audio, align_cb):
     """Split a looping pass into its clean prefix and the sample index where a
-    fresh pass should resume, or None when there is nothing worth keeping.
+    fresh pass should resume.
+
+    Returns ``((prefix, cut), None)``, or ``(None, reason)`` when there is
+    nothing worth keeping -- the reason is logged, because "it fell back to a
+    full retry" is otherwise indistinguishable from "the rung never ran".
 
     The prefix is aligned against the whole window; CTC absorbs the audio the
     prefix does not cover as blanks, so the words still land where they were
@@ -852,24 +856,27 @@ def _salvage_prefix(text, audio, align_cb):
     words = text.split()
     span = _degenerate_span(words)
     if span is None:
-        return None                     # degenerate, but not as a clean cycle
+        return None, "the degeneration is not a clean cycle, so it cannot be located"
     keep = _prefix_end_index(words, span[0])
     if keep == 0:
-        return None                     # loop starts before the first sentence ends
+        return None, f"the loop starts at word {span[0]}, before any sentence ends"
     prefix = words[:keep]
     stamps = align_cb(prefix, audio)
+    if not stamps:
+        return None, "the prefix could not be aligned"
     # _Aligner falls back to spreading words evenly when real alignment is
     # impossible, marking those with prob 0.0. Those times are far too rough to
     # cut audio on -- a wrong cut duplicates or drops speech.
-    if not stamps or not any(w.get("prob", 0) for w in stamps):
-        return None
+    if not any(w.get("prob", 0) for w in stamps):
+        return None, "alignment only spread the words evenly; too rough to cut on"
     end_sample = min(int(stamps[-1]["end"] * SAMPLE_RATE), len(audio))
     if end_sample < SALVAGE_MIN_PREFIX_SEC * SAMPLE_RATE:
-        return None
+        return None, (f"only {end_sample / SAMPLE_RATE:.0f}s would be kept, "
+                      f"below the {SALVAGE_MIN_PREFIX_SEC}s minimum")
     cut = _quietest_frame_near(audio, end_sample, 1.0)
     if cut <= 0 or cut > len(audio):
-        return None
-    return " ".join(prefix), cut
+        return None, "the resume point fell outside the window"
+    return (" ".join(prefix), cut), None
 
 
 def _quietest_split(audio):
@@ -983,8 +990,11 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     # cheaper (one alignment plus the remainder) and it is the only rung that
     # preserves the greedy output for the clean part instead of re-rolling it.
     if align_cb is not None and depth < LOOP_SPLIT_MAX_DEPTH:
-        salvaged = _salvage_prefix(text, audio, align_cb)
-        if salvaged is not None:
+        salvaged, why_not = _salvage_prefix(text, audio, align_cb)
+        if salvaged is None:
+            _log(log_cb, "info", f"{label}: cannot keep the clean part "
+                                 f"({why_not}); retrying the whole window.")
+        else:
             prefix, cut = salvaged
             cut_sec = cut / SAMPLE_RATE
             rest_sec = dur - cut_sec

@@ -547,11 +547,27 @@ def test_no_salvage_when_alignment_only_spread_the_words():
     duplicates or drops speech, so the ladder must fall back instead."""
     from noScribe.voxtral_engine import _transcribe_guarded, _looks_degenerate
 
+    logged = []
     vox = _LoopsLateVoxtral()
-    out = _transcribe_guarded(vox, _fake_audio(200), "de", None, "Pass 1/1",
+    out = _transcribe_guarded(vox, _fake_audio(200), "de",
+                              lambda level, msg: logged.append(msg), "Pass 1/1",
                               align_cb=_align_by_spreading)
     assert not _looks_degenerate(out)
     assert vox.calls[:2] == [200, 200]     # no salvage; the full retry happened
+    # ...and the log says why, so a declined salvage is distinguishable from a
+    # rung that never ran
+    assert any("cannot keep the clean part" in m and "spread the words" in m
+               for m in logged), logged
+
+
+def test_declining_because_the_clean_part_is_short_says_so():
+    from noScribe.voxtral_engine import _transcribe_guarded, SALVAGE_MIN_PREFIX_SEC
+
+    logged = []
+    _transcribe_guarded(_FakeVoxtral(), _fake_audio(200), "de",
+                        lambda level, msg: logged.append(msg), "Pass 1/1",
+                        align_cb=_align_one_word_per_second)
+    assert any(f"below the {SALVAGE_MIN_PREFIX_SEC}s minimum" in m for m in logged), logged
 
 def test_no_salvage_when_the_clean_part_is_too_short():
     """Below the minimum a full retry costs about the same and keeps the whole
