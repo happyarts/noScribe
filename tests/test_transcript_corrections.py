@@ -451,3 +451,115 @@ def test_model_kind_unknown_is_conservative():
     assert _model_kind("totally-unknown-build") == "small8"
     # a 24B build that forgot the "small" token is still metered as big
     assert _model_kind("my-voxtral-24b-8bit") == "small8"
+
+
+# --------------------------------------------------------------------------- #
+# Keeping the clean prefix of a looping pass
+# --------------------------------------------------------------------------- #
+
+CLEAN_PREFIX = (
+    "Wir haben gestern lange über die eigentlichen Ziele gesprochen. "
+    "Danach kam ziemlich unvermittelt die Frage nach den Werten auf. "
+    "Ich fand diese Diskussion ausgesprochen aufschlussreich und ehrlich. "
+    "Am Ende blieb trotzdem eine gewisse Unsicherheit im Raum stehen. "
+    "Deshalb schauen wir uns die einzelnen Schritte heute genauer an. "
+    "Meine Empfehlung wäre, zunächst mit einer kleinen Übung zu beginnen. "
+    "Wer damit Schwierigkeiten hat, meldet sich einfach kurz bei mir. "
+    "Später sprechen wir dann über die Erfahrungen aus der Praxis. "
+    "Vielleicht ergibt sich daraus schon eine erste gemeinsame Richtung. "
+    "Für heute soll uns dieser Einstieg aber erst einmal genügen."
+)
+
+
+class _LoopsLateVoxtral:
+    """Transcribes a long window well for a while and only then falls into a
+    loop -- the shape a real pass has. Shorter windows come out clean."""
+
+    def __init__(self):
+        self.calls = []
+        self._i = 0
+
+    def transcribe_array(self, audio, language, max_new_tokens=0, repetition_penalty=1.0,
+                         token_cb=None, temperature=0.0, seed=None, info=None):
+        from noScribe.voxtral_engine import SAMPLE_RATE
+        dur = len(audio) / SAMPLE_RATE
+        self.calls.append(round(dur))
+        if dur > 150:
+            return CLEAN_PREFIX + " " + "dass das, " * 40
+        text = VARIED_TEXT[self._i % len(VARIED_TEXT)]
+        self._i += 1
+        return text
+
+
+def _align_one_word_per_second(words, window):
+    """Stand-in for forced alignment: one word per second, confidently."""
+    return [{"word": w, "start": float(i), "end": float(i + 1), "prob": 0.9}
+            for i, w in enumerate(words)]
+
+
+def _align_by_spreading(words, window):
+    """What _Aligner returns when real alignment is impossible: words spread
+    evenly over the window, marked with prob 0.0."""
+    return [dict(s, prob=0.0) for s in _align_one_word_per_second(words, window)]
+
+
+def test_degenerate_span_finds_where_the_loop_starts():
+    from noScribe.voxtral_engine import _degenerate_span
+
+    words = ("Ein ganz normaler Satz mit Inhalt. " + "dass das, " * 40).split()
+    start, end = _degenerate_span(words)
+    assert start == 6                      # right after the clean sentence
+    assert end == len(words)
+    # a cycle that repeats too few times is not a loop
+    assert _degenerate_span("dass das, dass das, dass das,".split()) is None
+
+
+def test_prefix_ends_at_the_last_completed_sentence():
+    from noScribe.voxtral_engine import _prefix_end_index
+
+    words = "Erster Satz. Zweiter Satz. Und dann kippt es weg weg weg".split()
+    # the loop starts at "weg" (index 8); the unfinished sentence before it goes too
+    assert _prefix_end_index(words, 8) == 4
+    # nothing to keep when no sentence ends before the loop
+    assert _prefix_end_index("und dann weg weg weg".split(), 2) == 0
+
+
+def test_clean_prefix_is_kept_and_only_the_rest_is_redone():
+    """The point of the rung: no second decode of the whole window, and the
+    part the model got right is preserved verbatim rather than re-rolled."""
+    from noScribe.voxtral_engine import _transcribe_guarded, _looks_degenerate
+
+    vox = _LoopsLateVoxtral()
+    out = _transcribe_guarded(vox, _fake_audio(200), "de", None, "Pass 1/1",
+                              align_cb=_align_one_word_per_second)
+
+    assert not _looks_degenerate(out)
+    assert "dass das," not in out
+    assert "Deshalb schauen wir uns die einzelnen Schritte heute genauer an." in out
+    # exactly two decodes: the original pass, then only what came after the loop
+    assert len(vox.calls) == 2, vox.calls
+    assert vox.calls[0] == 200
+    assert 100 <= vox.calls[1] <= 106, vox.calls   # ~96s kept, remainder redone
+
+
+def test_no_salvage_when_alignment_only_spread_the_words():
+    """Spread positions are far too rough to cut audio on -- a wrong cut
+    duplicates or drops speech, so the ladder must fall back instead."""
+    from noScribe.voxtral_engine import _transcribe_guarded, _looks_degenerate
+
+    vox = _LoopsLateVoxtral()
+    out = _transcribe_guarded(vox, _fake_audio(200), "de", None, "Pass 1/1",
+                              align_cb=_align_by_spreading)
+    assert not _looks_degenerate(out)
+    assert vox.calls[:2] == [200, 200]     # no salvage; the full retry happened
+
+def test_no_salvage_when_the_clean_part_is_too_short():
+    """Below the minimum a full retry costs about the same and keeps the whole
+    window's context, which a resumed pass loses."""
+    from noScribe.voxtral_engine import _transcribe_guarded, _looks_degenerate
+
+    vox = _FakeVoxtral()                   # loops after five words
+    out = _transcribe_guarded(vox, _fake_audio(200), "de", None, "Pass 1/1",
+                              align_cb=_align_one_word_per_second)
+    assert not _looks_degenerate(out)
+    assert [d for d, _ in vox.calls] == [200, 200, 100, 100]   # unchanged ladder

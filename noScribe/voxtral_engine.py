@@ -783,6 +783,95 @@ def _looks_degenerate(text):
     return len(raw) / max(1, len(zlib.compress(raw))) > DEGENERATE_COMPRESSION_RATIO
 
 
+# A looping pass is not wrong from the start: the model transcribes normally
+# and only then falls into the attractor, so everything before the loop is its
+# best greedy output. Re-running the whole window throws that away and pays to
+# regenerate it. Keeping the clean part instead needs one thing the ladder did
+# not have -- knowing *where* in the audio that part ends -- which forced
+# alignment can answer for a fraction of a decode.
+#
+# Below this much salvaged audio it is not worth it: a full retry costs about
+# the same and keeps the whole window's context, which a resumed pass loses.
+SALVAGE_MIN_PREFIX_SEC = 60
+# Word endings that mark a sentence, ignoring trailing quotes and brackets.
+_SENTENCE_END = ('.', '!', '?', '…', ':')
+_SENTENCE_TRAIL = '"\'»)]'
+
+
+def _degenerate_span(words, max_k=DEGENERATE_CYCLE_MAX_WORDS,
+                     min_repeats=DEGENERATE_CYCLE_REPEATS):
+    """Word indices [start, end) of the earliest run repeating a cycle at least
+    `min_repeats` times, or None if the text has no such run.
+
+    _looks_degenerate answers *whether* a pass looped; this answers *where*,
+    which is what makes keeping the clean part possible.
+    """
+    best = None
+    for k in range(1, max_k + 1):
+        run = 0
+        for i in range(k, len(words)):
+            if words[i] != words[i - k]:
+                run = 0
+                continue
+            run += 1
+            if (run + k) // k < min_repeats:
+                continue
+            start = i - run - k + 1
+            end = i + 1
+            while end < len(words) and words[end] == words[end - k]:
+                end += 1
+            if best is None or start < best[0]:
+                best = (start, end)
+            break                       # earliest qualifying run for this k
+    return best
+
+
+def _prefix_end_index(words, loop_start):
+    """How many words to keep: everything up to the last sentence that ends
+    before the loop begins, or 0 when there is no such sentence.
+
+    Cutting at a sentence boundary keeps the seam clean and drops the handful
+    of words a model tends to produce while sliding into the attractor,
+    together with the sentence they belong to.
+    """
+    for i in range(loop_start - 1, -1, -1):
+        if words[i].rstrip(_SENTENCE_TRAIL).endswith(_SENTENCE_END):
+            return i + 1
+    return 0
+
+
+def _salvage_prefix(text, audio, align_cb):
+    """Split a looping pass into its clean prefix and the sample index where a
+    fresh pass should resume, or None when there is nothing worth keeping.
+
+    The prefix is aligned against the whole window; CTC absorbs the audio the
+    prefix does not cover as blanks, so the words still land where they were
+    spoken. The cut is then snapped to the locally quietest frame, exactly as
+    the split rung does, so the resumed pass never starts mid-word.
+    """
+    words = text.split()
+    span = _degenerate_span(words)
+    if span is None:
+        return None                     # degenerate, but not as a clean cycle
+    keep = _prefix_end_index(words, span[0])
+    if keep == 0:
+        return None                     # loop starts before the first sentence ends
+    prefix = words[:keep]
+    stamps = align_cb(prefix, audio)
+    # _Aligner falls back to spreading words evenly when real alignment is
+    # impossible, marking those with prob 0.0. Those times are far too rough to
+    # cut audio on -- a wrong cut duplicates or drops speech.
+    if not stamps or not any(w.get("prob", 0) for w in stamps):
+        return None
+    end_sample = min(int(stamps[-1]["end"] * SAMPLE_RATE), len(audio))
+    if end_sample < SALVAGE_MIN_PREFIX_SEC * SAMPLE_RATE:
+        return None
+    cut = _quietest_frame_near(audio, end_sample, 1.0)
+    if cut <= 0 or cut > len(audio):
+        return None
+    return " ".join(prefix), cut
+
+
 def _quietest_split(audio):
     """Sample index nearest the middle that sits in the quietest 100 ms frame,
     so a pass is never split in the middle of a word."""
@@ -843,16 +932,21 @@ def _turn_profile(turns, dur):
 
 
 def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None,
-                        turns=None):
+                        turns=None, align_cb=None):
     """Transcribe one pass and repair it if it collapses into a repetition loop.
 
     Repair order, gentlest first:
 
     1. Greedy with the _LoopBreaker armed. Clean passes stay bit-identical;
        a loop is usually repaired in place at zero extra cost.
-    2. Low-temperature sampling (Whisper's own fallback): barely deviates
+    2. Keeping the clean prefix and resuming after it (needs `align_cb`): the
+       text before the loop is the model's best greedy output, so this is the
+       only rung that repairs a pass without regenerating what it got right.
+       It is also the cheapest -- one alignment plus a decode of the remainder,
+       instead of a decode of the whole window.
+    3. Low-temperature sampling (Whisper's own fallback): barely deviates
        from greedy, breaks the loop attractor, keeps repeated words.
-    3. Splitting -- the loop is a long-generation effect, shorter pieces
+    4. Splitting -- the loop is a long-generation effect, shorter pieces
        often come out clean at plain greedy. The cut prefers a speaker-turn
        boundary from the diarization (`turns`, window-relative seconds):
        context within a turn stays intact, across a change it matters least.
@@ -885,6 +979,30 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     if not bad:
         return text
 
+    # Keep what the pass got right. This runs before any full re-decode: it is
+    # cheaper (one alignment plus the remainder) and it is the only rung that
+    # preserves the greedy output for the clean part instead of re-rolling it.
+    if align_cb is not None and depth < LOOP_SPLIT_MAX_DEPTH:
+        salvaged = _salvage_prefix(text, audio, align_cb)
+        if salvaged is not None:
+            prefix, cut = salvaged
+            cut_sec = cut / SAMPLE_RATE
+            rest_sec = dur - cut_sec
+            if rest_sec < 1.0:
+                _log(log_cb, "info", f"{label}: repetition loop at the very end; "
+                                     f"keeping the clean first {cut_sec:.0f}s.")
+                return prefix
+            _log(log_cb, "warn", f"{label}: repetition loop after {cut_sec:.0f}s; "
+                                 f"keeping that part and re-transcribing the "
+                                 f"remaining {rest_sec:.0f}s.")
+            rest = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
+                                       depth + 1, token_cb,
+                                       _clip_turns(turns, cut_sec, dur), align_cb)
+            joined = f"{prefix} {rest}".strip()
+            if not _looks_degenerate(joined):
+                return joined
+            text = min((text, joined), key=len)
+
     temps = list(RETRY_TEMPERATURES)
     temperature, seed = temps.pop(0)
     _log(log_cb, "warn", f"{label}: repetition loop; retrying with gentle "
@@ -903,9 +1021,11 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         _log(log_cb, "warn", f"{label}: still looping, splitting the chunk {how} "
                              f"and retrying ({dur:.0f}s -> {cut_sec:.0f}s + {dur - cut_sec:.0f}s).")
         left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label,
-                                   depth + 1, token_cb, _clip_turns(turns, 0, cut_sec))
+                                   depth + 1, token_cb,
+                                   _clip_turns(turns, 0, cut_sec), align_cb)
         right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
-                                    depth + 1, token_cb, _clip_turns(turns, cut_sec, dur))
+                                    depth + 1, token_cb,
+                                    _clip_turns(turns, cut_sec, dur), align_cb)
         joined = f"{left} {right}".strip()
         if not _looks_degenerate(joined):
             return joined
@@ -1623,6 +1743,14 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     aligner_pool = _AlignerPool(language, log_cb) if need_timestamps else None
     aligner = None
 
+    # Lets the loop ladder locate the end of a clean prefix in the audio. Only
+    # available with word timestamps: without the aligner a resume point cannot
+    # be found, and the ladder falls back to its full-window retries.
+    _salvage_align_cb = None
+    if aligner is not None:
+        def _salvage_align_cb(words, window):
+            return aligner.align_words(words, window)
+
     audio, sr = sf.read(audio_path, dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -1703,7 +1831,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
 
         text = _transcribe_guarded(vox, chunk, language, log_cb,
                                    f"Chunk {ci + 1}/{n_chunks}", token_cb=_heartbeat,
-                                   turns=_clip_turns(turns, t_offset, a1 / SAMPLE_RATE))
+                                   turns=_clip_turns(turns, t_offset, a1 / SAMPLE_RATE),
+                                   align_cb=_salvage_align_cb)
         if not text:
             continue
         if corrections:
