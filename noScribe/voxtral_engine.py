@@ -600,9 +600,9 @@ def _quant_summary(repo):
 # A pass that collapses into a repetition loop repeats a short cycle of words
 # far more often than any real utterance. The cycle is not always one word:
 # besides "Jetzt. Jetzt. Jetzt. ..." the observed loops ran "dass das, dass
-# das, ...", "der Coachee, der Coachee, ..." and "ja, ich, ja, ich, ..." -- two
-# words, so no two *adjacent* words are ever equal and counting identical
-# neighbours (which is what this used to do) sees nothing at all.
+# das, ..." and "ja, ich, ja, ich, ..." -- two words, so no two *adjacent*
+# words are ever equal and counting identical neighbours (which is what this
+# used to do) sees nothing at all.
 #
 # Counting repeats of a k-word cycle instead, measured over 120 real chunks
 # (German, Voxtral, 200-4200 words each): clean passes reach 5 repeats, the six

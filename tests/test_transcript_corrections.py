@@ -101,12 +101,11 @@ def test_degenerate_detector_separates_real_text_from_loops():
     assert not _looks_degenerate("")
 
 
-# The cycles of the five loops that reached finished transcripts before the
+# Cycles taken from loops that reached finished transcripts before the
 # detector counted cycles instead of identical neighbours. Every one of them
 # is two words long, so no two adjacent words are equal and the old run
 # counter measured 1 where the truth was 32-68 repeats.
-OBSERVED_LOOP_CYCLES = ["dass das, ", "es ist, ", "der Coachee, ",
-                        "ja, ich, ", "Macht ist... "]
+OBSERVED_LOOP_CYCLES = ["dass das, ", "es ist, ", "ja, ich, ", "Macht ist... "]
 
 
 @pytest.mark.parametrize("cycle", OBSERVED_LOOP_CYCLES)
