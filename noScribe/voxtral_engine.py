@@ -986,6 +986,80 @@ def _salvage_prefix(text, audio, align_cb):
     return (" ".join(prefix), cut), None
 
 
+# --------------------------------------------------------------------------- #
+# A chunk that came back in the wrong language
+# --------------------------------------------------------------------------- #
+# Voxtral sometimes translates instead of transcribing -- a whole chunk comes
+# back in another language, with no loop and nothing else wrong with it, so the
+# retry ladder never sees a reason to intervene. Measured over six runs of one
+# 5h54m German recording: four of them shipped 30 minutes of English from a
+# chunk that had no loop at all.
+#
+# A repair is only accepted if it is *more* than "the language now matches":
+# pinning `lang:xx` into the prompt was measured to drop the first 150 words of
+# a 1426 s window -- a minute of speech, silently -- so a repair that comes back
+# much shorter than the pass it replaces is refused too.
+RELANGUAGE_MIN_WORDS = 0.85
+# How many chunks have to agree before their language counts as the file's.
+# One chunk is not evidence: if the *first* chunk is the translated one, taking
+# its language as the truth would send every later chunk to be "repaired" into
+# the wrong language.
+RELANGUAGE_MIN_AGREEING = 2
+
+
+def _file_language(tally):
+    """The file's language so far, or None while the evidence is too thin."""
+    if not tally:
+        return None
+    best, n = max(tally.items(), key=lambda kv: kv[1])
+    runner_up = max([v for k, v in tally.items() if k != best], default=0)
+    return best if n >= RELANGUAGE_MIN_AGREEING and n > runner_up else None
+
+
+def _relanguage_chunk(vox, chunk, want, language, log_cb, label, original):
+    """Decode `chunk` again after it came back in the wrong language.
+
+    Returns the repaired text, or None when no attempt earned its place -- the
+    caller then keeps what it had and says so in the log, because a silent
+    failure here is indistinguishable from a chunk that was fine.
+    """
+    n0 = len(original.split())
+    # Same budget the first pass had (see _transcribe_guarded).
+    max_new = min(32768, int(len(chunk) / SAMPLE_RATE * 20) + 512)
+    temperature, seed = RETRY_TEMPERATURES[0]
+    attempts = (
+        # The direct instrument first: with a language in the prompt Voxtral is
+        # told what to write, instead of inferring it from what it hears.
+        (f"pinned to '{want}'", dict(language=want)),
+        # ...and if that loses half the chunk, the ladder's own tool. Measured
+        # on the run where this rung was still declining, a temperature retry of
+        # the same window came back in the right language.
+        (f"temperature {temperature}",
+         dict(language=language, temperature=temperature, seed=seed)),
+    )
+    for how, kw in attempts:
+        text = vox.transcribe_array(chunk, max_new_tokens=max_new, **kw)
+        got, _ = _detect_language(text)
+        n = len(text.split())
+        if got != want:
+            _log(log_cb, "info", f"{label}: re-decode {how} still reads as "
+                                 f"'{got}'.")
+            continue
+        if _looks_degenerate(text):
+            _log(log_cb, "info", f"{label}: re-decode {how} came back "
+                                 f"degenerate.")
+            continue
+        if n < RELANGUAGE_MIN_WORDS * n0:
+            _log(log_cb, "info", f"{label}: re-decode {how} is only {n} words "
+                                 f"against {n0}; too much of the chunk went "
+                                 f"missing to trust it.")
+            continue
+        _log(log_cb, "info", f"{label}: re-decode {how} reads as '{want}' "
+                             f"({n} words); using it.")
+        return text
+    return None
+
+
 def _quietest_split(audio):
     """Sample index nearest the middle that sits in the quietest 100 ms frame,
     so a pass is never split in the middle of a word."""
@@ -2302,6 +2376,15 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     aligner_pool = _AlignerPool(language, log_cb) if need_timestamps else None
     aligner = None
 
+    # Language bookkeeping for the translated-chunk guard. With an explicit
+    # language there is a target from the first chunk on; on Auto the file has
+    # to say what it is first (see _file_language), which means the earliest
+    # chunks can only be flagged after the fact -- they are already streamed to
+    # the caller by then.
+    pinned_lang = (language or "").strip().lower()[:2] or None
+    lang_tally = {}
+    unchecked = []
+
     audio, sr = sf.read(audio_path, dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -2387,6 +2470,33 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                                              if aligner_pool is not None else None))
         if not text:
             continue
+        # Did this chunk come back in the file's language? A translated chunk is
+        # otherwise perfectly well-formed, so nothing else in the pipeline has a
+        # reason to question it.
+        label = f"Chunk {ci + 1}/{n_chunks}"
+        chunk_lang, _ = _detect_language(text)
+        want = pinned_lang or _file_language(lang_tally)
+        if want and chunk_lang and chunk_lang != want:
+            _log(log_cb, "warn",
+                 f"{label}: reads as '{chunk_lang}' while the file reads as "
+                 f"'{want}' -- Voxtral translated this chunk instead of "
+                 f"transcribing it; decoding it again.")
+            repaired = _relanguage_chunk(vox, chunk, want, language, log_cb,
+                                         label, text)
+            if repaired is not None:
+                text, chunk_lang = repaired, want
+            else:
+                _log(log_cb, "warn",
+                     f"{label}: could not get this chunk back in '{want}'; "
+                     f"keeping the '{chunk_lang}' version -- these "
+                     f"{len(text.split())} words are a translation, not a "
+                     f"transcript.")
+        if chunk_lang:
+            lang_tally[chunk_lang] = lang_tally.get(chunk_lang, 0) + 1
+            if not want:
+                # Nothing to compare against yet. Remember it so it can still be
+                # named at the end, once the file has said what it is.
+                unchecked.append((ci + 1, chunk_lang))
         if corrections:
             text = transcript_corrections.apply_corrections(text, corrections)
         if speaker_names:
@@ -2425,5 +2535,19 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         # Snap the bar to this pass's true end position in the whole audio
         # (duration-weighted; the final pass lands on 100%).
         _emit_progress(a1 / n_samples * 100)
+
+    # On Auto the file's language is only established once a couple of chunks
+    # agree, so a chunk translated before that point was streamed to the caller
+    # unchallenged. It cannot be taken back -- but leaving it unmentioned would
+    # be worse: the transcript changes language part way through and nothing
+    # says why.
+    settled = pinned_lang or _file_language(lang_tally)
+    odd = [ci for ci, lg in unchecked if settled and lg != settled]
+    if odd:
+        _log(log_cb, "warn",
+             f"Chunk(s) {', '.join(str(c) for c in odd)} of {n_chunks} read as "
+             f"a different language than the rest of the file ('{settled}') and "
+             f"were already written out before that was known. Voxtral most "
+             f"likely translated them; they are worth re-running on their own.")
 
     return all_segments, {"duration": duration, "language": language}

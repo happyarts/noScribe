@@ -657,6 +657,92 @@ def test_a_salvage_whose_halves_agree_is_still_kept():
     assert vox.calls[:2] == [200, 104]            # Präfix behalten, Rest neu
 
 
+# --------------------------------------------------------------------------- #
+# Ein ganzer Chunk kommt in der falschen Sprache zurück
+# --------------------------------------------------------------------------- #
+def test_one_chunk_never_establishes_the_files_language():
+    """Der gefährlichste Fehlgriff wäre, die Sprache des ERSTEN Chunks als
+    Wahrheit zu nehmen: ist genau der der übersetzte, würde jeder folgende
+    Chunk in die falsche Sprache 'repariert'. Zwei müssen sich einig sein."""
+    from noScribe.voxtral_engine import _file_language
+
+    assert _file_language({}) is None
+    assert _file_language({"en": 1}) is None            # der Ausreißer allein
+    assert _file_language({"en": 1, "de": 1}) is None   # Patt entscheidet nichts
+    assert _file_language({"en": 1, "de": 2}) == "de"
+    assert _file_language({"de": 5, "en": 1}) == "de"
+
+
+class _WrongLanguageVoxtral:
+    """Erst mit `lang:de` im Prompt, das den Anfang verschluckt, dann der
+    Temperatur-Versuch, der vollständig zurückkommt."""
+
+    def __init__(self, pinned_text, warm_text):
+        self.calls = []
+        self._texts = [pinned_text, warm_text]
+
+    def transcribe_array(self, audio, language=None, max_new_tokens=0,
+                         repetition_penalty=1.0, token_cb=None, temperature=0.0,
+                         seed=None, info=None):
+        self.calls.append((language, temperature))
+        return self._texts[min(len(self.calls) - 1, len(self._texts) - 1)]
+
+
+def test_a_repair_that_loses_the_beginning_is_refused():
+    """Gemessen: `lang:de` in den Prompt zu schreiben kostete bei einem
+    1426-s-Fenster die ersten 150 Wörter -- eine Minute Sprache, lautlos. Die
+    richtige Sprache allein macht eine Reparatur also nicht gut."""
+    from noScribe.voxtral_engine import _relanguage_chunk
+
+    original = ENGLISH_PREFIX + " " + " ".join(VARIED_TEXT)   # nur die Länge zählt
+    stump = CLEAN_PREFIX                       # deutsch, aber viel zu kurz
+    full = CLEAN_PREFIX + " " + " ".join(VARIED_TEXT)
+    assert len(stump.split()) < 0.85 * len(original.split()), "Testaufbau"
+
+    logged = []
+    vox = _WrongLanguageVoxtral(stump, full)
+    out = _relanguage_chunk(vox, _fake_audio(200), "de", None,
+                            lambda lvl, msg: logged.append(msg), "Chunk 5/15",
+                            original)
+
+    assert out is not None and out.startswith(CLEAN_PREFIX[:40])
+    assert len(out.split()) == len(full.split()), "der Stummel wurde genommen"
+    assert [t for _, t in vox.calls] == [0.0, 0.2], vox.calls
+    assert any("went missing" in m for m in logged), logged
+
+
+def test_an_unrepairable_chunk_is_reported_rather_than_hidden():
+    """Bleibt es bei der Übersetzung, wird das Original behalten -- aber die
+    Leiter muss es sagen. Ein stilles Scheitern ist von einem Chunk, der in
+    Ordnung war, nicht zu unterscheiden."""
+    from noScribe.voxtral_engine import _relanguage_chunk
+
+    vox = _WrongLanguageVoxtral(ENGLISH_PREFIX, ENGLISH_PREFIX)
+    logged = []
+    out = _relanguage_chunk(vox, _fake_audio(200), "de", None,
+                            lambda lvl, msg: logged.append(msg), "Chunk 5/15",
+                            ENGLISH_PREFIX)
+
+    assert out is None
+    assert len(vox.calls) == 2, "es wurde nicht beides versucht"
+    assert any("still reads as 'en'" in m for m in logged), logged
+
+
+def test_transcribe_checks_every_chunks_language():
+    """Verdrahtung: der Fall aus den Läufen 1-4 hatte GAR KEINEN Loop -- der
+    Greedy-Durchgang kam englisch zurück und wurde genommen. Die Prüfung muss
+    deshalb in transcribe() sitzen, nicht in der Loop-Leiter."""
+    import inspect
+    from noScribe import voxtral_engine as v
+
+    src = inspect.getsource(v.transcribe)
+    assert "_relanguage_chunk(" in src, "kein Sprachabgleich pro Chunk"
+    assert "_file_language(" in src, "die Dateisprache wird nicht bestimmt"
+    # ...und was vor dem Bekanntwerden der Sprache schon rausging, wird am Ende
+    # wenigstens benannt.
+    assert "already written out" in src
+
+
 def test_remembered_model_survives_the_decorated_picker():
     """Die Modellauswahl wird als Klarname gespeichert, nicht als Anzeigetext.
 
