@@ -674,8 +674,8 @@ def test_one_chunk_never_establishes_the_files_language():
 
 
 class _WrongLanguageVoxtral:
-    """Erst mit `lang:de` im Prompt, das den Anfang verschluckt, dann der
-    Temperatur-Versuch, der vollständig zurückkommt."""
+    """Erst der Temperatur-Versuch, der den Anfang verschluckt, dann der
+    `lang:de`-Versuch, der vollständig zurückkommt."""
 
     def __init__(self, pinned_text, warm_text):
         self.calls = []
@@ -707,7 +707,7 @@ def test_a_repair_that_loses_the_beginning_is_refused():
 
     assert out is not None and out.startswith(CLEAN_PREFIX[:40])
     assert len(out.split()) == len(full.split()), "der Stummel wurde genommen"
-    assert [t for _, t in vox.calls] == [0.0, 0.2], vox.calls
+    assert [t for _, t in vox.calls] == [0.2, 0.0], vox.calls
     assert any("went missing" in m for m in logged), logged
 
 

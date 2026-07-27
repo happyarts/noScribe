@@ -1028,14 +1028,19 @@ def _relanguage_chunk(vox, chunk, want, language, log_cb, label, original):
     max_new = min(32768, int(len(chunk) / SAMPLE_RATE * 20) + 512)
     temperature, seed = RETRY_TEMPERATURES[0]
     attempts = (
-        # The direct instrument first: with a language in the prompt Voxtral is
-        # told what to write, instead of inferring it from what it hears.
-        (f"pinned to '{want}'", dict(language=want)),
-        # ...and if that loses half the chunk, the ladder's own tool. Measured
-        # on the run where this rung was still declining, a temperature retry of
-        # the same window came back in the right language.
+        # Temperature first, against expectation. Writing `lang:xx` into the
+        # prompt is the documented instrument -- Mistral's own processor builds
+        # exactly this marker, and ours produces token-identical input -- but on
+        # the two windows that translate reproducibly it did NOT bring them
+        # back: 0 of 2, both still English. A retry at the ladder's first
+        # temperature fixed both. Perturbing the decode beats telling the model
+        # what to do, so it goes first and usually ends the matter.
         (f"temperature {temperature}",
          dict(language=language, temperature=temperature, seed=seed)),
+        # Still worth a second shot: it costs nothing unless the first attempt
+        # already failed, and a translation the sampling cannot shake may yet
+        # yield to being told the language outright.
+        (f"pinned to '{want}'", dict(language=want)),
     )
     for how, kw in attempts:
         text = vox.transcribe_array(chunk, max_new_tokens=max_new, **kw)
