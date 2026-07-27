@@ -33,18 +33,51 @@ def test_parse_sanitizes_anchor_breaking_chars():
 
 
 def _stub_app():
-    """Minimal App-like object for calling _apply_speaker_name unbound."""
+    """Minimal App-like object for calling _apply_speaker_name unbound.
+    All the App contributes is the log sink for the overflow warning."""
     logs = []
     return SimpleNamespace(
-        _speaker_name_map={},
-        _speaker_name_overflow_warned=False,
         logn=lambda *a, **k: logs.append(a),
         _logs=logs,
     )
 
 
 def _job(names):
-    return SimpleNamespace(speaker_names=parse_speaker_names(names))
+    """A job carries both the names and the mapping built from them."""
+    return SimpleNamespace(
+        speaker_names=parse_speaker_names(names),
+        speaker_name_map={},
+    )
+
+
+def test_real_job_carries_the_mapping_state():
+    """The stubs above are SimpleNamespaces, so they would not notice if the
+    real job stopped providing the mapping attributes _apply_speaker_name uses.
+    Two jobs must also start out with separate maps."""
+    job_a = m.create_transcription_job(speaker_names="Mona, Lena")
+    job_b = m.create_transcription_job()
+    assert job_a.speaker_name_map == {} and job_b.speaker_name_map == {}
+    m.App._apply_speaker_name(_stub_app(), "S01", job_a)
+    assert job_b.speaker_name_map == {}
+
+
+def test_a_repeated_job_rebuilds_the_mapping():
+    """The queue's repeat button re-runs the same job object. Diarization runs
+    again from scratch and may hand out different labels, so the mapping must
+    not survive into the second run -- otherwise the next label first seen gets
+    names[len(old_map)] instead of names[0]."""
+    app = _stub_app()
+    job = m.create_transcription_job(speaker_names="Mona, Markus")
+
+    job.set_running()
+    assert m.App._apply_speaker_name(app, "S02", job) == "Mona"
+
+    job.set_canceled("stopped")   # the state the repeat button acts on
+    job.set_running()             # ... and what restarting it does
+    assert job.speaker_name_map == {}
+    # the first speaker heard on the second run gets the first name again
+    assert m.App._apply_speaker_name(app, "S00", job) == "Mona"
+    assert m.App._apply_speaker_name(app, "S01", job) == "Markus"
 
 
 def test_maps_in_first_appearance_order():
@@ -69,7 +102,6 @@ def test_overflow_keeps_base_label_and_warns_once():
     # more speakers than names -> extra speaker keeps its raw label, not a name
     assert m.App._apply_speaker_name(app, "S02", job) == "S02"
     assert m.App._apply_speaker_name(app, "S03", job) == "S03"
-    assert app._speaker_name_overflow_warned is True
     # warned exactly once across all overflow speakers
     assert sum(1 for a in app._logs if a) == 1
 
@@ -86,4 +118,4 @@ def test_duplicate_names_map_to_distinct_keys():
     app, job = _stub_app(), _job("Anna, Anna")
     assert m.App._apply_speaker_name(app, "S01", job) == "Anna"
     assert m.App._apply_speaker_name(app, "S02", job) == "Anna"
-    assert set(app._speaker_name_map) == {"S01", "S02"}
+    assert set(job.speaker_name_map) == {"S01", "S02"}
