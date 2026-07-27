@@ -580,3 +580,17 @@ def test_no_salvage_when_the_clean_part_is_too_short():
                               align_cb=_align_one_word_per_second)
     assert not _looks_degenerate(out)
     assert [d for d, _ in vox.calls] == [200, 200, 100, 100]   # unchanged ladder
+
+
+def test_remembered_model_survives_the_decorated_picker():
+    """Die Modellauswahl wird als Klarname gespeichert, nicht als Anzeigetext.
+
+    Der Picker zeigt "name   ·   N GB RAM"; beim Start wird der gemerkte Wert in
+    whisper_models nachgeschlagen, wo nur Klarnamen stehen. Ein Merge hatte den
+    model_key()-Aufruf verloren, womit die Wahl beim nächsten Start still
+    vergessen worden wäre."""
+    import inspect
+    import noScribe.main as m
+
+    src = inspect.getsource(m.App.save_ui_state)
+    assert "self.model_key(" in src, "save_ui_state speichert den Anzeigetext"

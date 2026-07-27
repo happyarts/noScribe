@@ -2425,7 +2425,10 @@ class App(ctk.CTk):
         config['last_language'] = self.option_menu_language.get()
         config['last_speaker'] = self.option_menu_speaker.get()
         config['last_speaker_names'] = self.entry_speaker_names.get()
-        config['last_whisper_model'] = self.option_menu_whisper_model.get()
+        # model_key(): the picker shows "name   ·   N GB RAM", but startup looks
+        # the remembered value up in whisper_models by plain name -- storing the
+        # decorated label would silently forget the choice on the next start.
+        config['last_whisper_model'] = self.model_key(self.option_menu_whisper_model.get())
         config['last_pause'] = self.option_menu_pause.get()
         config['last_overlapping'] = self.check_box_overlapping.get()
         config['last_timestamps'] = self.check_box_timestamps.get()
