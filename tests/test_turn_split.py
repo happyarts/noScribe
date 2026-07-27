@@ -126,3 +126,38 @@ def test_diagnosis_line_appears_when_gentle_repairs_fail():
     _transcribe_guarded(_AlwaysLoops(), audio, "de",
                         lambda lvl, msg: logs.append(msg), "t", turns=turns)
     assert any("diarization profile" in m and "2 speaker(s)" in m for m in logs)
+
+
+def test_alignment_pool_serves_the_loop_ladder():
+    """Der Präfix-Erhalt braucht eine Zeitabbildung. Sie hing als Closure an
+    einer Variablen in transcribe() und wurde still wirkungslos, als die
+    Alignment-Architektur auf den Pool umgestellt wurde -- der Cherry-Pick lief
+    konfliktfrei durch, die Tests blieben grün, das Feature war tot. Jetzt
+    gehört sie dem Pool, und das ist hier festgehalten."""
+    from noScribe.voxtral_engine import _AlignerPool
+
+    pool = _AlignerPool("de", None)
+    seen = {}
+
+    class _StubAligner:
+        def align_words(self, words, audio, t_offset=0.0):
+            seen["words"], seen["audio"] = words, audio
+            return [{"word": w, "start": i, "end": i + 1, "prob": 0.9}
+                    for i, w in enumerate(words)]
+
+    pool.aligner_for = lambda text: _StubAligner()
+    out = pool.align_for_salvage(["Guten", "Morgen."], "AUDIO")
+    assert seen["words"] == ["Guten", "Morgen."] and seen["audio"] == "AUDIO"
+    assert out[-1]["end"] == 2
+
+
+def test_transcribe_hands_the_ladder_a_real_callback():
+    """Gegenprobe zur Verdrahtung: transcribe() muss die Pool-Methode
+    weiterreichen, nicht None und nicht eine veraltete lokale Variable."""
+    import inspect
+    from noScribe import voxtral_engine as v
+
+    src = inspect.getsource(v.transcribe)
+    call = src[src.index("_transcribe_guarded("):]
+    assert "align_cb=(aligner_pool.align_for_salvage" in call, \
+        "die Leiter bekommt keine Zeitabbildung mehr"

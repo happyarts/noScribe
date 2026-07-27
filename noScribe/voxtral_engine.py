@@ -368,6 +368,15 @@ class _AlignerPool:
         self._last_model = None
         self._warned = False
 
+    def align_for_salvage(self, words, window):
+        """Alignment für die Loop-Leiter: bildet einen sauberen Präfix auf seine
+        Audiozeit ab, damit nur der Rest neu dekodiert werden muss. Liegt hier
+        und nicht als Closure in transcribe(), weil eine Closure sich an einen
+        Variablennamen hängt -- und genau das ist schon einmal stillschweigend
+        gebrochen, als die Alignment-Architektur auf diesen Pool umgestellt
+        wurde."""
+        return self.aligner_for(" ".join(words)).align_words(words, window)
+
     def aligner_for(self, text):
         detected, _ = _detect_language(text)
         if self._explicit:
@@ -1763,14 +1772,6 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     aligner_pool = _AlignerPool(language, log_cb) if need_timestamps else None
     aligner = None
 
-    # Lets the loop ladder locate the end of a clean prefix in the audio. Only
-    # available with word timestamps: without the aligner a resume point cannot
-    # be found, and the ladder falls back to its full-window retries.
-    _salvage_align_cb = None
-    if aligner is not None:
-        def _salvage_align_cb(words, window):
-            return aligner.align_words(words, window)
-
     audio, sr = sf.read(audio_path, dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -1852,7 +1853,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         text = _transcribe_guarded(vox, chunk, language, log_cb,
                                    f"Chunk {ci + 1}/{n_chunks}", token_cb=_heartbeat,
                                    turns=_clip_turns(turns, t_offset, a1 / SAMPLE_RATE),
-                                   align_cb=_salvage_align_cb)
+                                   align_cb=(aligner_pool.align_for_salvage
+                                             if aligner_pool is not None else None))
         if not text:
             continue
         if corrections:
