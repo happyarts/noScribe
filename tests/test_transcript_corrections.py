@@ -557,7 +557,7 @@ def test_no_salvage_when_alignment_only_spread_the_words():
     assert vox.calls[:2] == [200, 200]     # no salvage; the full retry happened
     # ...and the log says why, so a declined salvage is distinguishable from a
     # rung that never ran
-    assert any("cannot keep the clean part" in m and "spread the words" in m
+    assert any("cannot keep the clean part" in m and "stays inactive" in m
                for m in logged), logged
 
 

@@ -950,7 +950,15 @@ def _salvage_prefix(text, audio, align_cb):
     # impossible, marking those with prob 0.0. Those times are far too rough to
     # cut audio on -- a wrong cut duplicates or drops speech.
     if not any(w.get("prob", 0) for w in stamps):
-        return None, "alignment only spread the words evenly; too rough to cut on"
+        # Structural, not incidental: for a window large enough that alignment
+        # must split, _Aligner refuses to time a partial prefix at all (the
+        # split cuts audio by character share, which only holds when the words
+        # span the window). Every chunk at the usual size hits this, so the
+        # rung cannot fire until the prefix gets a slice it really spans --
+        # worth distinguishing in the log from a one-off refusal.
+        return None, ("a window this size needs a split alignment, which is "
+                      "unsound for a partial prefix -- this rung stays inactive "
+                      "until that is solved")
     # The check that matters is on the LAST stamp: it is the only one the cut
     # below is taken from. `any(...)` over the whole prefix passed as soon as a
     # single word carried a real score, so a prefix whose head aligned and whose
