@@ -22,7 +22,7 @@ def test_stops_at_first_stop_token_excluded():
 
 
 def test_each_stop_token_ends_generation():
-    for stop in (2, 4, 32000):
+    for stop in _Voxtral._STOP_TOKENS:
         assert _consume([8, 9, stop, 8, 8]) == [8, 9], f"stop={stop}"
 
 
@@ -45,8 +45,32 @@ def test_immediate_stop_gives_empty():
     assert _consume([2, 5, 6]) == []
 
 
-def test_stop_tokens_are_the_library_defaults():
-    assert set(_Voxtral._STOP_TOKENS) == {2, 4, 32000}
+def test_stop_tokens_are_control_tokens_never_text():
+    """Voxtral's Tekken vocabulary has 131072 entries of which only the first
+    1000 are control tokens. mlx_voxtral's default stop set contains 32000 and
+    calls it "a potential padding token" -- it is not, it is the ordinary text
+    token " Capital", and stopping there truncated every pass that transcribed
+    that word (silently: the remaining text reads as clean prose, so neither
+    _looks_degenerate nor the loop breaker flags it). <pad> is id 11."""
+    stops = set(_Voxtral._STOP_TOKENS)
+    assert stops == {2, 4, 11}                      # </s>, [/INST], <pad>
+    assert 32000 not in stops
+    assert all(t < 1000 for t in stops), "a stop token outside the control range"
+
+
+def test_stop_tokens_are_read_from_the_build():
+    """The class constant is only a fallback; a loaded model uses the ids its
+    own processor reports, so a build numbering its controls differently is
+    still stopped correctly."""
+    from types import SimpleNamespace
+
+    v = _Voxtral.__new__(_Voxtral)
+    v.proc = SimpleNamespace(_special_token_ids={"eos": 7, "inst_end": 8,
+                                                 "pad": 9, "bos": 1})
+    assert v._resolve_stop_tokens() == (7, 8, 9)     # bos is not a stop
+    # A processor that reports nothing falls back to the class constant.
+    v.proc = SimpleNamespace(_special_token_ids={})
+    assert v._resolve_stop_tokens() == _Voxtral._STOP_TOKENS
 
 
 def test_token_cb_fires_throttled_without_affecting_output(monkeypatch):
@@ -58,8 +82,8 @@ def test_token_cb_fires_throttled_without_affecting_output(monkeypatch):
     monkeypatch.setattr(v.time, "monotonic", lambda: next(ticks, 999.0))
     seen = []
     vox = _Voxtral.__new__(_Voxtral)
-    out = vox._consume_tokens(iter([10, 11, 12, 2, 99]), token_cb=seen.append)
-    assert out == [10, 11, 12]          # stop token 2 (and 99 after it) dropped
+    out = vox._consume_tokens(iter([10, 21, 12, 2, 99]), token_cb=seen.append)
+    assert out == [10, 21, 12]          # stop token 2 (and 99 after it) dropped
     assert seen and seen[-1] <= 3       # reports the running collected-count
 
 

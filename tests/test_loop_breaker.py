@@ -12,6 +12,7 @@ from noScribe.voxtral_engine import (
     _LoopBreaker,
     _transcribe_guarded,
     LOOP_BREAK_MAX_KICKS,
+    LOOP_BREAK_MAX_PERIOD,
     LOOP_BREAK_WINDOW,
     RETRY_REPETITION_PENALTIES,
     RETRY_TEMPERATURES,
@@ -159,3 +160,58 @@ def test_full_ladder_order_and_shortest_fallback():
     expected += [(0.0, p) for p in RETRY_REPETITION_PENALTIES]
     assert vox.calls == expected
     assert out == DEGEN_SHORT  # shortest garbage wins when nothing resolves
+
+
+def test_a_truncated_attempt_never_beats_a_complete_one():
+    """Gibt der Breaker auf, bricht _consume_tokens den Strom mitten im Lauf ab
+    -- dieser Versuch ist damit per Konstruktion der kürzeste. Solange die
+    Leiter am Ende einfach den kürzesten Kandidaten nahm, gewann er jeden
+    Vergleich: gemessen ging ein 148-Wort-Stumpf statt eines fast vollständigen
+    2733-Wort-Transkripts ins Transkript, der Rest des Chunks war weg."""
+    stump = ("Ein sauberer Anfang, der abbricht. " + "na " * 20).strip()
+    vox = _ScriptedVox([
+        (stump, {"loop_gave_up": True, "loop_kicks": 4}),
+        (DEGEN, {}), (DEGEN, {}), (DEGEN, {}), (DEGEN, {}),
+    ])
+    out = _transcribe_guarded(vox, NO_SPLIT_AUDIO, "de", None, "t")
+    assert out != stump, "der abgeschnittene Versuch hat wieder gewonnen"
+    assert out == DEGEN
+    assert len(out.split()) > len(stump.split())
+
+
+def test_a_truncated_attempt_is_used_when_it_is_all_there_is():
+    """Gegenprobe: es darf nicht dazu führen, dass gar nichts zurückkommt."""
+    stump = "nur dieses Bruchstück"
+    vox = _ScriptedVox([(stump, {"loop_gave_up": True})] * 5)
+    out = _transcribe_guarded(vox, NO_SPLIT_AUDIO, "de", None, "t")
+    assert out == stump
+
+
+def test_incremental_sync_survives_the_tail_bound():
+    """Der Zähler der gesehenen Tokens darf nicht aus len(self._tail) abgeleitet
+    werden: der Puffer hört ab der Schranke auf zu wachsen, also sah ab da jeder
+    Schritt wie ein Versatz aus und nahm den vollständigen Resync -- ~220
+    Geräte-Skalare pro erzeugtem Token, gemessen ~10 ms Zusatzlatenz je Token."""
+    class _Tokens(list):
+        def __init__(self, items):
+            super().__init__(items)
+            self.slices = 0
+
+        def __getitem__(self, item):
+            if isinstance(item, slice):
+                self.slices += 1
+            return list.__getitem__(self, item)
+
+    rng = np.random.default_rng(3)
+    seq = rng.integers(0, VOCAB, size=3 * LOOP_BREAK_WINDOW).tolist()
+    br = _LoopBreaker()
+    slices = 0
+    for i in range(len(seq)):
+        toks = _Tokens(seq[:i])
+        br(toks, np.zeros((1, VOCAB), dtype=np.float32))
+        slices += toks.slices
+
+    assert slices == 0, f"{slices} vollständige Resynchronisationen"
+    assert br._seen == len(seq) - 1
+    # Der Puffer bleibt trotzdem beschränkt.
+    assert len(br._tail) <= LOOP_BREAK_WINDOW + LOOP_BREAK_MAX_PERIOD

@@ -135,6 +135,12 @@ FORCED_ALIGN_MAX_CELLS = 2**30
 # have plenty of slack to hunt far for a real pause, so a cut lands between
 # utterances and never mid-word. Widened well beyond a token's worth of audio.
 SILENCE_SEARCH_SEC = 90
+# A frame counts as "silence" when its AMPLITUDE is at or below this fraction of
+# the window's typical (75th-percentile) speech level -- about -16.5 dB. Callers
+# compare in the power domain and must square it: _frame_energy returns mean
+# squared amplitude, and applying the fraction unsquared puts the gate at
+# -8.2 dB, which is quiet speech rather than a pause.
+QUIET_LEVEL = 0.15
 # Lead-in overlap (seconds) read from the previous chunk so the words right
 # after a boundary have preceding audio context; the duplicated overlap is then
 # dropped by timestamp. Combined with pause-aware cuts, seams are ~lossless.
@@ -169,6 +175,11 @@ VOXTRAL_MODELS = {
 SOURCE_REPOS = frozenset({
     "mistralai/Voxtral-Mini-3B-2507", "mistralai/Voxtral-Small-24B-2507",
 })
+# The same releases as bare directory names. A copy under the package `models/`
+# dir (the documented place for local builds, see _local_copy) resolves to a
+# filesystem path, so matching the full repo id alone let exactly the build this
+# guard exists to stop walk straight through it.
+SOURCE_REPO_NAMES = frozenset(r.rsplit("/", 1)[-1].lower() for r in SOURCE_REPOS)
 
 
 def _local_copy(name):
@@ -374,14 +385,25 @@ class _AlignerPool:
         und nicht als Closure in transcribe(), weil eine Closure sich an einen
         Variablennamen hängt -- und genau das ist schon einmal stillschweigend
         gebrochen, als die Alignment-Architektur auf diesen Pool umgestellt
-        wurde."""
-        return self.aligner_for(" ".join(words)).align_words(words, window)
+        wurde.
 
-    def aligner_for(self, text):
+        `remember=False`, weil dies ein *internes* Alignment eines Bruchstücks
+        eines womöglich verworfenen Durchgangs ist: durfte es den Pool-Zustand
+        bewegen, erbte der NÄCHSTE Chunk still die Sprache des Bruchstücks, und
+        die einmalige Sprachwarnung wurde an Text vergeben, den niemand je sieht.
+        `words_span_audio=False`, weil der Präfix nur den Anfang des Fensters
+        abdeckt -- der Audio-Schnitt nach Zeichenanteil wäre dort unzulässig."""
+        return self.aligner_for(" ".join(words), remember=False).align_words(
+            words, window, words_span_audio=False)
+
+    def aligner_for(self, text, remember=True):
+        """Aligner für `text`. `remember=False` liest nur aus: die Auswahl für
+        den nächsten Chunk und die einmalige Sprachwarnung bleiben unberührt."""
         detected, _ = _detect_language(text)
         if self._explicit:
             model = resolve_align_model(self._language)
-            if detected and detected != self._language and not self._warned:
+            if (remember and detected and detected != self._language
+                    and not self._warned):
                 self._warned = True
                 _log(self._log_cb, "warn",
                      f"Language is set to '{self._language}' but the transcript "
@@ -390,19 +412,19 @@ class _AlignerPool:
                      f"setting if that was not intended.")
         elif detected:
             model = ALIGN_MODELS.get(detected, ALIGN_MODEL_MULTILINGUAL)
-            if model != self._last_model:
+            if remember and model != self._last_model:
                 _log(self._log_cb, "info",
                      f"Detected language '{detected}' -> alignment model: {model}")
         else:
             # Thin or mixed evidence: keep what worked for the previous chunk,
             # multilingual on the very first one.
             model = self._last_model or ALIGN_MODEL_MULTILINGUAL
-            if model != self._last_model:
+            if remember and model != self._last_model:
                 _log(self._log_cb, "info",
                      f"No dominant language detected -> alignment model: {model}")
-        return self._load(model)
+        return self._load(model, remember=remember)
 
-    def _load(self, model):
+    def _load(self, model, remember=True):
         aligner = self._cache.pop(model, None)
         if aligner is None:
             _log(self._log_cb, "info", f"Loading alignment model: {model}")
@@ -410,7 +432,8 @@ class _AlignerPool:
             while len(self._cache) >= self.MAX_CACHED:
                 self._cache.pop(next(iter(self._cache)))
         self._cache[model] = aligner   # re-insert = mark most recently used
-        self._last_model = model
+        if remember:
+            self._last_model = model
         return aligner
 
 
@@ -436,6 +459,35 @@ def _quietest_frame_near(audio, target, radius_sec):
     if len(window) // frame < 2:
         return target
     return lo + int(_frame_energy(window, frame).argmin()) * frame + frame // 2
+
+
+def _quiet_runs(energy, nf, thresh, good_run, target_f):
+    """Scan the frame energies for runs at or below `thresh`.
+
+    Returns (nearest_clear_pause, longest_run, longest_run_len) in frame units:
+    the midpoint of the clear pause (>= `good_run` frames) closest to
+    `target_f`, plus the longest quiet run as a fallback.
+    """
+    silent = energy <= thresh
+    best_close, best_close_d = None, None       # clear pause nearest target
+    best_long, best_long_len = None, 0          # longest quiet run (fallback)
+    i = 0
+    while i < nf:
+        if silent[i]:
+            j = i
+            while j < nf and silent[j]:
+                j += 1
+            run, mid = j - i, (i + j) // 2
+            if run > best_long_len:
+                best_long_len, best_long = run, mid
+            if run >= good_run:
+                d = abs(mid - target_f)
+                if best_close_d is None or d < best_close_d:
+                    best_close_d, best_close = d, mid
+            i = j
+        else:
+            i += 1
+    return best_close, best_long, best_long_len
 
 
 def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
@@ -482,28 +534,28 @@ def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
             window = audio[lo:hi]
             nf = len(window) // frame
             energy = _frame_energy(window, frame)
-            # frames below 15% of the typical speech level count as "silence"
-            thresh = float(np.percentile(energy, 75)) * 0.15 + 1e-9
-            silent = energy <= thresh
+            speech = float(np.percentile(energy, 75))
             target_f = (min(target, hi) - lo) / frame  # target position in frames
-            best_close, best_close_d = None, None       # clear pause nearest target
-            best_long, best_long_len = None, 0           # longest quiet run (fallback)
-            i = 0
-            while i < nf:
-                if silent[i]:
-                    j = i
-                    while j < nf and silent[j]:
-                        j += 1
-                    run, mid = j - i, (i + j) // 2
-                    if run > best_long_len:
-                        best_long_len, best_long = run, mid
-                    if run >= good_run:
-                        d = abs(mid - target_f)
-                        if best_close_d is None or d < best_close_d:
-                            best_close_d, best_close = d, mid
-                    i = j
-                else:
-                    i += 1
+            # _frame_energy returns mean SQUARED amplitude, so an amplitude
+            # fraction has to be squared before it can be compared against it.
+            # Applying QUIET_LEVEL unsquared put the gate at -8.2 dB below the
+            # typical speech level -- that is ordinary quiet speech, not a pause
+            # (a real pause sits 20-40 dB down). Any 400 ms of unstressed
+            # syllables then counted as a "clear speaker pause" and, being
+            # nearer the target, beat the genuine pause: measured, the cut moved
+            # off a real 1.5 s pause at 589.8 s to 598.5 s, mid-word. The
+            # preceding pass has no overlap to fall back on, so its last word
+            # was decoded cut in half.
+            best_close, best_long, best_long_len = _quiet_runs(
+                energy, nf, speech * QUIET_LEVEL ** 2 + 1e-9, good_run, target_f)
+            if best_close is None and best_long_len < min_run:
+                # Nothing that quiet anywhere in the window: a recording with a
+                # high noise floor (room tone, hum, constant background). Rather
+                # than give up and cut at the raw target, fall back to the
+                # looser gate -- its relative minimum is still the best pause on
+                # offer here, which is what the old threshold always used.
+                best_close, best_long, best_long_len = _quiet_runs(
+                    energy, nf, speech * QUIET_LEVEL + 1e-9, good_run, target_f)
             if best_close is not None:
                 cut = lo + best_close * frame + frame // 2
             elif best_long_len >= min_run:
@@ -704,6 +756,7 @@ class _LoopBreaker:
 
     def __init__(self):
         self._tail = []       # our incremental copy of the generated tokens
+        self._seen = 0        # tokens already folded into _tail (NOT len(_tail))
         self._step = 0
         self._period = 0      # >0 while a ban episode is active
         self.kicks = 0        # completed interventions (episodes)
@@ -726,12 +779,18 @@ class _LoopBreaker:
             return logits
         # Incremental sync (one new token per step); resync fully if the
         # bookkeeping ever drifts (e.g. a first call with a non-empty prompt).
+        # The count of already-seen tokens is tracked separately and must NOT be
+        # inferred from len(self._tail): the tail is trimmed to a fixed bound
+        # below, so once it saturates it stops growing and every later step would
+        # look like a drift and take the full resync branch -- which converts
+        # ~220 device scalars per generated token and dominates the decode.
         n = len(tokens)
-        if n == len(self._tail) + 1:
+        if n == self._seen + 1:
             self._tail.append(int(tokens[-1]))
-        elif n != len(self._tail):
+        elif n != self._seen:
             keep = LOOP_BREAK_WINDOW + LOOP_BREAK_MAX_PERIOD
             self._tail = [int(x) for x in tokens[-keep:]]
+        self._seen = n
         del self._tail[:-(LOOP_BREAK_WINDOW + LOOP_BREAK_MAX_PERIOD)]
         self._step += 1
 
@@ -869,8 +928,12 @@ def _salvage_prefix(text, audio, align_cb):
 
     The prefix is aligned against the whole window; CTC absorbs the audio the
     prefix does not cover as blanks, so the words still land where they were
-    spoken. The cut is then snapped to the locally quietest frame, exactly as
-    the split rung does, so the resumed pass never starts mid-word.
+    spoken. That only holds while the aligner does not split the window, which
+    is why `_AlignerPool.align_for_salvage` passes `words_span_audio=False` --
+    a split would cut the audio at the words' character share and put the
+    prefix's later words on audio that never contained them. The cut is then
+    snapped to the locally quietest frame, exactly as the split rung does, so
+    the resumed pass never starts mid-word.
     """
     words = text.split()
     span = _degenerate_span(words)
@@ -888,6 +951,17 @@ def _salvage_prefix(text, audio, align_cb):
     # cut audio on -- a wrong cut duplicates or drops speech.
     if not any(w.get("prob", 0) for w in stamps):
         return None, "alignment only spread the words evenly; too rough to cut on"
+    # The check that matters is on the LAST stamp: it is the only one the cut
+    # below is taken from. `any(...)` over the whole prefix passed as soon as a
+    # single word carried a real score, so a prefix whose head aligned and whose
+    # tail was spread or interpolated went straight through and the resume point
+    # came from an invented, length-proportional timestamp (measured 27 s past
+    # the truth, worst word 33 s). A real score is a log-probability and thus
+    # negative; a real score of exactly 0.0 is possible in principle and is
+    # treated as untrustworthy here, which costs only a full retry.
+    if not stamps[-1].get("prob", 0):
+        return None, ("the end of the clean part was not really aligned, so the "
+                      "resume point would be guesswork")
     end_sample = min(int(stamps[-1]["end"] * SAMPLE_RATE), len(audio))
     if end_sample < SALVAGE_MIN_PREFIX_SEC * SAMPLE_RATE:
         return None, (f"only {end_sample / SAMPLE_RATE:.0f}s would be kept, "
@@ -998,12 +1072,31 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         bad = info.get("loop_gave_up", False) or _looks_degenerate(text)
         return text, bad, info
 
+    # Fallback candidates for the case where no rung resolves the loop.
+    # "Shorter is less degenerate" only holds between attempts that actually
+    # cover the whole window. When the loop breaker gives up, _consume_tokens
+    # stops pulling tokens mid-stream, so that attempt is the shortest by
+    # construction and used to win every comparison -- measured, a 148-word
+    # stump shipped in place of a 2733-word near-complete transcript, and the
+    # rest of the chunk's speech was gone with only a log line to show for it.
+    # Partial results are therefore only used when nothing else was produced.
+    candidates = []                     # (text, covers_only_part_of_the_window)
+
+    def keep(candidate, partial=False):
+        if candidate:
+            candidates.append((candidate, partial))
+
+    def best():
+        whole = [c for c, part in candidates if not part]
+        return min(whole or [c for c, _ in candidates], key=len) if candidates else ""
+
     text, bad, info = attempt()
     if info.get("loop_kicks") and not bad:
         _log(log_cb, "info", f"{label}: repetition loop broken in place "
                              f"({info['loop_kicks']} intervention(s)).")
     if not bad:
         return text
+    keep(text, bool(info.get("loop_gave_up")))
 
     # Keep what the pass got right. This runs before any full re-decode: it is
     # cheaper (one alignment plus the remainder) and it is the only rung that
@@ -1018,28 +1111,41 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
             cut_sec = cut / SAMPLE_RATE
             rest_sec = dur - cut_sec
             if rest_sec < 1.0:
-                _log(log_cb, "info", f"{label}: repetition loop at the very end; "
-                                     f"keeping the clean first {cut_sec:.0f}s.")
-                return prefix
-            _log(log_cb, "warn", f"{label}: repetition loop after {cut_sec:.0f}s; "
-                                 f"keeping that part and re-transcribing the "
-                                 f"remaining {rest_sec:.0f}s.")
-            rest = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
-                                       depth + 1, token_cb,
-                                       _clip_turns(turns, cut_sec, dur), align_cb)
-            joined = f"{prefix} {rest}".strip()
-            if not _looks_degenerate(joined):
-                return joined
-            text = min((text, joined), key=len)
+                # Every other rung is gated on its result not looking
+                # degenerate; this exit returned unchecked, so a prefix that is
+                # itself degenerate shipped as a success and never escalated.
+                # (_looks_degenerate's compression arm is not bounded by the
+                # cycle length _degenerate_span searches for, so it can fire on
+                # a prefix the span finder considers clean.)
+                if not _looks_degenerate(prefix):
+                    _log(log_cb, "info",
+                         f"{label}: repetition loop at the very end; "
+                         f"keeping the clean first {cut_sec:.0f}s.")
+                    return prefix
+                _log(log_cb, "info",
+                     f"{label}: the clean part still looks degenerate; "
+                     f"retrying the whole window.")
+                keep(prefix, partial=True)   # covers only up to the cut
+            else:
+                _log(log_cb, "warn", f"{label}: repetition loop after {cut_sec:.0f}s; "
+                                     f"keeping that part and re-transcribing the "
+                                     f"remaining {rest_sec:.0f}s.")
+                rest = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
+                                           depth + 1, token_cb,
+                                           _clip_turns(turns, cut_sec, dur), align_cb)
+                joined = f"{prefix} {rest}".strip()
+                if not _looks_degenerate(joined):
+                    return joined
+                keep(joined)
 
     temps = list(RETRY_TEMPERATURES)
     temperature, seed = temps.pop(0)
     _log(log_cb, "warn", f"{label}: repetition loop; retrying with gentle "
                          f"sampling (temperature={temperature}).")
-    retry, rbad, _ = attempt(temperature=temperature, seed=seed)
+    retry, rbad, rinfo = attempt(temperature=temperature, seed=seed)
     if not rbad:
         return retry
-    text = min((text, retry), key=len)
+    keep(retry, bool(rinfo.get("loop_gave_up")))
 
     if depth < LOOP_SPLIT_MAX_DEPTH and dur >= 2 * LOOP_SPLIT_MIN_SEC:
         cut = _turn_gap_split(audio, turns)
@@ -1058,7 +1164,7 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         joined = f"{left} {right}".strip()
         if not _looks_degenerate(joined):
             return joined
-        text = min((text, joined), key=len)
+        keep(joined)
 
     # Escalating past the gentle stages: log what the diarization saw in this
     # window -- it tells a music/no-speech hallucination apart from a
@@ -1070,10 +1176,10 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     for temperature, seed in temps:
         _log(log_cb, "warn", f"{label}: still looping; retrying with "
                              f"temperature={temperature}.")
-        retry, rbad, _ = attempt(temperature=temperature, seed=seed)
+        retry, rbad, rinfo = attempt(temperature=temperature, seed=seed)
         if not rbad:
             return retry
-        text = min((text, retry), key=len)
+        keep(retry, bool(rinfo.get("loop_gave_up")))
 
     # Everything gentler failed. Fall back to the gentlest penalty that works,
     # because a stronger one starts deleting meaningful repeated words.
@@ -1081,12 +1187,13 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         _log(log_cb, "warn", f"{label}: still looping; retrying with "
                              f"repetition_penalty={penalty}. Note that a penalty can drop "
                              f"meaningful repeated words.")
-        retry, rbad, _ = attempt(penalty=penalty)
+        retry, rbad, rinfo = attempt(penalty=penalty)
         if not rbad:
             return retry
-        text = min((text, retry), key=len)
-    _log(log_cb, "warn", f"{label}: could not resolve the loop; keeping the shorter result.")
-    return text
+        keep(retry, bool(rinfo.get("loop_gave_up")))
+    _log(log_cb, "warn", f"{label}: could not resolve the loop; keeping the "
+                         f"shortest attempt that covers the whole window.")
+    return best()
 
 
 def _model_kind(repo):
@@ -1103,7 +1210,11 @@ def _model_kind(repo):
     is sized safely-short rather than metered too generously and swapped.
     """
     name = os.path.basename(os.path.normpath(str(repo))).lower()
-    eight = "8bit" in name or "8-bit" in name
+
+    def _has(*tokens):
+        return any(t in name for t in tokens)
+
+    eight = _has("8bit", "8-bit")
     # The shipped builds keep the audio encoder in bf16 ("dense-encoder"); the
     # encoder is small, so this adds well under a GB and the bit-width profile
     # still fits (mini dense-encoder measured 6.35 GB fixed vs 6.0 for uniform
@@ -1112,7 +1223,25 @@ def _model_kind(repo):
     if "small" in name or "24b" in name:
         if eight:
             return "small8"
-        return "small6" if ("6bit" in name or "6-bit" in name) else "small"
+        if _has("6bit", "6-bit"):
+            return "small6"
+        if _has("4bit", "4-bit"):
+            return "small"
+        # A 24B build whose name carries no bit width at all. `small` is the
+        # 4-bit profile and the CHEAPEST of the three 24B entries, so metering an
+        # unquantised or 6-bit copy with it waves a several-hundred-second pass
+        # through for weights that need 25-48 GB, and the run swaps forever
+        # instead of being refused. Fall back to the hungriest 24B profile, the
+        # same direction this function's docstring promises for a name with no
+        # size token at all. (The mini branch below needs no such guard: without
+        # a bit width it already lands on `mini`, the bf16 and more expensive of
+        # the two mini entries.)
+        logger.warning(
+            "Voxtral build %r is a 24B model with no bit width in its name; "
+            "sizing passes with the conservative small8 profile. Name a local "
+            "build with its bit width (e.g. voxtral-small-8bit) to have it "
+            "sized correctly.", name)
+        return "small8"
     if "mini" in name or "3b" in name:
         return "mini8" if eight else "mini"
     # Unrecognised build: the name carries no reliable size signal. Under-sizing
@@ -1248,6 +1377,7 @@ class _Voxtral:
         _cap_mlx_memory()
         self.model, _ = load_voxtral_model(repo, dtype=mx.bfloat16)
         self.proc = VoxtralProcessor.from_pretrained(repo)
+        self._STOP_TOKENS = self._resolve_stop_tokens()
 
         # Adapter so mlx_lm.generate_step can drive our LM: generate_step calls
         # model(tokens, cache=, input_embeddings=) and expects logits, while our
@@ -1266,9 +1396,28 @@ class _Voxtral:
 
         self._lm_adapter = _LMAdapter(self.model)
 
-    # Default stop tokens, matching mlx_voxtral.generate_stream: </s>, [/INST],
-    # and a potential padding token.
-    _STOP_TOKENS = (2, 4, 32000)
+    # Control-token ids that end a generation: </s>, [/INST] and <pad>.
+    #
+    # mlx_voxtral.generate_stream defaults to (2, 4, 32000) and calls 32000 "a
+    # potential padding token". It is not one: Voxtral's Tekken vocabulary has
+    # 131072 entries of which only the first 1000 are control tokens, <pad> is
+    # id 11, and id 32000 is the ordinary text token " Capital". Treating it as
+    # a stop truncated every pass that transcribed that word ("Venture Capital")
+    # mid-sentence and threw away the rest of the chunk -- silently, because the
+    # truncated text is clean prose, so neither _looks_degenerate nor the loop
+    # breaker flags it and no retry rung fires. These values are only the
+    # fallback; __init__ reads the real ids off the processor.
+    _STOP_TOKENS = (2, 4, 11)
+
+    def _resolve_stop_tokens(self):
+        """The build's own </s> / [/INST] / <pad> ids, or the class fallback."""
+        ids = getattr(self.proc, "_special_token_ids", None) or {}
+        stops = []
+        for key in ("eos", "inst_end", "pad"):
+            value = ids.get(key) if hasattr(ids, "get") else None
+            if isinstance(value, int) and value not in stops:
+                stops.append(value)
+        return tuple(stops) or _Voxtral._STOP_TOKENS
 
     def _consume_tokens(self, token_stream, token_cb=None, breaker=None):
         """Collect ids from a greedy token stream up to the first stop token
@@ -1406,6 +1555,19 @@ class _Voxtral:
 # CTC forced alignment (text + audio -> word timestamps)
 # --------------------------------------------------------------------------- #
 class _Aligner:
+    # Recursion cap for the oversized-window split. Deep enough that halving
+    # brings a genuinely too-big window under FORCED_ALIGN_MAX_CELLS (the cell
+    # count shrinks ~4x per level), while still terminating.
+    MAX_SPLIT_DEPTH = 12
+    # A *density* problem is not fixed by halving: the audio is cut at the
+    # words' character share, so tokens-per-frame comes out the same in both
+    # halves and the test re-fires at every level. Measured, that ran the tree
+    # to the full depth and pushed 10-13x the chunk's audio through wav2vec2
+    # (~17-21 min of CPU for a 1500 s chunk) to reach leaves that end in
+    # _spread anyway. Two levels still catch the case where the pause snap
+    # shifts the character proportion enough to help.
+    MAX_DENSE_SPLIT_DEPTH = 2
+
     def __init__(self, model_name=ALIGN_MODEL_MULTILINGUAL):
         import torch
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
@@ -1413,7 +1575,18 @@ class _Aligner:
         self.proc = Wav2Vec2Processor.from_pretrained(model_name)
         self.model = Wav2Vec2ForCTC.from_pretrained(model_name).eval()
         self.vocab = self.proc.tokenizer.get_vocab()
-        self.blank = self.vocab.get("<pad>", 0)
+        # The CTC blank is the index the network actually emits between labels,
+        # which is NOT reliably the token spelled "<pad>": the multilingual MMS
+        # aligner's vocab is {"<blank>": 0, "<pad>": 1, ...} and it emits blanks
+        # on 0, so reading "<pad>" picked an index that model never produces --
+        # forced_align could then never park on blank during a pause and
+        # stretched every word to meet its neighbour (measured: inter-word gaps
+        # all collapsed to zero, words up to 0.8 s too long, scores -3.9 instead
+        # of -0.09). config.pad_token_id carries the trained blank for both
+        # families (0 for the per-language jonatasgrosman models and for MMS).
+        self.blank = getattr(self.model.config, "pad_token_id", None)
+        if self.blank is None:
+            self.blank = self.vocab.get("<blank>", self.vocab.get("<pad>", 0))
         self.delim = self.vocab.get("|", None)
 
     def _emission(self, audio):
@@ -1451,6 +1624,41 @@ class _Aligner:
                 tokens.append(self.delim); tok_word.append(-1)
         return tokens, tok_word
 
+    @staticmethod
+    def _adjacent_repeats(tokens):
+        """Pairs of identical neighbouring tokens -- the extra frames forced_align
+        needs, since a CTC path must put a blank between two identical labels."""
+        return sum(1 for i in range(1, len(tokens)) if tokens[i] == tokens[i - 1])
+
+    def _predict_frames(self, n_samples):
+        """Frames `_emission` would return for `n_samples`, without running it.
+
+        _emission feeds the audio through wav2vec2 in EMISSION_WINDOW_SEC
+        windows and skips a trailing remainder below the conv receptive field,
+        so the count follows the feature extractor's conv geometry exactly
+        (verified bit-exact against the real model from 1 s to 45 s). This only
+        routes the split decision -- the real emission still decides at the
+        leaf, so an off-by-a-frame here cannot produce a wrong alignment.
+        """
+        cfg = getattr(getattr(self, "model", None), "config", None)
+        kernels = tuple(getattr(cfg, "conv_kernel", ()) or ())
+        strides = tuple(getattr(cfg, "conv_stride", ()) or ())
+        win = int(EMISSION_WINDOW_SEC * SAMPLE_RATE)
+        min_win = int(0.025 * SAMPLE_RATE)
+        total = 0
+        for i in range(0, n_samples, win):
+            seg = min(win, n_samples - i)
+            if seg < min_win:
+                continue
+            if kernels and strides:
+                out = seg
+                for k, s in zip(kernels, strides):
+                    out = (out - k) // s + 1
+            else:
+                out = seg // 320        # geometry unavailable: ~20 ms frames
+            total += max(0, out)
+        return total
+
     def _spread(self, words, audio, t_offset):
         """Fallback: distribute words evenly (by length) over the audio when
         real alignment isn't possible (empty/too-dense text)."""
@@ -1466,8 +1674,15 @@ class _Aligner:
             out.append({"word": w, "start": s, "end": e, "prob": 0.0})
         return out
 
-    def align_words(self, words, audio, t_offset=0.0, depth=0):
+    def align_words(self, words, audio, t_offset=0.0, depth=0,
+                    words_span_audio=True):
         """Return [{word,start,end,prob}] for `words` against `audio`.
+
+        `words_span_audio=False` promises only that the words start at the
+        beginning of `audio`, not that they reach its end -- the case the loop
+        ladder's prefix salvage creates. The recursive split below is unsound
+        there (see the guard at its head), so such a call degrades to `_spread`
+        rather than inventing confident-looking times.
 
         CTC forced alignment requires at least as many audio frames as target
         tokens. Dense speech (or a Voxtral over-generation) in a long chunk can
@@ -1483,16 +1698,29 @@ class _Aligner:
         if len(audio) < int(0.1 * SAMPLE_RATE):
             return self._spread(words, audio, t_offset)
 
-        emission = self._emission(audio)
-        if emission is None:
-            return self._spread(words, audio, t_offset)
-        n_frames = emission.shape[0]
-        fps = n_frames / (len(audio) / SAMPLE_RATE)
         tokens, tok_word = self._tokenize(words)
         if not tokens:
             return self._spread(words, audio, t_offset)
 
-        too_dense = len(tokens) > n_frames * 0.95
+        # Route on a PREDICTED frame count. The emission is only needed in order
+        # to align, not in order to decide whether to split, and computing it up
+        # front meant every window that then split paid for a wav2vec2 forward
+        # pass that was thrown away while each half recomputed its own --
+        # measured at 2.00x the necessary forward-pass work (~97 s of CPU per
+        # 1500 s chunk) on every file past ~13.5 min, where too_big always
+        # fires. The real frame count still governs at the leaf.
+        n_frames = self._predict_frames(len(audio))
+        # forced_align needs one frame per target token PLUS one for each pair
+        # of adjacent identical tokens (a CTC path has to put a blank between
+        # them); torchaudio enforces exactly that and names the repeat count in
+        # its error. The old `len(tokens) > n_frames * 0.95` left only ~5.3%
+        # slack, while German text runs 3.9-6.1% adjacent repeats -- 8.9% with
+        # the multilingual aligner, and up to 29.7% for number-heavy text, where
+        # every all-OOV word contributes just a delimiter and those land back to
+        # back. Windows inside that band passed the check, forced_align raised,
+        # and the whole window silently degraded to evenly-spread timestamps.
+        repeats = self._adjacent_repeats(tokens)
+        too_dense = len(tokens) + repeats > n_frames
         # torchaudio's CPU forced_align indexes its (frames x 2*tokens+1) DP
         # buffer with 32-bit ints; once the product nears 2**31 the index
         # wraps negative and the whole process dies with SIGSEGV (verified
@@ -1500,16 +1728,38 @@ class _Aligner:
         # dtype workaround exists). Split well below that limit; smaller
         # windows are also much faster to align.
         too_big = n_frames * (2 * len(tokens) + 1) > FORCED_ALIGN_MAX_CELLS
-        if too_big and (len(words) == 1 or depth >= 12):
+        splittable = len(words) > 1 and depth < self.MAX_SPLIT_DEPTH
+        if too_dense and not too_big and depth >= self.MAX_DENSE_SPLIT_DEPTH:
+            splittable = False          # halving does not reduce density
+        if too_big and not splittable:
             # Cannot split further -- never risk the segfault.
             return self._spread(words, audio, t_offset)
-        if not (too_dense or too_big) or len(words) == 1 or depth >= 12:
+        if not too_big and (not too_dense or not splittable):
+            emission = self._emission(audio)
+            if emission is None:
+                return self._spread(words, audio, t_offset)
+            n_real = emission.shape[0]
+            fps = n_real / (len(audio) / SAMPLE_RATE)
+            # The prediction only routed us here; the real frame count decides
+            # whether forced_align can run at all. Spreading beats both a raise
+            # and a segfault.
+            if (len(tokens) + repeats > n_real
+                    or n_real * (2 * len(tokens) + 1) > FORCED_ALIGN_MAX_CELLS):
+                return self._spread(words, audio, t_offset)
             try:
                 targets = torch.tensor(tokens, dtype=torch.int32).unsqueeze(0)
                 aligned, scores = torchaudio.functional.forced_align(
                     emission.unsqueeze(0), targets, blank=self.blank)
                 spans = torchaudio.functional.merge_tokens(aligned[0], scores[0])
             except Exception:
+                # Never silent: a spread window has plausible-looking times that
+                # are wrong by up to minutes, and without this line it is
+                # indistinguishable in the log from a good alignment.
+                logger.warning(
+                    "Forced alignment failed for a %.0fs window (%d words, "
+                    "%d tokens, %d frames); falling back to evenly spread "
+                    "timestamps.", len(audio) / SAMPLE_RATE, len(words),
+                    len(tokens), n_real, exc_info=True)
                 return self._spread(words, audio, t_offset)
 
             out, ti = {}, 0
@@ -1558,17 +1808,38 @@ class _Aligner:
                 step = max((tail_end - e0) / n_tail, min_step)
                 for k, i in enumerate(range(idx[-1] + 1, n)):
                     full[i] = [e0 + step * k, e0 + step * (k + 1), 0.0]
+            # Interior OOV words: tile the gap between the two aligned
+            # neighbours, with the same min_step floor the lead/tail runs use.
+            # They used to collapse to a zero-width [t, t] span -- the very
+            # thing min_step was introduced to prevent -- and every digit is
+            # out of vocabulary in these aligners, so a German year or number
+            # lands here routinely. When such a word forms a cue of its own
+            # (it ends in '.', so the cue is flushed around it) the result was
+            # a zero-duration VTT cue, which the spec forbids and players skip;
+            # nothing downstream guards against it.
             for a, b in zip(idx, idx[1:]):
                 if b - a > 1:
-                    s0, s1, gap = out[a][1], out[b][0], b - a
+                    s0, s1 = out[a][1], out[b][0]
+                    step = max((s1 - s0) / (b - a - 1), min_step)
                     for k in range(a + 1, b):
-                        t = s0 + (s1 - s0) * (k - a) / gap
-                        full[k] = [t, t, 0.0]
+                        t0 = s0 + step * (k - a - 1)
+                        full[k] = [t0, t0 + step, 0.0]
             return [{"word": words[i], "start": full[i][0],
                      "end": full[i][1], "prob": full[i][2]} for i in range(n)]
 
         # Too dense or too big: split words in half and audio at a nearby
         # pause, recurse.
+        #
+        # The audio is cut at the words' character share, which is only sound
+        # when the words really span the whole window. A salvage prefix covers
+        # just the FRONT of its window, so splitting it aligns its later words
+        # against audio that does not contain them -- and they come back with
+        # ordinary forced_align scores, so no downstream guard can tell the
+        # result from a good one (measured: the resume point landed 152 s past
+        # the prefix's true end, and that speech was dropped from the
+        # transcript). Degrade visibly instead; the caller declines to cut.
+        if not words_span_audio:
+            return self._spread(words, audio, t_offset)
         mid = max(1, len(words) // 2)
         first_chars = sum(len(w) for w in words[:mid]) + mid
         total_chars = sum(len(w) for w in words) + len(words)
@@ -1625,6 +1896,15 @@ def _segments_from_words(word_stamps):
         cur.clear()
 
     for w in word_stamps:
+        # Close the open cue BEFORE adding a word that would push it past the
+        # duration cap. `dur` below is measured with the word already appended
+        # and flush() can only end a cue *including* it, so the cap did not
+        # actually bind: any non-speech gap longer than SUB_MAX_SEC produced a
+        # cue as long as the gap (a 30 s interlude gave one 31 s two-word cue,
+        # an ordinary 9 s thinking pause gave 10.4 s), and the merge pass below
+        # only ever concatenates, so nothing downstream repaired it.
+        if cur and (w["end"] - cur[0]["start"]) > SUB_MAX_SEC:
+            flush()
         cur.append(w)
         tok = w["word"]
         chars = sum(len(x["word"]) + 1 for x in cur)
@@ -1724,7 +2004,9 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     # pass through -- and the 24B one is a 48 GB download. The GUI never gets
     # here (it only offers the published builds), but a direct caller must be
     # stopped just as early.
-    if str(repo) in SOURCE_REPOS:
+    if (str(repo) in SOURCE_REPOS
+            or os.path.basename(os.path.normpath(str(repo))).lower()
+            in SOURCE_REPO_NAMES):
         raise ValueError(
             f"{repo} is an unquantised source release, not a runnable build. "
             f"Use one of the published builds ({', '.join(VOXTRAL_MODELS)}) or "
@@ -1753,7 +2035,18 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         ceiling = max_safe_chunk_sec(repo)  # raises MemoryError if unfit
         pinned = chunk_sec
         chunk_sec = int(min(pinned, ceiling, MAX_CHUNK_SEC))
-        if chunk_sec < pinned:
+        if chunk_sec < HARD_MIN_CHUNK_SEC:
+            # The clamp above only ever shortens, so a value this small came
+            # from the config -- and int() turns anything under 1 s into 0,
+            # which makes max_len one sample below and splits the file into one
+            # decode per 50 ms (a 2-minute file became 2401 passes: the job
+            # never finishes). The automatic path floors at HARD_MIN_CHUNK_SEC;
+            # a pinned value must not be able to duck under it either.
+            _log(log_cb, "warn",
+                 f"voxtral_chunk_sec={pinned:g}s is below the "
+                 f"{HARD_MIN_CHUNK_SEC}s minimum; using {HARD_MIN_CHUNK_SEC}s.")
+            chunk_sec = HARD_MIN_CHUNK_SEC
+        elif chunk_sec < pinned:
             what = ("more memory than this machine has"
                     if ceiling < MAX_CHUNK_SEC else "more context than the model has")
             _log(log_cb, "warn",

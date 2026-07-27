@@ -140,15 +140,75 @@ def test_alignment_pool_serves_the_loop_ladder():
     seen = {}
 
     class _StubAligner:
-        def align_words(self, words, audio, t_offset=0.0):
+        def align_words(self, words, audio, t_offset=0.0, words_span_audio=True):
             seen["words"], seen["audio"] = words, audio
+            seen["spans"] = words_span_audio
             return [{"word": w, "start": i, "end": i + 1, "prob": 0.9}
                     for i, w in enumerate(words)]
 
-    pool.aligner_for = lambda text: _StubAligner()
+    def _pick(text, remember=True):
+        seen["remember"] = remember
+        return _StubAligner()
+
+    pool.aligner_for = _pick
     out = pool.align_for_salvage(["Guten", "Morgen."], "AUDIO")
     assert seen["words"] == ["Guten", "Morgen."] and seen["audio"] == "AUDIO"
     assert out[-1]["end"] == 2
+    # Der Präfix deckt nur den Anfang des Fensters ab: der Aligner darf das
+    # Audio nicht nach Zeichenanteil zerschneiden, sonst landen die späteren
+    # Wörter auf Audio, das sie nicht enthält.
+    assert seen["spans"] is False
+    # ...und ein internes Alignment eines womöglich verworfenen Bruchstücks
+    # darf die Modellwahl des nächsten Chunks nicht setzen.
+    assert seen["remember"] is False
+
+
+def test_salvage_alignment_does_not_move_the_pool_state(monkeypatch):
+    """Regression: die Salvage-Sprosse lief durch aligner_for und überschrieb
+    damit _last_model -- der nächste Chunk ohne eigene Sprachdominanz erbte
+    still die Sprache eines Bruchstücks, das oft gar nicht im Transkript
+    landet. Dasselbe galt für die einmalige Sprachwarnung."""
+    from noScribe.voxtral_engine import _AlignerPool, ALIGN_MODELS
+
+    loaded = []
+
+    class _Stub:
+        def align_words(self, words, audio, t_offset=0.0, words_span_audio=True):
+            return [{"word": w, "start": 0.0, "end": 1.0, "prob": 0.9}
+                    for w in words]
+
+    def _fake_load(self, model, remember=True):
+        loaded.append(model)
+        if remember:
+            self._last_model = model
+        return _Stub()
+
+    monkeypatch.setattr(_AlignerPool, "_load", _fake_load)
+
+    # _detect_language braucht >= 40 Tokens, sonst liefe der Test leer durch.
+    german = ("der die das und ich nicht ist wir ein eine mit auf für aber "
+              "auch dann wenn noch dass sind habe schon mal jetzt ") * 2
+    english = (("the and you that this not with for have are was but they "
+                "what just like know then would been your about ") * 2).split()
+    from noScribe.voxtral_engine import _detect_language
+    assert _detect_language(german)[0] == "de"
+    assert _detect_language(" ".join(english))[0] == "en"
+
+    # Auto: Chunk 1 ist deutsch und setzt die Wahl.
+    pool = _AlignerPool(None, None)
+    pool.aligner_for(german)
+    assert pool._last_model == ALIGN_MODELS["de"]
+    # Eine englische Salvage-Passage darf daran nichts ändern.
+    pool.align_for_salvage(english, "AUDIO")
+    assert pool._last_model == ALIGN_MODELS["de"], \
+        "das Bruchstück hat die Modellwahl des nächsten Chunks überschrieben"
+
+    # Explizite Sprache: die einmalige Warnung gehört dem Transkript.
+    warned = []
+    pool2 = _AlignerPool("de", lambda lvl, msg: warned.append((lvl, msg)))
+    pool2.align_for_salvage(english, "AUDIO")
+    assert not warned, "die Warnung wurde an ein Bruchstück vergeben"
+    assert pool2._warned is False
 
 
 def test_transcribe_hands_the_ladder_a_real_callback():
