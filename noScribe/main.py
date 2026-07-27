@@ -83,6 +83,32 @@ logger = logging.getLogger()
 app_version = '0.7.2'
 app_year = '2026'
 
+
+def local_build_stamp():
+    """Version plus which build produced a transcript -- local addition.
+
+    `app_version` is the same string for every build between two releases, so a
+    transcript from a working tree that changes several times a day carries no
+    usable provenance. Appends the HEAD commit and its date; falls back to this
+    file's mtime where there is no git checkout (a packaged build), so the
+    stamp is never simply absent.
+
+    Deliberately separate from `app_version`: that one is compared against the
+    published release in the update check and must stay a bare version.
+    """
+    root = Path(__file__).resolve().parent.parent
+    try:
+        p = run(['git', '-C', str(root), 'log', '-1',
+                 '--format=%h %cd', '--date=format:%Y-%m-%d %H:%M'],
+                capture_output=True, text=True, timeout=2)
+        if p.returncode == 0 and p.stdout.strip():
+            sha, _, when = p.stdout.strip().partition(' ')
+            return f'{app_version} · MK {when} · {sha}'
+    except Exception:
+        pass
+    when = datetime.datetime.fromtimestamp(Path(__file__).stat().st_mtime)
+    return f'{app_version} · MK {when:%Y-%m-%d %H:%M}'
+
 ctk.set_appearance_mode('dark')
 ctk.set_default_color_theme('blue')
 
@@ -2910,7 +2936,7 @@ class App(ctk.CTk):
                     s = d.createElement('span')
                     s.setStyle('color', '#909090')
                     s.setStyle('font-size', '0.8em')
-                    s.appendText(t('doc_header', version=app_version))
+                    s.appendText(t('doc_header', version=local_build_stamp()))
                     br = d.createElement('br')
                     s.appendChild(br)
 
