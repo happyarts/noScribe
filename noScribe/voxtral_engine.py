@@ -130,6 +130,13 @@ EMISSION_WINDOW_SEC = 20
 # torchaudio 2.11, int32 and int64 targets alike). 2**30 leaves a 2x safety
 # margin and keeps a single align call under ~5 s.
 FORCED_ALIGN_MAX_CELLS = 2**30
+# `_Aligner.align_prefix` is free to choose its own piece sizes, so it uses a
+# smaller budget than the hard cap: measured, one forced_align call peaks at
+# ~1.0 GB and 3.9 s at 2**30 cells but ~0.3 GB and 0.9 s at 2**28. The prefix
+# salvage runs right after a Voxtral pass, i.e. exactly when memory is
+# tightest, and more (smaller) pieces cost no accuracy and slightly less total
+# DP work. 2**29 keeps a 1500 s window at ~7 pieces of ~220 s of speech each.
+SALVAGE_ALIGN_MAX_CELLS = 2**29
 # When splitting a long file, snap each cut to the longest speaker pause found
 # within a *wide* radius of the target boundary. Because the passes are long we
 # have plenty of slack to hunt far for a real pause, so a cut lands between
@@ -391,10 +398,12 @@ class _AlignerPool:
         eines womöglich verworfenen Durchgangs ist: durfte es den Pool-Zustand
         bewegen, erbte der NÄCHSTE Chunk still die Sprache des Bruchstücks, und
         die einmalige Sprachwarnung wurde an Text vergeben, den niemand je sieht.
-        `words_span_audio=False`, weil der Präfix nur den Anfang des Fensters
-        abdeckt -- der Audio-Schnitt nach Zeichenanteil wäre dort unzulässig."""
-        return self.aligner_for(" ".join(words), remember=False).align_words(
-            words, window, words_span_audio=False)
+        `align_prefix` statt `align_words`, weil der Präfix nur den Anfang des
+        Fensters abdeckt: dort teilt sich das Audio nicht nach Zeichenanteil der
+        Wörter, sondern die Wörter werden gestückelt und jedes Stück gegen das
+        gesamte verbleibende Audio ausgerichtet."""
+        return self.aligner_for(" ".join(words), remember=False).align_prefix(
+            words, window)
 
     def aligner_for(self, text, remember=True):
         """Aligner für `text`. `remember=False` liest nur aus: die Auswahl für
@@ -926,14 +935,15 @@ def _salvage_prefix(text, audio, align_cb):
     nothing worth keeping -- the reason is logged, because "it fell back to a
     full retry" is otherwise indistinguishable from "the rung never ran".
 
-    The prefix is aligned against the whole window; CTC absorbs the audio the
-    prefix does not cover as blanks, so the words still land where they were
-    spoken. That only holds while the aligner does not split the window, which
-    is why `_AlignerPool.align_for_salvage` passes `words_span_audio=False` --
-    a split would cut the audio at the words' character share and put the
-    prefix's later words on audio that never contained them. The cut is then
-    snapped to the locally quietest frame, exactly as the split rung does, so
-    the resumed pass never starts mid-word.
+    Mapping the prefix onto its audio time is `_Aligner.align_prefix`'s job and
+    is harder than it looks: plain forced alignment has no way to stop early,
+    so it stretches the prefix's last words across the rest of the window --
+    measured, an 85 s prefix came back ending at 299.98 s of a 300 s window,
+    with flawless scores. See that method for how it is done instead; here it
+    is enough to know that a prefix which could not be timed for real comes
+    back evenly spread (prob 0.0) and is refused below. The cut is then snapped
+    to the locally quietest frame, exactly as the split rung does, so the
+    resumed pass never starts mid-word.
     """
     words = text.split()
     span = _degenerate_span(words)
@@ -950,15 +960,11 @@ def _salvage_prefix(text, audio, align_cb):
     # impossible, marking those with prob 0.0. Those times are far too rough to
     # cut audio on -- a wrong cut duplicates or drops speech.
     if not any(w.get("prob", 0) for w in stamps):
-        # Structural, not incidental: for a window large enough that alignment
-        # must split, _Aligner refuses to time a partial prefix at all (the
-        # split cuts audio by character share, which only holds when the words
-        # span the window). Every chunk at the usual size hits this, so the
-        # rung cannot fire until the prefix gets a slice it really spans --
-        # worth distinguishing in the log from a one-off refusal.
-        return None, ("a window this size needs a split alignment, which is "
-                      "unsound for a partial prefix -- this rung stays inactive "
-                      "until that is solved")
+        # Nothing in the prefix was really aligned. `align_prefix` reports the
+        # reason it gave up to the log; here it is enough to know that these
+        # times are evenly spread, i.e. worthless for cutting audio.
+        return None, ("the prefix could not be aligned to the audio, so every "
+                      "timestamp is an even guess")
     # The check that matters is on the LAST stamp: it is the only one the cut
     # below is taken from. `any(...)` over the whole prefix passed as soon as a
     # single word carried a real score, so a prefix whose head aligned and whose
@@ -1575,6 +1581,15 @@ class _Aligner:
     # _spread anyway. Two levels still catch the case where the pause snap
     # shifts the character proportion enough to help.
     MAX_DENSE_SPLIT_DEPTH = 2
+    # Pieces `align_prefix` may chain. The cell cap allows ~440 s of German
+    # speech per piece against a 1500 s window (and more as the remaining audio
+    # shrinks), so a prefix filling even the largest chunk we produce needs a
+    # handful. The cap only stops a pathological chain that advances by a word
+    # or two per piece from paying for a full-window DP each time.
+    MAX_PREFIX_PIECES = 16
+    # How far the next piece starts before the previous one ended, so its first
+    # word is whole even when CTC let the previous word run long.
+    PREFIX_PIECE_BACKOFF_SEC = 0.5
 
     def __init__(self, model_name=ALIGN_MODEL_MULTILINGUAL):
         import torch
@@ -1682,15 +1697,89 @@ class _Aligner:
             out.append({"word": w, "start": s, "end": e, "prob": 0.0})
         return out
 
+    def _stamps_from_spans(self, spans, words, tok_word, fps, t_start, t_end):
+        """Merged CTC token spans -> [{word,start,end,prob}] for `words`.
+
+        Frames are counted from `t_start` (the time the aligned emission
+        begins) and `t_end` bounds the trailing fill. None when not a single
+        word could be placed -- the caller decides what to fall back to.
+        """
+        out, ti = {}, 0
+        for sp in spans:
+            if sp.token == self.blank:
+                continue
+            if ti < len(tok_word):
+                wi = tok_word[ti]
+                if wi >= 0:
+                    s = t_start + sp.start / fps
+                    e = t_start + sp.end / fps
+                    if wi not in out:
+                        out[wi] = [s, e, float(sp.score)]
+                    else:
+                        out[wi][1] = e
+                ti += 1
+
+        # Fill words whose characters were all out-of-vocabulary (numbers,
+        # symbols) by interpolating between aligned neighbours.
+        n = len(words)
+        idx = sorted(out)
+        if not idx:
+            return None
+        full = [None] * n
+        for wi in idx:
+            full[wi] = out[wi]
+        # Leading/trailing OOV words: spread them over the audio before the
+        # first / after the last aligned word (capped at ~0.6 s per word)
+        # instead of collapsing them to zero-width spans, which would turn
+        # into zero-duration cues that subtitle players skip or reject.
+        # A tiny per-word floor so a lead/tail OOV word never collapses to a
+        # zero-duration cue when the first/last aligned word sits exactly on
+        # the chunk boundary (step would otherwise be 0). The resulting
+        # sub-frame overlap into neighbouring audio is harmless for cues.
+        min_step = 0.02
+        if idx[0] > 0:
+            s1 = out[idx[0]][0]
+            lead = max(t_start, s1 - 0.6 * idx[0])
+            step = max((s1 - lead) / idx[0], min_step)
+            for i in range(idx[0]):
+                full[i] = [lead + step * i, lead + step * (i + 1), 0.0]
+        n_tail = n - (idx[-1] + 1)
+        if n_tail > 0:
+            e0 = out[idx[-1]][1]
+            tail_end = min(t_end, e0 + 0.6 * n_tail)
+            step = max((tail_end - e0) / n_tail, min_step)
+            for k, i in enumerate(range(idx[-1] + 1, n)):
+                full[i] = [e0 + step * k, e0 + step * (k + 1), 0.0]
+        # Interior OOV words: tile the gap between the two aligned
+        # neighbours, with the same min_step floor the lead/tail runs use.
+        # They used to collapse to a zero-width [t, t] span -- the very
+        # thing min_step was introduced to prevent -- and every digit is
+        # out of vocabulary in these aligners, so a German year or number
+        # lands here routinely. When such a word forms a cue of its own
+        # (it ends in '.', so the cue is flushed around it) the result was
+        # a zero-duration VTT cue, which the spec forbids and players skip;
+        # nothing downstream guards against it.
+        for a, b in zip(idx, idx[1:]):
+            if b - a > 1:
+                s0, s1 = out[a][1], out[b][0]
+                step = max((s1 - s0) / (b - a - 1), min_step)
+                for k in range(a + 1, b):
+                    t0 = s0 + step * (k - a - 1)
+                    full[k] = [t0, t0 + step, 0.0]
+        return [{"word": words[i], "start": full[i][0],
+                 "end": full[i][1], "prob": full[i][2]} for i in range(n)]
+
     def align_words(self, words, audio, t_offset=0.0, depth=0,
                     words_span_audio=True):
         """Return [{word,start,end,prob}] for `words` against `audio`.
 
         `words_span_audio=False` promises only that the words start at the
-        beginning of `audio`, not that they reach its end -- the case the loop
-        ladder's prefix salvage creates. The recursive split below is unsound
-        there (see the guard at its head), so such a call degrades to `_spread`
-        rather than inventing confident-looking times.
+        beginning of `audio`, not that they reach its end. The recursive split
+        below is unsound there (see the guard at its head), so such a call
+        degrades to `_spread` rather than inventing confident-looking times.
+        That case has its own entry point -- `align_prefix`, which the loop
+        ladder's prefix salvage uses; the flag stays as the guard for anyone
+        who reaches for this method instead.
 
         CTC forced alignment requires at least as many audio frames as target
         tokens. Dense speech (or a Voxtral over-generation) in a long chunk can
@@ -1770,70 +1859,12 @@ class _Aligner:
                     len(tokens), n_real, exc_info=True)
                 return self._spread(words, audio, t_offset)
 
-            out, ti = {}, 0
-            for sp in spans:
-                if sp.token == self.blank:
-                    continue
-                if ti < len(tok_word):
-                    wi = tok_word[ti]
-                    if wi >= 0:
-                        s = t_offset + sp.start / fps
-                        e = t_offset + sp.end / fps
-                        if wi not in out:
-                            out[wi] = [s, e, float(sp.score)]
-                        else:
-                            out[wi][1] = e
-                    ti += 1
-
-            # Fill words whose characters were all out-of-vocabulary (numbers,
-            # symbols) by interpolating between aligned neighbours.
-            n = len(words)
-            idx = sorted(out)
-            if not idx:
+            stamps = self._stamps_from_spans(spans, words, tok_word, fps,
+                                             t_offset,
+                                             t_offset + len(audio) / SAMPLE_RATE)
+            if stamps is None:
                 return self._spread(words, audio, t_offset)
-            full = [None] * n
-            for wi in idx:
-                full[wi] = out[wi]
-            # Leading/trailing OOV words: spread them over the audio before the
-            # first / after the last aligned word (capped at ~0.6 s per word)
-            # instead of collapsing them to zero-width spans, which would turn
-            # into zero-duration cues that subtitle players skip or reject.
-            # A tiny per-word floor so a lead/tail OOV word never collapses to a
-            # zero-duration cue when the first/last aligned word sits exactly on
-            # the chunk boundary (step would otherwise be 0). The resulting
-            # sub-frame overlap into neighbouring audio is harmless for cues.
-            min_step = 0.02
-            if idx[0] > 0:
-                s1 = out[idx[0]][0]
-                lead = max(t_offset, s1 - 0.6 * idx[0])
-                step = max((s1 - lead) / idx[0], min_step)
-                for i in range(idx[0]):
-                    full[i] = [lead + step * i, lead + step * (i + 1), 0.0]
-            n_tail = n - (idx[-1] + 1)
-            if n_tail > 0:
-                e0 = out[idx[-1]][1]
-                tail_end = min(t_offset + len(audio) / SAMPLE_RATE, e0 + 0.6 * n_tail)
-                step = max((tail_end - e0) / n_tail, min_step)
-                for k, i in enumerate(range(idx[-1] + 1, n)):
-                    full[i] = [e0 + step * k, e0 + step * (k + 1), 0.0]
-            # Interior OOV words: tile the gap between the two aligned
-            # neighbours, with the same min_step floor the lead/tail runs use.
-            # They used to collapse to a zero-width [t, t] span -- the very
-            # thing min_step was introduced to prevent -- and every digit is
-            # out of vocabulary in these aligners, so a German year or number
-            # lands here routinely. When such a word forms a cue of its own
-            # (it ends in '.', so the cue is flushed around it) the result was
-            # a zero-duration VTT cue, which the spec forbids and players skip;
-            # nothing downstream guards against it.
-            for a, b in zip(idx, idx[1:]):
-                if b - a > 1:
-                    s0, s1 = out[a][1], out[b][0]
-                    step = max((s1 - s0) / (b - a - 1), min_step)
-                    for k in range(a + 1, b):
-                        t0 = s0 + step * (k - a - 1)
-                        full[k] = [t0, t0 + step, 0.0]
-            return [{"word": words[i], "start": full[i][0],
-                     "end": full[i][1], "prob": full[i][2]} for i in range(n)]
+            return stamps
 
         # Too dense or too big: split words in half and audio at a nearby
         # pause, recurse.
@@ -1861,6 +1892,180 @@ class _Aligner:
         right = self.align_words(words[mid:], audio[cut:],
                                  t_offset + cut / SAMPLE_RATE, depth + 1)
         return left + right
+
+    def _prefix_piece(self, words, start, frames):
+        """How many words from `start` one forced_align call can take against
+        `frames` frames -- the largest count that stays under the cell cap and
+        inside the density limit, 0 when not even one word fits.
+
+        Both limits grow monotonically with the word count, so a binary search
+        over the exact predicate is sound (and cheap: ~log2(n) tokenisations).
+        """
+        cap = min(FORCED_ALIGN_MAX_CELLS, SALVAGE_ALIGN_MAX_CELLS)
+
+        def fits(k):
+            tokens, _ = self._tokenize(words[start:start + k])
+            if not tokens:
+                return False
+            n = len(tokens) + 1                 # + the trailing star token
+            if n + self._adjacent_repeats(tokens) > frames:
+                return False
+            return frames * (2 * n + 1) <= cap
+
+        if frames <= 0 or start >= len(words) or not fits(1):
+            return 0
+        lo, hi = 1, len(words) - start
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    def align_prefix(self, words, audio, t_offset=0.0):
+        """Timestamps for words that cover only the FRONT of `audio`.
+
+        This is what the loop ladder's prefix salvage needs: a clean prefix of
+        a looping pass, mapped onto the audio time where it ends. Two things
+        make that different from `align_words`, and both were measured on real
+        emissions (300 s of German, ground truth from the aligner's own greedy
+        decode, so every word's true frame is known):
+
+        1. **Plain forced alignment cannot end early.** A CTC path has to
+           account for every frame, and parking on blank across 215 s of real
+           speech costs far more (-21905) than smearing the prefix's last words
+           over it, so the maximum-likelihood path does exactly that: the last
+           word of a 85 s prefix came back ending at 299.98 s of a 300 s
+           window, and it came back with a *perfect* score (-0.000), which is
+           why no guard downstream could ever have caught it. It is not a
+           tie-break artefact -- the drifted path wins by 802 nats. The fix is
+           the star token from the MMS/torchaudio partial-transcript recipe: an
+           extra vocabulary column, as good as the best real token at every
+           frame, appended once after the prefix's tokens, so the aligner can
+           say "the rest of this audio is not in my text". With it the same
+           prefix ends 0.02 s (one frame) from the truth, at every prefix
+           length from 5% to 100% of the window.
+
+        2. **A long window blows past FORCED_ALIGN_MAX_CELLS.** `align_words`
+           answers that by halving the words and cutting the audio at their
+           character share, which is unsound for a prefix: the share assumes
+           the words fill the window, so the later words were put on audio that
+           never contained them (measured: resume point 152 s late, that speech
+           dropped from the transcript). Here the words are cut instead of the
+           audio -- each piece is small enough for one forced_align call and is
+           aligned, star and all, against ALL the audio left after the previous
+           piece. No audio boundary is ever estimated from text length. The
+           window's emission is computed once and sliced, so the wav2vec2 cost
+           is that of a single alignment.
+
+        Any piece that cannot be aligned for real fails the whole call to
+        evenly spread times (prob 0.0), because a chain is only as trustworthy
+        as its weakest link: a guessed piece boundary would move every later
+        piece, and those would come back carrying perfectly real scores.
+        """
+        import torchaudio
+        torch = self._torch
+        if not words:
+            return []
+        if len(audio) < int(0.1 * SAMPLE_RATE):
+            return self._spread(words, audio, t_offset)
+
+        emission = self._emission(audio)
+        if emission is None:
+            return self._spread(words, audio, t_offset)
+        n_frames = emission.shape[0]
+        dur = len(audio) / SAMPLE_RATE
+        fps = n_frames / dur
+        back = int(self.PREFIX_PIECE_BACKOFF_SEC * fps)
+        star = emission.shape[1]        # the extra column added per piece below
+
+        def extend(new):
+            # The next piece is given a little audio the previous one already
+            # used (see the back-off below), so its first word can start just
+            # before the previous word ended. Keep the returned stamps in order
+            # -- a non-monotonic list would break cue building if these ever
+            # reach it.
+            for st in new:
+                if stamps and st["start"] < stamps[-1]["end"]:
+                    st["start"] = stamps[-1]["end"]
+                    st["end"] = max(st["end"], st["start"])
+                stamps.append(st)
+
+        stamps, f0, i, piece_no, why = [], 0, 0, 0, None
+        while i < len(words):
+            piece_no += 1
+            if piece_no > self.MAX_PREFIX_PIECES:
+                why = f"more than {self.MAX_PREFIX_PIECES} pieces"
+                break
+            k = self._prefix_piece(words, i, n_frames - f0)
+            if k <= 0:
+                why = (f"{len(words) - i} words left do not fit the "
+                       f"{n_frames - f0} frames left")
+                break
+            piece = words[i:i + k]
+            tokens, tok_word = self._tokenize(piece)
+            try:
+                # One extra vocabulary column, as good as the best real token at
+                # every frame, and one extra target token at the very end: that
+                # is how the aligner is told "after these words the audio is not
+                # mine". Without it the words are stretched over the rest (see
+                # the docstring), with it the last word lands frame-exact.
+                rest = emission[f0:]
+                em = torch.cat([rest, rest.max(-1, keepdim=True).values], dim=-1)
+                targets = torch.tensor(tokens + [star],
+                                       dtype=torch.int32).unsqueeze(0)
+                aligned, scores = torchaudio.functional.forced_align(
+                    em.unsqueeze(0), targets, blank=self.blank)
+                spans = torchaudio.functional.merge_tokens(aligned[0], scores[0])
+            except Exception:
+                logger.warning("Prefix alignment failed on piece %d (%d words, "
+                               "%d tokens, %d frames).", piece_no, len(piece),
+                               len(tokens), n_frames - f0, exc_info=True)
+                why = "forced alignment raised"
+                break
+            t_start = t_offset + f0 / fps
+            # Where the star begins is where this piece's speech ends, so it is
+            # also the ceiling for interpolating any trailing out-of-vocabulary
+            # word -- the window's end would be nonsense here.
+            t_end = t_offset + dur
+            for sp in spans:
+                if sp.token == star:
+                    t_end = min(t_end, t_start + sp.start / fps)
+                    break
+            got = self._stamps_from_spans(spans, piece, tok_word + [-1], fps,
+                                          t_start, t_end)
+            if got is None:
+                why = f"piece {piece_no} placed no word at all"
+                break
+            if i + k >= len(words):
+                extend(got)                     # last piece: keep every word
+                i = len(words)
+                break
+            # Chain on the last word that was really aligned. A piece can end
+            # in out-of-vocabulary words (numbers, symbols) whose times are
+            # interpolated -- those are no basis for slicing the audio, so they
+            # are handed back to the next piece instead, which aligns them
+            # against audio that starts before them.
+            j = next((x for x in range(len(got) - 1, -1, -1)
+                      if got[x].get("prob")), None)
+            if j is None:
+                why = f"piece {piece_no} was not really aligned"
+                break
+            extend(got[:j + 1])
+            i += j + 1
+            # Step back a little so the next piece's first word is whole even
+            # if this piece's last word ended slightly long.
+            f_end = int(round((got[j]["end"] - t_offset) * fps))
+            f0 = min(max(f0 + 1, f_end - back), n_frames)
+            if f0 >= n_frames:
+                why = "the prefix ran past the end of the window"
+                break
+        if i < len(words):
+            logger.warning("Prefix alignment degraded to evenly spread times "
+                           "(%s); the caller must not cut audio on these.", why)
+            return self._spread(words, audio, t_offset)
+        return stamps
 
 
 # --------------------------------------------------------------------------- #

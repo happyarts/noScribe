@@ -156,10 +156,10 @@ def test_salvage_still_refuses_a_fully_spread_alignment():
     spread = lambda w, a: [{"word": x, "start": float(i), "end": float(i + 1),
                             "prob": 0.0} for i, x in enumerate(w)]
     out, why = _salvage_prefix(LOOP_TEXT, audio, spread)
-    # Die Begründung nennt seit 2026-07-27 den strukturellen Grund: bei dieser
-    # Fenstergröße muss die Ausrichtung splitten, und das ist für einen
-    # Teil-Präfix unzulässig -- unterscheidbar von einer Einzelfall-Ablehnung.
-    assert out is None and "stays inactive" in why
+    # Gleichverteilte Zeiten sind reine Schätzung; die Begründung muss das
+    # benennen, sonst ist eine abgelehnte Rettung im Log nicht von einer
+    # Sprosse zu unterscheiden, die nie gelaufen ist.
+    assert out is None and "even guess" in why
 
 
 def test_a_degenerate_prefix_is_not_shipped_as_a_success():

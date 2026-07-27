@@ -555,9 +555,9 @@ def test_no_salvage_when_alignment_only_spread_the_words():
                               align_cb=_align_by_spreading)
     assert not _looks_degenerate(out)
     assert vox.calls[:2] == [200, 200]     # no salvage; the full retry happened
-    # ...and the log says why, so a declined salvage is distinguishable from a
-    # rung that never ran
-    assert any("cannot keep the clean part" in m and "stays inactive" in m
+    # ...und im Log steht der Grund, damit eine abgelehnte Rettung von einer
+    # Sprosse zu unterscheiden ist, die gar nicht erst lief
+    assert any("cannot keep the clean part" in m and "even guess" in m
                for m in logged), logged
 
 

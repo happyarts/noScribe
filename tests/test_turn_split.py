@@ -140,11 +140,15 @@ def test_alignment_pool_serves_the_loop_ladder():
     seen = {}
 
     class _StubAligner:
-        def align_words(self, words, audio, t_offset=0.0, words_span_audio=True):
+        def align_prefix(self, words, audio, t_offset=0.0):
             seen["words"], seen["audio"] = words, audio
-            seen["spans"] = words_span_audio
-            return [{"word": w, "start": i, "end": i + 1, "prob": 0.9}
+            seen["how"] = "align_prefix"
+            return [{"word": w, "start": i, "end": i + 1, "prob": -0.1}
                     for i, w in enumerate(words)]
+
+        def align_words(self, words, audio, t_offset=0.0, words_span_audio=True):
+            seen["how"] = "align_words"
+            return []
 
     def _pick(text, remember=True):
         seen["remember"] = remember
@@ -154,10 +158,11 @@ def test_alignment_pool_serves_the_loop_ladder():
     out = pool.align_for_salvage(["Guten", "Morgen."], "AUDIO")
     assert seen["words"] == ["Guten", "Morgen."] and seen["audio"] == "AUDIO"
     assert out[-1]["end"] == 2
-    # Der Präfix deckt nur den Anfang des Fensters ab: der Aligner darf das
-    # Audio nicht nach Zeichenanteil zerschneiden, sonst landen die späteren
-    # Wörter auf Audio, das sie nicht enthält.
-    assert seen["spans"] is False
+    # Der Präfix deckt nur den Anfang des Fensters ab. `align_words` kann das
+    # nicht: es hat keine Möglichkeit, früh aufzuhören, und zieht die letzten
+    # Wörter über das Restaudio (gemessen: 85-s-Präfix endete bei 299.98 s
+    # eines 300-s-Fensters, mit tadellosen Scores).
+    assert seen["how"] == "align_prefix"
     # ...und ein internes Alignment eines womöglich verworfenen Bruchstücks
     # darf die Modellwahl des nächsten Chunks nicht setzen.
     assert seen["remember"] is False
@@ -173,8 +178,8 @@ def test_salvage_alignment_does_not_move_the_pool_state(monkeypatch):
     loaded = []
 
     class _Stub:
-        def align_words(self, words, audio, t_offset=0.0, words_span_audio=True):
-            return [{"word": w, "start": 0.0, "end": 1.0, "prob": 0.9}
+        def align_prefix(self, words, audio, t_offset=0.0):
+            return [{"word": w, "start": 0.0, "end": 1.0, "prob": -0.1}
                     for w in words]
 
     def _fake_load(self, model, remember=True):
