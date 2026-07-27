@@ -582,6 +582,81 @@ def test_no_salvage_when_the_clean_part_is_too_short():
     assert [d for d, _ in vox.calls] == [200, 200, 100, 100]   # unchanged ladder
 
 
+ENGLISH_PREFIX = (
+    "We spent a long time yesterday talking about what the actual goals are. "
+    "After that there was a rather sudden question about the values. "
+    "I thought that discussion was remarkably insightful and honest. "
+    "In the end a certain uncertainty was still left in the room. "
+    "That is why we are going to look at the individual steps more closely. "
+    "My recommendation would be to start with a small exercise first. "
+    "Anyone who has trouble with it should just get in touch with me. "
+    "Later on we will talk about the experiences from actual practice. "
+    "Perhaps a first shared direction will already come out of that. "
+    "For today this introduction should be enough for us though."
+)
+
+
+class _TranslatesThenLoops:
+    """Der gemessene Fall aus Lauf 7: der Greedy-Durchgang übersetzt das Fenster
+    ins Englische und schleift dann; jeder kürzere Durchgang kommt deutsch
+    zurück. Genau dieser Durchgang ist der, den die Präfix-Sprosse behält."""
+
+    def __init__(self):
+        self.calls = []
+
+    def transcribe_array(self, audio, language, max_new_tokens=0, repetition_penalty=1.0,
+                         token_cb=None, temperature=0.0, seed=None, info=None):
+        from noScribe.voxtral_engine import SAMPLE_RATE
+        dur = len(audio) / SAMPLE_RATE
+        self.calls.append((round(dur), temperature))
+        if dur > 150 and temperature == 0.0:
+            return ENGLISH_PREFIX + " " + "dass das, " * 40
+        return CLEAN_PREFIX
+
+
+def test_a_translated_prefix_is_not_stitched_onto_a_german_remainder():
+    """Voxtral übersetzt gelegentlich, statt zu transkribieren. Alle anderen
+    Sprossen werfen so einen Durchgang weg und dekodieren neu -- was die
+    Übersetzung nebenbei repariert. Die Präfix-Sprosse ist die einzige, die ihn
+    BEHÄLT, also muss sie hinsehen: gemessen (Lauf 7) blieben die ersten 902 s
+    eines Chunks englisch, während der neu transkribierte Rest deutsch war, und
+    das Transkript wechselte mitten im Chunk die Sprache."""
+    from noScribe.voxtral_engine import (_transcribe_guarded, _detect_language,
+                                         _looks_degenerate)
+
+    # Testaufbau: die beiden Hälften müssen wirklich verschieden erkannt werden,
+    # sonst prüft der Test nichts.
+    assert _detect_language(ENGLISH_PREFIX)[0] == "en"
+    assert _detect_language(CLEAN_PREFIX)[0] == "de"
+
+    logged = []
+    vox = _TranslatesThenLoops()
+    out = _transcribe_guarded(vox, _fake_audio(200), "de",
+                              lambda level, msg: logged.append(msg), "Pass 1/1",
+                              align_cb=_align_one_word_per_second)
+
+    assert not _looks_degenerate(out)
+    assert _detect_language(out)[0] == "de", \
+        "das englische Präfix wurde ins Ergebnis geheftet"
+    assert "welcome" not in out.lower() and "yesterday" not in out.lower()
+    # ...und der Grund steht im Log, sonst sieht es aus wie ein gewöhnlicher Loop
+    assert any("translated pass" in m for m in logged), logged
+
+
+def test_a_salvage_whose_halves_agree_is_still_kept():
+    """Gegenprobe: der Wächter vergleicht Präfix gegen Rest, nicht gegen die
+    eingestellte Sprache. Deutsch-englisch gemischte Sprecher sind in diesem
+    Material der Normalfall -- ein Wächter, der gegen die Einstellung prüft,
+    würde gute Rettungen reihenweise ablehnen."""
+    from noScribe.voxtral_engine import _transcribe_guarded
+
+    vox = _LoopsLateVoxtral()
+    out = _transcribe_guarded(vox, _fake_audio(200), "en", None, "Pass 1/1",
+                              align_cb=_align_one_word_per_second)
+    assert out.startswith(CLEAN_PREFIX[:40])      # gerettet, obwohl 'en' gesetzt
+    assert vox.calls[:2] == [200, 104]            # Präfix behalten, Rest neu
+
+
 def test_remembered_model_survives_the_decorated_picker():
     """Die Modellauswahl wird als Klarname gespeichert, nicht als Anzeigetext.
 

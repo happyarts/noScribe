@@ -1148,9 +1148,33 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
                                            depth + 1, token_cb,
                                            _clip_turns(turns, cut_sec, dur), align_cb)
                 joined = f"{prefix} {rest}".strip()
-                if not _looks_degenerate(joined):
+                # The kept part is a *greedy* pass, and Voxtral occasionally
+                # translates instead of transcribing. Every other rung throws
+                # such a pass away and re-decodes, which happens to undo the
+                # translation; this rung is the one that keeps it, so it has to
+                # look. Measured (2026-07-27, run 7): the kept 902 s came back
+                # in English while the re-transcribed remainder was German, and
+                # the transcript changed language halfway through a chunk.
+                #
+                # The test is deliberately *relative* -- kept part against
+                # remainder, not against the configured language. Speakers who
+                # mix German and English are the norm in this material, so
+                # comparing to a setting would decline good salvages all day;
+                # a detector that leans the same way on both halves stays
+                # silent here, and only a genuine change of language fires.
+                p_lang, _ = _detect_language(prefix)
+                r_lang, _ = _detect_language(rest)
+                if p_lang and r_lang and p_lang != r_lang:
+                    _log(log_cb, "warn",
+                         f"{label}: the kept part reads as '{p_lang}' but the "
+                         f"re-transcribed remainder as '{r_lang}' -- that is a "
+                         f"translated pass, not a transcript; dropping it and "
+                         f"retrying the whole window.")
+                    keep(joined)
+                elif not _looks_degenerate(joined):
                     return joined
-                keep(joined)
+                else:
+                    keep(joined)
 
     temps = list(RETRY_TEMPERATURES)
     temperature, seed = temps.pop(0)
