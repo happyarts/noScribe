@@ -673,73 +673,80 @@ def test_one_chunk_never_establishes_the_files_language():
     assert _file_language({"de": 5, "en": 1}) == "de"
 
 
-class _WrongLanguageVoxtral:
-    """Erst der Temperatur-Versuch, der den Anfang verschluckt, dann der
-    `lang:de`-Versuch, der vollständig zurückkommt."""
+class _TranslatesWithoutLooping:
+    """Der gemessene Fall aus den Läufen 1-4: der Greedy-Durchgang kommt
+    englisch zurück, ohne jeden Loop. Erst ein Versuch mit Temperatur liefert
+    Deutsch."""
 
-    def __init__(self, pinned_text, warm_text):
+    def __init__(self):
         self.calls = []
-        self._texts = [pinned_text, warm_text]
 
     def transcribe_array(self, audio, language=None, max_new_tokens=0,
                          repetition_penalty=1.0, token_cb=None, temperature=0.0,
                          seed=None, info=None):
-        self.calls.append((language, temperature))
-        return self._texts[min(len(self.calls) - 1, len(self._texts) - 1)]
+        self.calls.append(temperature)
+        return ENGLISH_PREFIX if temperature == 0.0 else CLEAN_PREFIX
 
 
-def test_a_repair_that_loses_the_beginning_is_refused():
-    """Gemessen: `lang:de` in den Prompt zu schreiben kostete bei einem
-    1426-s-Fenster die ersten 150 Wörter -- eine Minute Sprache, lautlos. Die
-    richtige Sprache allein macht eine Reparatur also nicht gut."""
-    from noScribe.voxtral_engine import _relanguage_chunk
+def test_a_translated_pass_makes_the_ladder_run_even_without_a_loop():
+    """Eine Übersetzung ist genauso unbrauchbar wie ein Loop und bekommt
+    dieselben Reparaturen -- der Fall braucht keine zweite Leiter daneben.
+    Gemessen: `lang:de` in den Prompt zu schreiben holte 0 von 2 gekippten
+    Fenstern zurück, ein Temperatur-Versuch beide."""
+    from noScribe.voxtral_engine import (_transcribe_guarded, _detect_language,
+                                         _looks_degenerate)
 
-    original = ENGLISH_PREFIX + " " + " ".join(VARIED_TEXT)   # nur die Länge zählt
-    stump = CLEAN_PREFIX                       # deutsch, aber viel zu kurz
-    full = CLEAN_PREFIX + " " + " ".join(VARIED_TEXT)
-    assert len(stump.split()) < 0.85 * len(original.split()), "Testaufbau"
+    assert _detect_language(ENGLISH_PREFIX)[0] == "en"   # Testaufbau
+    logged = []
+    vox = _TranslatesWithoutLooping()
+    out = _transcribe_guarded(vox, _fake_audio(200), "de",
+                              lambda lvl, msg: logged.append(msg), "Chunk 5/15",
+                              want_lang="de")
+
+    assert not _looks_degenerate(out)
+    assert _detect_language(out)[0] == "de", "die Übersetzung wurde ausgeliefert"
+    assert vox.calls[:2] == [0.0, 0.2], vox.calls
+    assert any("translated pass" in m for m in logged), logged
+
+
+def test_without_an_expected_language_nothing_is_called_translated():
+    """Gegenprobe: solange die Datei nicht gesagt hat, was sie ist, darf kein
+    Durchgang wegen seiner Sprache verworfen werden -- sonst entscheidet der
+    erste Chunk über alle folgenden."""
+    from noScribe.voxtral_engine import _transcribe_guarded
+
+    vox = _TranslatesWithoutLooping()
+    out = _transcribe_guarded(vox, _fake_audio(200), "de", None, "Chunk 1/15")
+    assert out == ENGLISH_PREFIX and vox.calls == [0.0]
+
+
+def test_a_seam_between_two_languages_is_refused():
+    """Beide Sprossen, die ein Fenster reparieren, nähen zwei getrennt erzeugte
+    Hälften zusammen. Kippt eine davon ins Englische, wechselt das Transkript
+    mitten im Chunk die Sprache -- gemessen in Lauf 7, wo der behaltene Präfix
+    902 s Englisch war und der neu transkribierte Rest deutsch."""
+    from noScribe.voxtral_engine import _halves_disagree
 
     logged = []
-    vox = _WrongLanguageVoxtral(stump, full)
-    out = _relanguage_chunk(vox, _fake_audio(200), "de", None,
-                            lambda lvl, msg: logged.append(msg), "Chunk 5/15",
-                            original)
-
-    assert out is not None and out.startswith(CLEAN_PREFIX[:40])
-    assert len(out.split()) == len(full.split()), "der Stummel wurde genommen"
-    assert [t for _, t in vox.calls] == [0.2, 0.0], vox.calls
-    assert any("went missing" in m for m in logged), logged
+    log = lambda lvl, msg: logged.append(msg)
+    assert _halves_disagree(ENGLISH_PREFIX, CLEAN_PREFIX, log, "Chunk 1/15",
+                            "the kept part", "the remainder")
+    assert any("translated pass" in m for m in logged), logged
+    # Gleiche Sprache auf beiden Seiten, und zu kurz zum Urteilen: beides still.
+    assert not _halves_disagree(CLEAN_PREFIX, CLEAN_PREFIX, log, "x", "a", "b")
+    assert not _halves_disagree(CLEAN_PREFIX, "Ja, genau.", log, "x", "a", "b")
 
 
-def test_an_unrepairable_chunk_is_reported_rather_than_hidden():
-    """Bleibt es bei der Übersetzung, wird das Original behalten -- aber die
-    Leiter muss es sagen. Ein stilles Scheitern ist von einem Chunk, der in
-    Ordnung war, nicht zu unterscheiden."""
-    from noScribe.voxtral_engine import _relanguage_chunk
-
-    vox = _WrongLanguageVoxtral(ENGLISH_PREFIX, ENGLISH_PREFIX)
-    logged = []
-    out = _relanguage_chunk(vox, _fake_audio(200), "de", None,
-                            lambda lvl, msg: logged.append(msg), "Chunk 5/15",
-                            ENGLISH_PREFIX)
-
-    assert out is None
-    assert len(vox.calls) == 2, "es wurde nicht beides versucht"
-    assert any("still reads as 'en'" in m for m in logged), logged
-
-
-def test_transcribe_checks_every_chunks_language():
-    """Verdrahtung: der Fall aus den Läufen 1-4 hatte GAR KEINEN Loop -- der
-    Greedy-Durchgang kam englisch zurück und wurde genommen. Die Prüfung muss
-    deshalb in transcribe() sitzen, nicht in der Loop-Leiter."""
+def test_transcribe_asks_the_ladder_for_a_language():
+    """Verdrahtung: der Fall aus den Läufen 1-4 hatte GAR KEINEN Loop. Die
+    Erwartung muss deshalb in die Leiter hinein, nicht danach geprüft werden."""
     import inspect
     from noScribe import voxtral_engine as v
 
     src = inspect.getsource(v.transcribe)
-    assert "_relanguage_chunk(" in src, "kein Sprachabgleich pro Chunk"
+    assert "want_lang=want" in src, "die Leiter erfährt die erwartete Sprache nicht"
     assert "_file_language(" in src, "die Dateisprache wird nicht bestimmt"
-    # ...und was vor dem Bekanntwerden der Sprache schon rausging, wird am Ende
-    # wenigstens benannt.
+    # ...und was vor dem Bekanntwerden der Sprache schon rausging, wird benannt.
     assert "already written out" in src
 
 

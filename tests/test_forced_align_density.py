@@ -100,38 +100,15 @@ def test_prediction_matches_the_emission_it_replaces():
 # --------------------------------------------------------------------------- #
 # Teilabdeckung: der Salvage-Präfix
 # --------------------------------------------------------------------------- #
-def test_a_prefix_that_does_not_span_the_audio_is_never_split():
-    """Der Split schneidet das Audio nach Zeichenanteil der Wörter. Das ist nur
-    zulässig, wenn die Wörter das Fenster auch ausfüllen. Beim Salvage-Präfix
-    tun sie das nicht -- dort landeten die späteren Wörter auf Audio, das sie
-    nicht enthält, mit ganz gewöhnlichen Scores, sodass es niemand bemerken
-    konnte. Stattdessen muss sichtbar degradiert werden."""
-    al = _stub_aligner()
-    calls = []
-    real = torchaudio.functional.forced_align
-
-    def counting(emission, targets, blank=0):
-        calls.append(targets.shape[1])
-        return real(emission, targets, blank=blank)
-
-    words = ["abcde"] * 2000
-    audio = np.zeros(1100 * SAMPLE_RATE, dtype=np.float32)
-    frames = al._predict_frames(len(audio))
-    tokens, _ = al._tokenize(words)
-    assert frames * (2 * len(tokens) + 1) > FORCED_ALIGN_MAX_CELLS, \
-        "Testaufbau: dieses Fenster muss die Zellgrenze reissen"
-
-    torchaudio.functional.forced_align = counting
-    try:
-        out = al.align_words(words, audio, words_span_audio=False)
-    finally:
-        torchaudio.functional.forced_align = real
-
-    assert not calls, "der Präfix wurde trotzdem ausgerichtet/geteilt"
-    assert len(out) == len(words)
-    # Gleichverteilt heisst prob 0.0 -- daran erkennt _salvage_prefix, dass es
-    # auf diese Zeiten nicht schneiden darf.
-    assert all(w["prob"] == 0.0 for w in out)
+def test_a_partial_prefix_has_its_own_entry_point():
+    """Der Split schneidet das Audio nach Zeichenanteil der Wörter -- zulässig
+    nur, wenn die Wörter das Fenster ausfüllen. Ein Salvage-Präfix tut das
+    nicht; dafür gibt es `align_prefix` (siehe test_salvage_prefix_alignment).
+    Hier bleibt festgehalten, dass `align_words` diesen Fall gar nicht erst
+    annimmt, statt ihn still falsch zu rechnen."""
+    import inspect
+    assert "words_span_audio" not in inspect.signature(_Aligner.align_words).parameters
+    assert hasattr(_Aligner, "align_prefix")
 
 
 def test_a_full_window_is_still_split_as_before():

@@ -987,82 +987,70 @@ def _salvage_prefix(text, audio, align_cb):
 
 
 # --------------------------------------------------------------------------- #
-# A chunk that came back in the wrong language
+# A pass that came back in the wrong language
 # --------------------------------------------------------------------------- #
-# Voxtral sometimes translates instead of transcribing -- a whole chunk comes
-# back in another language, with no loop and nothing else wrong with it, so the
-# retry ladder never sees a reason to intervene. Measured over six runs of one
-# 5h54m German recording: four of them shipped 30 minutes of English from a
-# chunk that had no loop at all.
-#
-# A repair is only accepted if it is *more* than "the language now matches":
-# pinning `lang:xx` into the prompt was measured to drop the first 150 words of
-# a 1426 s window -- a minute of speech, silently -- so a repair that comes back
-# much shorter than the pass it replaces is refused too.
-RELANGUAGE_MIN_WORDS = 0.85
-# How many chunks have to agree before their language counts as the file's.
-# One chunk is not evidence: if the *first* chunk is the translated one, taking
-# its language as the truth would send every later chunk to be "repaired" into
-# the wrong language.
-RELANGUAGE_MIN_AGREEING = 2
+# Voxtral is not a pure ASR model -- speech translation is an advertised
+# capability, and the `[TRANSCRIBE]` token fixes only that text comes out, not
+# which language it is in. So a whole pass can come back translated, with no
+# loop and nothing else wrong with it. Measured over six runs of one 5h54m
+# German recording: four shipped 30 minutes of English from a chunk that had no
+# loop at all. Which language wins turns out to hang on the exact window
+# length, not on the content -- of ten windows between 1420 s and 1430 s, four
+# came back English -- so this cannot be prevented at the prompt, only caught.
+# Measured on the two windows that translate reproducibly: writing `lang:xx`
+# into the prompt (the documented instrument, and ours is token-identical to
+# Mistral's own) fixed 0 of 2, while a retry at the ladder's first temperature
+# fixed both. Perturbing the decode beats telling the model what to do, which
+# is why this is a reason for the ladder to run rather than a repair of its own.
+
+
+def _other_language(text, want):
+    """The language `text` reads as when that is decidedly not `want`, else None.
+
+    None whenever there is nothing to compare (no expectation, or too little
+    text to judge), so an undecidable pass is never called wrong.
+    """
+    if not want:
+        return None
+    got, _ = _detect_language(text)
+    return got if got and got != want else None
+
+
+def _halves_disagree(a, b, log_cb, label, name_a, name_b):
+    """True when two halves of one window read as different languages.
+
+    Both rungs that repair a window stitch two independently produced halves --
+    the kept prefix plus its remainder, and the two sides of a split. Either
+    half can come back translated, and the seam is the one place where that is
+    visible without knowing the file's language at all: this test is
+    *relative*. Speakers who mix German and English run through this material
+    constantly, so a detector that leans the same way on both halves has to
+    stay silent; only a genuine change between the halves may fire.
+    """
+    la, _ = _detect_language(a)
+    lb, _ = _detect_language(b)
+    if la and lb and la != lb:
+        _log(log_cb, "warn",
+             f"{label}: {name_a} reads as '{la}' but {name_b} as '{lb}' -- that "
+             f"is a translated pass, not a transcript; dropping it and retrying "
+             f"the whole window.")
+        return True
+    return False
 
 
 def _file_language(tally):
-    """The file's language so far, or None while the evidence is too thin."""
+    """The file's language so far, or None while the evidence is too thin.
+
+    One chunk is never enough: if the *first* chunk is the translated one,
+    taking its language as the truth would send every later chunk to be
+    "repaired" into the wrong language -- the guard would cause exactly the
+    damage it exists to prevent. Two have to agree.
+    """
     if not tally:
         return None
     best, n = max(tally.items(), key=lambda kv: kv[1])
     runner_up = max([v for k, v in tally.items() if k != best], default=0)
-    return best if n >= RELANGUAGE_MIN_AGREEING and n > runner_up else None
-
-
-def _relanguage_chunk(vox, chunk, want, language, log_cb, label, original):
-    """Decode `chunk` again after it came back in the wrong language.
-
-    Returns the repaired text, or None when no attempt earned its place -- the
-    caller then keeps what it had and says so in the log, because a silent
-    failure here is indistinguishable from a chunk that was fine.
-    """
-    n0 = len(original.split())
-    # Same budget the first pass had (see _transcribe_guarded).
-    max_new = min(32768, int(len(chunk) / SAMPLE_RATE * 20) + 512)
-    temperature, seed = RETRY_TEMPERATURES[0]
-    attempts = (
-        # Temperature first, against expectation. Writing `lang:xx` into the
-        # prompt is the documented instrument -- Mistral's own processor builds
-        # exactly this marker, and ours produces token-identical input -- but on
-        # the two windows that translate reproducibly it did NOT bring them
-        # back: 0 of 2, both still English. A retry at the ladder's first
-        # temperature fixed both. Perturbing the decode beats telling the model
-        # what to do, so it goes first and usually ends the matter.
-        (f"temperature {temperature}",
-         dict(language=language, temperature=temperature, seed=seed)),
-        # Still worth a second shot: it costs nothing unless the first attempt
-        # already failed, and a translation the sampling cannot shake may yet
-        # yield to being told the language outright.
-        (f"pinned to '{want}'", dict(language=want)),
-    )
-    for how, kw in attempts:
-        text = vox.transcribe_array(chunk, max_new_tokens=max_new, **kw)
-        got, _ = _detect_language(text)
-        n = len(text.split())
-        if got != want:
-            _log(log_cb, "info", f"{label}: re-decode {how} still reads as "
-                                 f"'{got}'.")
-            continue
-        if _looks_degenerate(text):
-            _log(log_cb, "info", f"{label}: re-decode {how} came back "
-                                 f"degenerate.")
-            continue
-        if n < RELANGUAGE_MIN_WORDS * n0:
-            _log(log_cb, "info", f"{label}: re-decode {how} is only {n} words "
-                                 f"against {n0}; too much of the chunk went "
-                                 f"missing to trust it.")
-            continue
-        _log(log_cb, "info", f"{label}: re-decode {how} reads as '{want}' "
-                             f"({n} words); using it.")
-        return text
-    return None
+    return best if n >= 2 and n > runner_up else None
 
 
 def _quietest_split(audio):
@@ -1125,8 +1113,18 @@ def _turn_profile(turns, dur):
 
 
 def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None,
-                        turns=None, align_cb=None):
-    """Transcribe one pass and repair it if it collapses into a repetition loop.
+                        turns=None, align_cb=None, want_lang=None):
+    """Transcribe one pass and repair it if it comes back unusable.
+
+    Two things make a pass unusable, and both take the same repairs. A
+    repetition loop is the common one. The other is a *translated* pass:
+    Voxtral is not a pure ASR model -- speech translation is an advertised
+    capability, and `[TRANSCRIBE]` fixes only that text comes out, not which
+    language it is in. Measured over six runs of one German recording, four of
+    them shipped 30 minutes of English from a chunk that had no loop at all, so
+    a bad language has to make a pass bad here, where the rungs are, rather
+    than in a second repair path beside them. `want_lang` is the language the
+    caller expects, or None while it does not know yet.
 
     Repair order, gentlest first:
 
@@ -1154,8 +1152,10 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     """
     dur = len(audio) / SAMPLE_RATE
     max_new = min(32768, int(dur * 20) + 512)
+    trouble = "repetition loop"         # what the log calls this pass's defect
 
     def attempt(temperature=0.0, seed=None, penalty=1.0):
+        nonlocal trouble
         info = {}
         text = vox.transcribe_array(audio, language, max_new_tokens=max_new,
                                     repetition_penalty=penalty, token_cb=token_cb,
@@ -1163,6 +1163,10 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         # A gave-up attempt is truncated mid-loop; the full-text detector may
         # miss that (a late loop gets diluted), so flag it explicitly.
         bad = info.get("loop_gave_up", False) or _looks_degenerate(text)
+        got = _other_language(text, want_lang)
+        if got and not bad:
+            bad = True
+            trouble = f"translated pass ('{got}' instead of '{want_lang}')"
         return text, bad, info
 
     # Fallback candidates for the case where no rung resolves the loop.
@@ -1225,39 +1229,18 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
                                      f"remaining {rest_sec:.0f}s.")
                 rest = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
                                            depth + 1, token_cb,
-                                           _clip_turns(turns, cut_sec, dur), align_cb)
+                                           _clip_turns(turns, cut_sec, dur), align_cb,
+                                           want_lang)
                 joined = f"{prefix} {rest}".strip()
-                # The kept part is a *greedy* pass, and Voxtral occasionally
-                # translates instead of transcribing. Every other rung throws
-                # such a pass away and re-decodes, which happens to undo the
-                # translation; this rung is the one that keeps it, so it has to
-                # look. Measured (2026-07-27, run 7): the kept 902 s came back
-                # in English while the re-transcribed remainder was German, and
-                # the transcript changed language halfway through a chunk.
-                #
-                # The test is deliberately *relative* -- kept part against
-                # remainder, not against the configured language. Speakers who
-                # mix German and English are the norm in this material, so
-                # comparing to a setting would decline good salvages all day;
-                # a detector that leans the same way on both halves stays
-                # silent here, and only a genuine change of language fires.
-                p_lang, _ = _detect_language(prefix)
-                r_lang, _ = _detect_language(rest)
-                if p_lang and r_lang and p_lang != r_lang:
-                    _log(log_cb, "warn",
-                         f"{label}: the kept part reads as '{p_lang}' but the "
-                         f"re-transcribed remainder as '{r_lang}' -- that is a "
-                         f"translated pass, not a transcript; dropping it and "
-                         f"retrying the whole window.")
-                    keep(joined)
-                elif not _looks_degenerate(joined):
+                if not _halves_disagree(prefix, rest, log_cb, label,
+                                        "the kept part", "the remainder") \
+                        and not _looks_degenerate(joined):
                     return joined
-                else:
-                    keep(joined)
+                keep(joined)
 
     temps = list(RETRY_TEMPERATURES)
     temperature, seed = temps.pop(0)
-    _log(log_cb, "warn", f"{label}: repetition loop; retrying with gentle "
+    _log(log_cb, "warn", f"{label}: {trouble}; retrying with gentle "
                          f"sampling (temperature={temperature}).")
     retry, rbad, rinfo = attempt(temperature=temperature, seed=seed)
     if not rbad:
@@ -1270,16 +1253,18 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         if cut is None:
             cut = _quietest_split(audio)
         cut_sec = cut / SAMPLE_RATE
-        _log(log_cb, "warn", f"{label}: still looping, splitting the chunk {how} "
+        _log(log_cb, "warn", f"{label}: unresolved, splitting the chunk {how} "
                              f"and retrying ({dur:.0f}s -> {cut_sec:.0f}s + {dur - cut_sec:.0f}s).")
         left = _transcribe_guarded(vox, audio[:cut], language, log_cb, label,
                                    depth + 1, token_cb,
-                                   _clip_turns(turns, 0, cut_sec), align_cb)
+                                   _clip_turns(turns, 0, cut_sec), align_cb, want_lang)
         right = _transcribe_guarded(vox, audio[cut:], language, log_cb, label,
                                     depth + 1, token_cb,
-                                    _clip_turns(turns, cut_sec, dur), align_cb)
+                                    _clip_turns(turns, cut_sec, dur), align_cb, want_lang)
         joined = f"{left} {right}".strip()
-        if not _looks_degenerate(joined):
+        if not _halves_disagree(left, right, log_cb, label,
+                                "the first half", "the second half") \
+                and not _looks_degenerate(joined):
             return joined
         keep(joined)
 
@@ -1291,7 +1276,7 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
                              f"{_turn_profile(turns, dur)}.")
 
     for temperature, seed in temps:
-        _log(log_cb, "warn", f"{label}: still looping; retrying with "
+        _log(log_cb, "warn", f"{label}: unresolved; retrying with "
                              f"temperature={temperature}.")
         retry, rbad, rinfo = attempt(temperature=temperature, seed=seed)
         if not rbad:
@@ -1756,6 +1741,13 @@ class _Aligner:
         needs, since a CTC path must put a blank between two identical labels."""
         return sum(1 for i in range(1, len(tokens)) if tokens[i] == tokens[i - 1])
 
+    @staticmethod
+    def _dp_cells(n_targets, frames):
+        """Size of forced_align's DP buffer. torchaudio indexes it with 32-bit
+        ints and segfaults once the product nears 2**31, so every caller checks
+        it against a cap before handing the work over."""
+        return frames * (2 * n_targets + 1)
+
     def _predict_frames(self, n_samples):
         """Frames `_emission` would return for `n_samples`, without running it.
 
@@ -1872,17 +1864,14 @@ class _Aligner:
         return [{"word": words[i], "start": full[i][0],
                  "end": full[i][1], "prob": full[i][2]} for i in range(n)]
 
-    def align_words(self, words, audio, t_offset=0.0, depth=0,
-                    words_span_audio=True):
+    def align_words(self, words, audio, t_offset=0.0, depth=0):
         """Return [{word,start,end,prob}] for `words` against `audio`.
 
-        `words_span_audio=False` promises only that the words start at the
-        beginning of `audio`, not that they reach its end. The recursive split
-        below is unsound there (see the guard at its head), so such a call
-        degrades to `_spread` rather than inventing confident-looking times.
-        That case has its own entry point -- `align_prefix`, which the loop
-        ladder's prefix salvage uses; the flag stays as the guard for anyone
-        who reaches for this method instead.
+        The words must span the audio. Text that covers only the front of its
+        window -- what the loop ladder's prefix salvage produces -- belongs in
+        `align_prefix`; the split below would cut the audio at the words'
+        character share and place the later words on audio that never contained
+        them.
 
         CTC forced alignment requires at least as many audio frames as target
         tokens. Dense speech (or a Voxtral over-generation) in a long chunk can
@@ -1927,7 +1916,7 @@ class _Aligner:
         # empirically on torchaudio 2.11 -- int64 targets crash too, so no
         # dtype workaround exists). Split well below that limit; smaller
         # windows are also much faster to align.
-        too_big = n_frames * (2 * len(tokens) + 1) > FORCED_ALIGN_MAX_CELLS
+        too_big = self._dp_cells(len(tokens), n_frames) > FORCED_ALIGN_MAX_CELLS
         splittable = len(words) > 1 and depth < self.MAX_SPLIT_DEPTH
         if too_dense and not too_big and depth >= self.MAX_DENSE_SPLIT_DEPTH:
             splittable = False          # halving does not reduce density
@@ -1944,7 +1933,7 @@ class _Aligner:
             # whether forced_align can run at all. Spreading beats both a raise
             # and a segfault.
             if (len(tokens) + repeats > n_real
-                    or n_real * (2 * len(tokens) + 1) > FORCED_ALIGN_MAX_CELLS):
+                    or self._dp_cells(len(tokens), n_real) > FORCED_ALIGN_MAX_CELLS):
                 return self._spread(words, audio, t_offset)
             try:
                 targets = torch.tensor(tokens, dtype=torch.int32).unsqueeze(0)
@@ -1969,19 +1958,13 @@ class _Aligner:
                 return self._spread(words, audio, t_offset)
             return stamps
 
-        # Too dense or too big: split words in half and audio at a nearby
-        # pause, recurse.
-        #
-        # The audio is cut at the words' character share, which is only sound
-        # when the words really span the whole window. A salvage prefix covers
-        # just the FRONT of its window, so splitting it aligns its later words
-        # against audio that does not contain them -- and they come back with
-        # ordinary forced_align scores, so no downstream guard can tell the
-        # result from a good one (measured: the resume point landed 152 s past
-        # the prefix's true end, and that speech was dropped from the
-        # transcript). Degrade visibly instead; the caller declines to cut.
-        if not words_span_audio:
-            return self._spread(words, audio, t_offset)
+        # Too dense or too big: split words in half and audio at their
+        # character share, cut at a nearby pause, recurse. The share is why this
+        # method needs the words to span the audio -- on text covering only the
+        # front of the window it put the later words on audio that never held
+        # them, and they came back with ordinary scores (measured: the resume
+        # point landed 152 s past the prefix's true end, and that speech was
+        # dropped from the transcript). `align_prefix` exists for that case.
         mid = max(1, len(words) // 2)
         first_chars = sum(len(w) for w in words[:mid]) + mid
         total_chars = sum(len(w) for w in words) + len(words)
@@ -2004,6 +1987,8 @@ class _Aligner:
         Both limits grow monotonically with the word count, so a binary search
         over the exact predicate is sound (and cheap: ~log2(n) tokenisations).
         """
+        # The salvage budget is the smaller of the two in production; the min
+        # is there so that lowering the hard segfault cap still binds.
         cap = min(FORCED_ALIGN_MAX_CELLS, SALVAGE_ALIGN_MAX_CELLS)
 
         def fits(k):
@@ -2013,9 +1998,9 @@ class _Aligner:
             n = len(tokens) + 1                 # + the trailing star token
             if n + self._adjacent_repeats(tokens) > frames:
                 return False
-            return frames * (2 * n + 1) <= cap
+            return self._dp_cells(n, frames) <= cap
 
-        if frames <= 0 or start >= len(words) or not fits(1):
+        if not fits(1):                     # also covers no frames / no words
             return 0
         lo, hi = 1, len(words) - start
         while lo < hi:
@@ -2081,7 +2066,13 @@ class _Aligner:
         dur = len(audio) / SAMPLE_RATE
         fps = n_frames / dur
         back = int(self.PREFIX_PIECE_BACKOFF_SEC * fps)
-        star = emission.shape[1]        # the extra column added per piece below
+        # The star column is a per-frame maximum, so slicing rows first would
+        # give the same values: build it once for the window and let each piece
+        # take a row view. `amax` rather than `max` -- the latter also allocates
+        # an indices tensor nobody reads.
+        star = emission.shape[1]
+        emission = torch.cat(
+            [emission, torch.amax(emission, -1, keepdim=True)], dim=-1)
 
         def extend(new):
             # The next piece is given a little audio the previous one already
@@ -2114,8 +2105,7 @@ class _Aligner:
                 # is how the aligner is told "after these words the audio is not
                 # mine". Without it the words are stretched over the rest (see
                 # the docstring), with it the last word lands frame-exact.
-                rest = emission[f0:]
-                em = torch.cat([rest, rest.max(-1, keepdim=True).values], dim=-1)
+                em = emission[f0:]
                 targets = torch.tensor(tokens + [star],
                                        dtype=torch.int32).unsqueeze(0)
                 aligned, scores = torchaudio.functional.forced_align(
@@ -2132,10 +2122,10 @@ class _Aligner:
             # also the ceiling for interpolating any trailing out-of-vocabulary
             # word -- the window's end would be nonsense here.
             t_end = t_offset + dur
-            for sp in spans:
-                if sp.token == star:
-                    t_end = min(t_end, t_start + sp.start / fps)
-                    break
+            # The star is the last target token, so its span is at the end.
+            last = next((sp for sp in reversed(spans) if sp.token == star), None)
+            if last is not None:
+                t_end = min(t_end, t_start + last.start / fps)
             got = self._stamps_from_spans(spans, piece, tok_word + [-1], fps,
                                           t_start, t_end)
             if got is None:
@@ -2143,7 +2133,6 @@ class _Aligner:
                 break
             if i + k >= len(words):
                 extend(got)                     # last piece: keep every word
-                i = len(words)
                 break
             # Chain on the last word that was really aligned. A piece can end
             # in out-of-vocabulary words (numbers, symbols) whose times are
@@ -2164,7 +2153,7 @@ class _Aligner:
             if f0 >= n_frames:
                 why = "the prefix ran past the end of the window"
                 break
-        if i < len(words):
+        if why:
             logger.warning("Prefix alignment degraded to evenly spread times "
                            "(%s); the caller must not cut audio on these.", why)
             return self._spread(words, audio, t_offset)
@@ -2388,7 +2377,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     # the caller by then.
     pinned_lang = (language or "").strip().lower()[:2] or None
     lang_tally = {}
-    unchecked = []
+    chunk_langs = []          # (chunk, language) for chunks decoded before `want`
 
     audio, sr = sf.read(audio_path, dtype="float32")
     if audio.ndim > 1:
@@ -2468,40 +2457,30 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         def _heartbeat(ntok, _base=_base, _span=_span, _exp=_exp_tokens):
             _emit_progress((_base + min(0.95, ntok / _exp) * _span) * 100)
 
-        text = _transcribe_guarded(vox, chunk, language, log_cb,
-                                   f"Chunk {ci + 1}/{n_chunks}", token_cb=_heartbeat,
+        label = f"Chunk {ci + 1}/{n_chunks}"
+        # What language should this chunk come back in? With an explicit
+        # setting there is an answer from the first chunk on; on Auto the file
+        # has to say what it is first (see _file_language), so the earliest
+        # chunks go unchecked and can only be named afterwards.
+        want = pinned_lang or _file_language(lang_tally)
+        text = _transcribe_guarded(vox, chunk, language, log_cb, label,
+                                   token_cb=_heartbeat,
                                    turns=_clip_turns(turns, t_offset, a1 / SAMPLE_RATE),
                                    align_cb=(aligner_pool.align_for_salvage
-                                             if aligner_pool is not None else None))
+                                             if aligner_pool is not None else None),
+                                   want_lang=want)
         if not text:
             continue
-        # Did this chunk come back in the file's language? A translated chunk is
-        # otherwise perfectly well-formed, so nothing else in the pipeline has a
-        # reason to question it.
-        label = f"Chunk {ci + 1}/{n_chunks}"
         chunk_lang, _ = _detect_language(text)
-        want = pinned_lang or _file_language(lang_tally)
-        if want and chunk_lang and chunk_lang != want:
+        if _other_language(text, want):
             _log(log_cb, "warn",
-                 f"{label}: reads as '{chunk_lang}' while the file reads as "
-                 f"'{want}' -- Voxtral translated this chunk instead of "
-                 f"transcribing it; decoding it again.")
-            repaired = _relanguage_chunk(vox, chunk, want, language, log_cb,
-                                         label, text)
-            if repaired is not None:
-                text, chunk_lang = repaired, want
-            else:
-                _log(log_cb, "warn",
-                     f"{label}: could not get this chunk back in '{want}'; "
-                     f"keeping the '{chunk_lang}' version -- these "
-                     f"{len(text.split())} words are a translation, not a "
-                     f"transcript.")
+                 f"{label}: still reads as '{chunk_lang}' rather than '{want}' "
+                 f"after every repair; these {len(text.split())} words are a "
+                 f"translation, not a transcript.")
         if chunk_lang:
             lang_tally[chunk_lang] = lang_tally.get(chunk_lang, 0) + 1
             if not want:
-                # Nothing to compare against yet. Remember it so it can still be
-                # named at the end, once the file has said what it is.
-                unchecked.append((ci + 1, chunk_lang))
+                chunk_langs.append((ci + 1, chunk_lang))
         if corrections:
             text = transcript_corrections.apply_corrections(text, corrections)
         if speaker_names:
@@ -2510,7 +2489,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         if aligner_pool is not None:
             aligner = aligner_pool.aligner_for(text)
             words = re.findall(r"\S+", text)
-            _log(log_cb, "info", f"Chunk {ci + 1}/{n_chunks}: aligning word timestamps "
+            _log(log_cb, "info", f"{label}: aligning word timestamps "
                                  f"({len(words)} words)...")
             stamps = aligner.align_words(words, chunk, t_offset=t_offset)
             if a_read < a0:
@@ -2547,7 +2526,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     # be worse: the transcript changes language part way through and nothing
     # says why.
     settled = pinned_lang or _file_language(lang_tally)
-    odd = [ci for ci, lg in unchecked if settled and lg != settled]
+    odd = [ci for ci, lg in chunk_langs if settled and lg != settled]
     if odd:
         _log(log_cb, "warn",
              f"Chunk(s) {', '.join(str(c) for c in odd)} of {n_chunks} read as "
