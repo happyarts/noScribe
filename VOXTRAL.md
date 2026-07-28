@@ -124,11 +124,16 @@ passes**: each cut is snapped to a real speaker pause found in a wide window
 lead-in overlap is carried across the seam and de-duplicated by timestamp — so a
 pass never splits a word and boundaries are effectively lossless.
 
-The first pass is additionally checked for a dropped opening: long windows
-occasionally return without their first seconds of speech, silently, so a short
+The first pass is additionally checked for a dropped opening: a window
+occasionally returns without its first seconds of speech, silently, so a short
 head of the same audio is decoded and whatever is missing is spliced back. Later
 passes need no check — they carry a lead-in overlap that the previous pass
 already transcribed. When it finds something, the log says so.
+
+This is not rare enough to skip: on a raw Zoom recording, 5 of 64 windows cut at
+300 s and 600 s came back missing their opening, once losing 18 words of fluent
+speech. It depends on the recording — read-aloud benchmark audio never shows it.
+Measurements in [docs/voxtral-benchmarks.md](docs/voxtral-benchmarks.md), §6b.
 
 To pin the length yourself, set `voxtral_chunk_sec:` (seconds) in `config.yml`
 (`0` = automatic). Lower it if other apps need RAM. Raising it past 10 minutes

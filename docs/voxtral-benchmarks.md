@@ -1,6 +1,7 @@
 # Voxtral in noScribe — Messergebnisse
 
-Stand: 19./20. Juli 2026 · M1 Max, 32 GB · Testmaterial: „Mona Podcast 323" (20,4 min, Deutsch, 2 Sprecher)
+Stand: 19./20. Juli 2026, Abschnitt 6b vom 29. Juli · M1 Max, 32 GB · Testmaterial:
+„Mona Podcast 323" (20,4 min, Deutsch, 2 Sprecher)
 
 Alle Zahlen sind gemessen, nicht geschätzt. Referenzgröße für Lesbarkeit ist die
 Kommadichte pro 100 Wörter; Whisper liegt auf diesem Material bei **9,58–10,62**
@@ -187,6 +188,64 @@ Grund für diese Reihenfolge: Eine Strafe kann Schleife und Bedeutung nicht
 unterscheiden. 1.1 machte aus „wir können es dir **nicht nicht** erzählen" ein
 „… nicht erzählen" — der Satz kippt ins Gegenteil. Ein flüssig lesbarer, aber
 falscher Satz ist gefährlicher als offensichtlich kaputter Text.
+
+---
+
+## 6b. Der verlorene Anfang eines Passes
+
+Ein langer Pass kommt manchmal **ohne seine ersten Sekunden Sprache** zurück —
+ohne Schleife, ohne falsche Sprache, ohne Spur im Log. Gefunden an einem
+20-Minuten-Video, dessen erste 2,4 s eine Bemerkung vor dem eigentlichen Take
+enthalten: auf Auto lieferte der 1226-s-Pass 3620 Wörter ohne sie, mit `de`
+3631 mit ihr — sonst identisch.
+
+**Es liegt nicht an uns.** Feiner Sweep bei Auto; der Anfang des Audios ist in
+allen sieben Läufen bitgleich, nur das Ende wandert:
+
+| Fenster | 1180 | 1195 | 1205 | 1215 | 1220 | 1223 | 1226 |
+|---|---|---|---|---|---|---|---|
+| Anfang | da | **weg** | da | da | da | da | **weg** |
+
+Nicht monoton, keine Schwelle: ob der Anfang überlebt, entscheidet sich daran,
+wo das Fenster **aufhört** — dieselbe Signatur wie beim Sprach-Kippen (Abschnitt
+3). Damit sind die naheliegenden Gegenmittel widerlegt: kürzere Fenster (1195
+verliert, 1223 nicht), Sprache pinnen (kippt in beide Richtungen — einmal
+kostete `lang:de` die ersten ~150 Wörter eines 1426-s-Fensters), Stille
+voranstellen (0 von 6, und löste den Verlust in einem Test sogar aus). Auch
+referenzgenaue Audio-Features ändern nichts, und unsere Prompt-Tokens sind
+bitgleich mit `mistral_common`.
+
+**Die Reparatur** (`_recover_lost_head`): ein kurzer Kopf desselben Audios wird
+dekodiert — kurze Fenster halten den Anfang — und die Naht **im Text gesucht**,
+die ersten acht Wörter des Passes im Probe-Text, unscharf gewertet, weil zwei
+unabhängige Dekodierungen sich in Kleinigkeiten unterscheiden. Was davor steht,
+fehlt und wird vorangestellt. Naht bei 0 = nichts verloren, Text unangetastet.
+
+Läuft nur auf dem **ersten** Pass: jeder spätere startet mit Überlappung, deren
+Wörter der vorige Pass schon transkribiert hat und die hier per Zeitmarke wieder
+verworfen werden. Ungedeckt bleibt ein Verlust, der länger ist als die
+Überlappung.
+
+**Der Defekt tritt auch unterhalb der 10-Minuten-Kappung auf** — gemessen an
+einem rohen Zoom-Mitschnitt (4,8 h), der ihn zuverlässig zeigt, während FLEURS
+ihn bei *keiner* Länge zeigt. 32 Fenster à 300 s und 600 s, jedes gegen ein
+60-s-Fenster vom selben Start:
+
+| Sprache | verlieren den Anfang | schlimmster Fall |
+|---|---|---|
+| Auto | 3 von 32 | 4 Wörter (300 s) |
+| `de` | 2 von 32 | **18 Wörter (600 s)** |
+
+Im Klartext geprüft, nicht nur gezählt: einmal fehlen 18 Wörter zusammenhängender
+Rede, einmal fällt in **beiden** Spracheinstellungen ein englisches Zitat weg,
+auf das der folgende deutsche Satz sich bezieht. Zwei weitere Treffer sind Ein-
+und Zwei-Wort-Artefakte eines Schnitts mitten im Satz — unser Chunker schneidet
+an Pausen, die zählen nicht.
+
+> **Messfalle:** FLEURS taugt für diese Frage nicht. Dort ist der Anfang bei
+> 120/300/450/600 s sauber — aber auch bei 1200 s, wo er es nicht sein dürfte.
+> Die Positivkontrolle fällt durch, also sagen die sauberen Zeilen nichts. Wer
+> das nachmisst, braucht Material, das den Defekt nachweislich zeigt.
 
 ---
 
