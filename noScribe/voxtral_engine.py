@@ -49,7 +49,19 @@ _EST_TOKENS_PER_SEC = 3.0
 # `_auto_chunk_sec()` -- see MEM_MODEL below -- unless the caller/config pins it.
 PREF_MIN_CHUNK_SEC = 180     # preferred quality floor (below this we warn)
 HARD_MIN_CHUNK_SEC = 60      # absolute floor; memory safety wins over this only with a warning
-MAX_CHUNK_SEC = 1500         # 25 min: safely under Voxtral's ~30 min / 32k ctx
+# 10 min: the longest pass Voxtral has been *measured* on. The 30/40-minute
+# figure everyone quotes is a capacity calculation -- 12.5 Hz frame rate against
+# a 32k context -- not a quality result, and this used to be sized against it
+# (1500 s). The paper's own long-form ASR protocol is shorter: "we take the
+# one-hour long earnings calls from Earnings-21 and Earnings-22, and segment
+# them into shorter, 10 minute variants" (arXiv:2507.13264). Beyond that there
+# is no published measurement, and past it this project has now recorded two
+# distinct failures -- whole chunks coming back translated (windows around 1425
+# s) and passes returning without their opening (1195 s and 1226 s of a 1226 s
+# file, while 15 shorter points came back clean). Neither is a threshold effect
+# that a slightly shorter window would dodge, so this is not a fix for either;
+# it is a refusal to run the model twice as far out as anyone has measured it.
+MAX_CHUNK_SEC = 600
 # The binding limit is the Voxtral *generate* working set: it must fit in
 # physical RAM, because MLX compute on swapped-out buffers thrashes and never
 # finishes. The one-off load transient (weights dict + model briefly duplicated)

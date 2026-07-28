@@ -111,19 +111,28 @@ grows roughly linearly with the pass length (flash attention + a KV cache, *not*
 O(T²)). noScribe therefore feeds the **whole file in one pass** when it fits the
 machine's RAM, and only splits longer files.
 
-The per-pass length is chosen automatically from installed RAM so the estimated
+A pass is capped at **10 minutes**, whatever the machine could hold. That is the
+longest Voxtral has been *measured* on: the widely quoted 30/40 minutes is a
+capacity calculation (12.5 Hz frame rate against a 32k context), while the
+paper's own long-form ASR protocol segments one-hour earnings calls "into
+shorter, 10 minute variants" ([arXiv:2507.13264](https://arxiv.org/abs/2507.13264)).
+Past that this project has recorded two distinct failures — whole passes coming
+back translated, and passes returning without their opening — so the cap is a
+refusal to run the model twice as far out as anyone has measured it, not a fix
+for either (both are near-ties that a slightly shorter window would not dodge).
+
+Below the cap the per-pass length is chosen from installed RAM so the estimated
 generate peak stays within physical memory (compute on swapped-out MLX buffers
 would thrash and never finish). The one-off model-load spike is allowed to swap
-— it frees before transcription starts. Measured peaks: mini ≈ 6.4 GB + ~0.7
+— it frees before transcription starts. Measured peaks: mini ≈ 6.5 GB + ~0.4
 GB/min, small ≈ 27 GB + ~0.8 GB/min. Rough per-pass lengths:
 
 | RAM | mini-8bit | small-8bit |
 |----:|:---------:|:----------:|
-| 16 GB | ~4 min | won't run |
-| 24 GB | ~16 min | won't run |
-| 32 GB | up to 25 min | won't run (refused) |
-| 48 GB | up to 25 min | ~17 min |
-| 64 GB+ | up to 25 min | up to 25 min |
+| 16 GB | ~7 min | won't run |
+| 24 GB | 10 min | won't run |
+| 32 GB | 10 min | won't run (refused) |
+| 48 GB+ | 10 min | 10 min |
 
 When a file is longer than one pass it is split into **equal, pause-aligned
 passes**: each cut is snapped to a real speaker pause found in a wide window
