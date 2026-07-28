@@ -12,10 +12,8 @@ import soundfile as sf
 import pathlib
 REPO = pathlib.Path(__file__).resolve().parents[2]  # docs/skripte/x.py -> repo root
 sys.path.insert(0, str(REPO))
-_wer = open(REPO / 'docs/skripte/wer.py').read().split('raw = open')[0]
-_ns = {'__file__': str(REPO / 'docs/skripte/wer.py')}
-exec(_wer, _ns)
-norm, wer, OVERLAP = _ns['norm'], _ns['wer'], _ns['OVERLAP']
+sys.path.insert(0, str(REPO / 'docs' / 'skripte'))
+from wer import norm, wer, OVERLAP
 
 REF_PATH, WAV = sys.argv[1], sys.argv[2]
 raw = open(REF_PATH, encoding='utf-8').read()
@@ -51,7 +49,12 @@ for wname in ("precise", "fast"):
 import mlx.core as mx
 from noScribe.voxtral_engine import _Voxtral
 
-for path in ("models/voxtral-mini-8bit", "models/voxtral-small-4bit-lh4"):
+# Nur die Builds, die auch wirklich liegen -- die Liste war auf eine lokale
+# Bastelvariante gepinnt, die es nicht mehr gibt.
+from noScribe.voxtral_engine import VOXTRAL_MODELS
+builds = [f"models/{n}" for n in VOXTRAL_MODELS
+          if (REPO / "models" / n).is_dir()]
+for path in builds:
     vox = _Voxtral(path)
     t0 = time.time()
     text = vox.transcribe_array(audio, 'de', max_new_tokens=int(dur * 20) + 512)
