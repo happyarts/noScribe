@@ -1027,8 +1027,11 @@ def _salvage_prefix(text, audio, align_cb):
 # before the take: on Auto the pass returned 3620 words without it, with `de`
 # 3631 words with it, and the two agreed everywhere else. The reverse has been
 # seen too (a pinned language costing the first ~150 words of a 1426 s window),
-# so no prompt setting is the safe side, and the same window decoded SHORT keeps
-# the opening every time -- 20, 30, 60, 90, 120, 180 and 300 s all did.
+# so no prompt setting is the safe side. Every observed instance is long: on that
+# recording 20 s through 1180 s all kept the opening in both language settings,
+# and only 1195 s and 1226 s lost it. FLEURS material never shows it at any
+# length, so it depends on the recording as well -- which is why this is a check
+# rather than a length rule.
 #
 # That is the repair: decode a short head of the same audio and splice back
 # whatever the long pass is missing. The seam is found in the text rather than
@@ -1071,7 +1074,8 @@ def _recover_lost_head(vox, audio, language, text, log_cb, label):
     """Put back the opening a long pass dropped. Returns the text either way.
 
     Left alone when there is no long-window defect to repair (a short pass), no
-    seam to find (too little text), or nothing missing at the seam.
+    seam to find (too little text), or nothing missing at the seam. The caller
+    decides which passes are worth checking at all.
     """
     words = text.split()
     duration = len(audio) / SAMPLE_RATE

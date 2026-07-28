@@ -398,7 +398,7 @@ encoder**, which is also the best-scoring 24B configuration measured (CER
 
 | Build | auto pass length on 32 GB |
 |---|---:|
-| mini-8bit | 1500 s (context-capped) |
+| mini-8bit | 600 s (capped at the longest measured window) |
 | **small-4bit** | **576 s (9.6 min)** |
 | small-6bit | 303 s (5.0 min) |
 | small-8bit | refused — needs ~28 GB for its shortest pass |

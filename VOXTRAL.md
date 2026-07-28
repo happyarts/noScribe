@@ -108,8 +108,8 @@ lower-bit body) can be made locally in a few seconds with
 
 Voxtral transcribes each pass in a single `generate()` call whose peak memory
 grows roughly linearly with the pass length (flash attention + a KV cache, *not*
-O(T²)). noScribe therefore feeds the **whole file in one pass** when it fits the
-machine's RAM, and only splits longer files.
+O(T²)). Files up to one pass long therefore go through in one piece; longer ones
+are split.
 
 A pass is capped at **10 minutes**, whatever the machine could hold. That is the
 longest Voxtral has been *measured* on: the widely quoted 30/40 minutes is a
@@ -140,8 +140,15 @@ passes**: each cut is snapped to a real speaker pause found in a wide window
 lead-in overlap is carried across the seam and de-duplicated by timestamp — so a
 pass never splits a word and boundaries are effectively lossless.
 
+The first pass is additionally checked for a dropped opening: long windows
+occasionally return without their first seconds of speech, silently, so a short
+head of the same audio is decoded and whatever is missing is spliced back. Later
+passes need no check — they carry a lead-in overlap that the previous pass
+already transcribed. When it finds something, the log says so.
+
 To pin the length yourself, set `voxtral_chunk_sec:` (seconds) in `config.yml`
-(`0` = automatic). Lower it if other apps need RAM; raise it on a large machine.
+(`0` = automatic). Lower it if other apps need RAM. Raising it past 10 minutes
+is refused — see the cap above.
 
 ## Correcting brand / product / programme names
 
