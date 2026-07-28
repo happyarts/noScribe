@@ -27,29 +27,50 @@ MARGIN_SEC = 10.0        # decoded either side, so resampler edges fall outside
 
 
 def _decode_native(path, t0=None, t1=None):
-    """Mono float64 at the native rate, downmixed as (L+R)/2 like convert.py."""
+    """Mono float64 at the native rate, downmixed as (L+R)/2 like convert.py.
+
+    Returns (samples, rate, offset_sec) with offset_sec == 0: the decode always
+    starts at the top of the file and stops once it has enough.
+
+    It deliberately does NOT seek. Seeking and anchoring the buffer on the first
+    decoded frame's pts was tried and is wrong: AAC carries an encoder delay
+    (2112 samples at 44.1 kHz), which the pts after a seek does not account for.
+    On an .m4a that shifted the window by exactly that much and quietly changed
+    every number measured through this path -- on an .mp4 of the same content it
+    did not, so the bug hid until two runs of the same measurement disagreed.
+    Reading from the top is slow on a multi-hour file and correct on every file.
+    """
     c = av.open(str(path))
     st = c.streams.audio[0]
     layout = "stereo" if st.channels > 1 else "mono"
     res = av.audio.resampler.AudioResampler(format="fltp", layout=layout, rate=st.rate)
-    buf = []
-    stop = None if t1 is None else st.rate * (t1 + MARGIN_SEC)
+    buf, have = [], 0
+    want = None if t1 is None else int(st.rate * (t1 + MARGIN_SEC))
+    keep_from = 0 if t0 is None else int(st.rate * max(0.0, t0 - 2 * MARGIN_SEC))
     for frame in c.decode(st):
         for fr in res.resample(frame):
             a = fr.to_ndarray()
-            buf.append(a.mean(axis=0) if a.shape[0] > 1 else a[0])
-        if stop and sum(len(b) for b in buf) > stop:
+            m = a.mean(axis=0) if a.shape[0] > 1 else a[0]
+            # Alles vor dem Fenster wird gezählt, aber nicht behalten: sonst
+            # liegen bei einer fünfstündigen Aufnahme Stunden im Speicher, um
+            # zwei Minuten zu bekommen. Der Zähler bleibt die Zeitbasis.
+            if have + len(m) > keep_from:
+                buf.append(m[max(0, keep_from - have):].astype(np.float32))
+            have += len(m)
+        if want and have > want:
             break
     rate = st.rate
     c.close()
-    x = np.concatenate(buf).astype(np.float64)
-    return x, rate
+    x = np.concatenate(buf).astype(np.float64) if buf else np.zeros(0)
+    return x, rate, keep_from / rate
 
 
-def _window(x, rate, t0, t1, margin=True):
-    lo = int(max(0, (t0 - (MARGIN_SEC if margin else 0)) * rate))
-    hi = int(min(len(x), (t1 + (MARGIN_SEC if margin else 0)) * rate))
-    return x[lo:hi], lo / rate
+def _window(x, rate, t0, t1, base=0.0, margin=True):
+    """Fenster aus einem Puffer, der bei `base` Sekunden beginnt."""
+    m = MARGIN_SEC if margin else 0
+    lo = int(max(0, (t0 - m - base) * rate))
+    hi = int(min(len(x), (t1 + m - base) * rate))
+    return x[lo:hi], base + lo / rate
 
 
 def production_path(src, cache_dir):
@@ -92,8 +113,8 @@ def build(src, t0, t1, ids, cache_dir="/tmp/preproc_cache"):
             out["p0-ist"] = seg.astype(np.float32)
 
     if need_native or "p1-headroom3" in ids:
-        x, rate = _decode_native(src, t0, t1)
-        w, w_t0 = _window(x, rate, t0, t1)
+        x, rate, base = _decode_native(src, t0, t1)
+        w, w_t0 = _window(x, rate, t0, t1, base)
         y = soxr.resample(w, rate, SR, quality="VHQ")
         lo = int(round((t0 - w_t0) * SR))
         base = y[lo:lo + int((t1 - t0) * SR)].astype(np.float32)

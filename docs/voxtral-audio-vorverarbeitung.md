@@ -257,7 +257,7 @@ Plateau über 27 dB hinweg. Es ist trotzdem **kein Befund**, aus zwei Gründen:
 
 **Erstens sagt der Bootstrap nein.** `docs/skripte/bootstrap_cer.py` legt um jede
 gepaarte Differenz ein 95-%-Intervall, und alle enthalten die Null —
-`p2-soxr − g-12` etwa liegt bei dCER +2,29 [−0,33, +4,90]. Auf 422 Wörtern ist
+`p2-soxr − g-12` etwa liegt bei dCER +1,72 [−0,33, +4,90]. Auf 422 Wörtern ist
 ein Unterschied dieser Größe schlicht nicht auflösbar.
 
 **Zweitens hängt der ganze Unterschied an einer einzigen Stelle.** Der Diff
@@ -355,7 +355,13 @@ swr — kauft also **höchstens 0,03 CER-Punkte**. Der Formfehler aus Abschnitt 
 war real, aber er sitzt in den obersten 16 Mel-Bins, und dort hört das Modell
 offenbar nichts, worauf es ankommt.
 
-## 12. Der eine Hebel, der wirklich etwas bringt: Dynamik, nicht Pegel
+## 12. Ein Hebel, der auf konstruiertem Material viel bringt: Dynamik
+
+> **Achtung, hier steht ein Zwischenstand.** Was dieser Abschnitt und
+> Abschnitt 18 zeigen, hat sich an echtem Material **nicht bestätigt** — dort
+> schadet der Leveller (Abschnitt 22), und Abschnitt 23 erklärt, warum die
+> Konstruktion hier zu optimistisch ist. Die Abschnitte bleiben stehen, weil die
+> Messungen richtig sind und der Weg zur Auflösung durch sie hindurchführt.
 
 Abschnitt 9 hat den Pegel erledigt, aber eine Lücke gelassen: FLEURS enthält
 keine *leisen Einschübe neben lauter Sprache* — genau den Fall, an dem die
@@ -672,7 +678,158 @@ in `Audiotest2/referenz/zoom_9890-10190_LIESMICH.md`.
 
 ---
 
-## 21. Fazit: eine Antwort auf jede Ausgangsfrage
+
+---
+
+## 22. Der Leveller auf echtem Material: kein Nutzen, teils Schaden
+
+Abschnitt 12 stützt sich auf **konstruierte** Paare. Inzwischen liegen zwei
+Prüfungen an echtem Material mit handkorrigierter Referenz vor. In keiner ist ein
+Nutzen zu sehen; in einer schadet der Leveller deutlich.
+
+### Zoom-Passage, 859 Wörter
+
+Die dynamikreichste Fünf-Minuten-Stelle des rohen Zoom-Mitschnitts
+(`Audiotest2/referenz/zoom_9890-10190`, 13,8 dB Spreizung):
+
+| Variante | LUFS | WER | CER |
+|---|---|---|---|
+| `p0-ist` (Produktionspfad, **Quelle des Entwurfs**) | −19,7 | 0,81 % | 0,64 % |
+| `p2-soxr` (float/soxr, unbehandelt) | −19,7 | 1,05 % | 0,89 % |
+| `f-dynaudnorm` | −16,5 | 1,51 % | 0,81 % |
+| `f-loudnorm16` | −16,4 | 2,33 % | 1,26 % |
+| `f-speechnorm` | −13,4 | 2,68 % | 1,46 % |
+
+**Der Vergleich muss gegen `p2-soxr` laufen, nicht gegen `p0-ist`** — und das ist
+kein Detail. Diese Referenz ist durch Korrektur des `p0-ist`-Entwurfs entstanden;
+der Abstand zwischen Entwurf und Referenz beträgt 0,81 % WER, es wurden also rund
+sieben Wörter geändert. Übersehene Fehler stehen jetzt als Wahrheit darin und
+bevorzugen genau diesen Arm. Wie stark, lässt sich beziffern: `p2-soxr` ist
+dieselbe Aufnahme durch denselben float-Pfad wie die Leveller, nur ohne Filter —
+und verliert allein durch den anderen Resampler 0,25 CER-Punkte gegenüber
+`p0-ist`. Das ist die Verzerrung, und sie ist größer als der ganze Abstand von
+`dynaudnorm`.
+
+Gegen die faire Basis gerechnet:
+
+| | dWER | dCER |
+|---|---|---|
+| `p2-soxr` − `f-dynaudnorm` | −0,47 [−1,17, +0,23] | **+0,07** [−0,37, +0,59] |
+| `p2-soxr` − `f-loudnorm16` | **−1,28** [−2,56, −0,35] * | −0,37 [−0,81, +0,10] |
+| `p2-soxr` − `f-speechnorm` | **−1,63** [−3,60, −0,23] * | −0,57 [−1,65, +0,18] |
+| `p0-ist` − `p2-soxr` (die Verzerrung selbst) | −0,23 [−0,58, +0,00] | −0,25 [−0,64, +0,00] |
+
+\* = Intervall schließt die Null aus
+
+**`dynaudnorm` ist auf dieser Passage neutral** — kein nachweisbarer Unterschied
+in beide Richtungen. `speechnorm` und `loudnorm16` sind signifikant schlechter.
+Ein Nutzen ist bei keinem zu sehen, und das passt: die Passage hat 13,8 dB
+Spreizung und liegt damit unter der Wirkschwelle aus Abschnitt 18.
+
+Die wenigen Streitstellen lassen sich einzeln nachhören
+(`docs/skripte/adjudicate.py` listet sie mit Zeitmarke). Zwischen `p0-ist` und
+`f-dynaudnorm` sind es sieben. Bei einer davon **rettet der Leveller ein Wort,
+das der andere Pfad verschluckt** — der vorhergesagte Ausfallmodus, einmal
+beobachtet. Bei vier anderen verliert er Funktionswörter oder verhört sich.
+
+### Natürliches Experiment: dieselbe Episode roh und mit Auphonic
+
+Die stärkere Prüfung, weil sie ohne neue Handarbeit auskommt. Von einer Episode
+liegen eine rohe Fassung (26 kbps AAC) und die Auphonic-Fassung (verlustfrei)
+vor; die bestehende Referenz `hart_780-900` ist in beiden auffindbar
+(`docs/skripte/locate_passage.py`, Fenster und Versätze in
+`Audiotest2/MATERIAL.md`). Gleiche Wörter, verschiedene Vorverarbeitung, eine
+Wahrheit:
+
+| Arm | LUFS | WER | CER |
+|---|---|---|---|
+| Auphonic, verlustfrei | −16,0 | 6,40 % | **2,70 %** |
+| Auphonic + Intro (`Podcast 323`) | −19,2 | 5,21 % | 3,88 % |
+| **roh** | −25,1 | 10,19 % | **5,06 %** |
+| roh + `speechnorm` | −13,9 | 9,00 % | 6,34 % |
+| roh + `dynaudnorm` | −16,9 | 11,85 % | 6,93 % |
+
+Zwei Dinge stehen damit fest, und sie ziehen in verschiedene Richtungen:
+
+1. **Die Auphonic-Bearbeitung ist real und groß**: 2,70 % gegen 5,06 % CER,
+   also fast eine Halbierung.
+2. **Unsere Leveller reproduzieren davon nichts.** Auf dieselbe rohe Datei
+   angewandt machen sie es *schlechter* — `dynaudnorm` von 5,06 auf 6,93 %.
+
+### Woher kommt Auphonics Vorsprung dann?
+
+Zum Teil aus der Quelle. Die verlustfreie Fassung auf die Bitrate der rohen
+gebracht und neu gemessen:
+
+| Arm | WER | CER |
+|---|---|---|
+| Auphonic, verlustfrei | 6,40 % | 2,70 % |
+| dieselbe Datei auf 64 kbps | 7,11 % | 2,80 % |
+| dieselbe Datei auf 25 kbps | 8,06 % | **3,24 %** |
+| dieselbe Datei auf 25 kbps + `dynaudnorm` | 7,82 % | 3,69 % |
+
+Die Bitrate kostet also **0,54 CER-Punkte** — sie erklärt rund ein Viertel des
+Abstands von 2,36 Punkten zwischen roh und Auphonic. Die übrigen 1,8 Punkte
+stammen aus dem, was Auphonic mit dem Signal macht. Nur besteht das eben nicht
+bloß aus Levelling: Auphonics Kette enthält auch Rausch- und Hallreduktion sowie
+Filterung. Ein reiner Dynamikregler bildet sie nicht nach — und ist, wie die
+letzte Zeile zeigt, auch auf der bitratenreduzierten Fassung schädlich.
+
+## 23. Warum der konstruierte Test das Gegenteil zeigte
+
+Zwei Fehler in der Konstruktion, beide erst durch das echte Material sichtbar.
+
+### Erstens: gedämpfte saubere Sprache behält ihren Störabstand
+
+In Abschnitt 12 wurde die leise Hälfte durch Dämpfung einer *sauberen* Aufnahme
+erzeugt. Damit sinkt der Pegel, der Störabstand bleibt aber perfekt — eine
+Situation, die es in einer echten Aufnahme nicht gibt: wer leiser spricht, hat
+denselben Raum und dasselbe Grundrauschen wie vorher, sein Störabstand sinkt
+mit. Ein Leveller kann die Dämpfung rückgängig machen, aber er hebt das Rauschen
+mit an und gibt keinen Störabstand zurück, den es nie gab.
+
+Dieselbe Anlage mit einem gleichmäßigen Rauschteppich 45 dB unter der lauten
+Hälfte — die leise liegt damit bei +20 dB Störabstand:
+
+| Bedingung | Recall laut | Recall leise | WER | CER |
+|---|---|---|---|---|
+| `raw` | 96,7 % | 89,6 % | 8,30 % | 4,10 % |
+| `dynaudnorm` | 96,3 % | 92,5 % | 6,79 % | 2,44 % |
+| `speechnorm` | 96,2 % | 92,0 % | 7,07 % | 2,54 % |
+
+> `raw` → `dynaudnorm`: leise **+2,86** [+0,70, +5,64] * · laut −0,39 [−0,82, +0,00]
+> `raw` → `speechnorm`: leise **+2,35** [+0,20, +5,15] * · laut **−0,48** [−0,90, −0,10] *
+
+Der Gewinn halbiert sich (+2,86 statt +5,81), und — das ist neu — **die laute
+Hälfte leidet jetzt**. Ohne Rauschen war sie in keiner Bedingung betroffen; mit
+Rauschen ist der Verlust bei `speechnorm` signifikant und bei `dynaudnorm`
+grenzwertig. Der Leveller hebt eben auch das Rauschen in den Pausen an.
+
+### Zweitens: echte Passagen erreichen die Schwelle gar nicht
+
+Abschnitt 18 nennt die Wirkschwelle bei etwa 20 dB Spreizung. Wie viel haben die
+Passagen, an denen tatsächlich gemessen wurde?
+
+| Passage | RMS | Spreizung p90−p10 |
+|---|---|---|
+| Zoom-Referenzpassage | −21,5 dB | **13,8 dB** |
+| Black Week, roh | −24,9 dB | **4,9 dB** |
+| Black Week, Auphonic | −15,9 dB | 2,9 dB |
+| Podcast 323 | −19,1 dB | 2,9 dB |
+
+**Keine davon erreicht 20 dB.** Die rohe Black-Week-Passage hat 4,9 dB — sie ist
+nicht dynamisch, sondern einfach nur leise, und leise allein ist nachweislich
+egal (Abschnitt 9). Die dynamischste Stelle des gesamten Zoom-Mitschnitts kam auf
+18,5 dB in einem Zwei-Minuten-Fenster (Abschnitt 20).
+
+Damit ist der Widerspruch aufgelöst: der Leveller wirkt nur oberhalb einer
+Schwelle, die unser echtes Material nirgends erreicht. Unterhalb davon tut er
+nicht nichts — er kostet, weil er Rauschen und Codec-Artefakte mit anhebt und
+den Pegel innerhalb von Äußerungen moduliert.
+
+---
+
+## 24. Fazit: eine Antwort auf jede Ausgangsfrage
 
 **Welches Herunterrechnen benutzen wir genau?** Alle drei Reduktionen auf einmal,
 in einer Zeile: 44,1/48 kHz → 16 kHz mit libswresample (Kaiser, −3 dB bei
@@ -704,66 +861,58 @@ ist gegen diesen Offset unempfindlich: −12 dB auf 180 FLEURS-Aufnahmen ergeben
 dCER +0,02 [−0,18, +0,18] (Abschnitt 9). Auf leise Passagen wirkt sie sogar
 **schädlich** (−5,86 Punkte Recall, signifikant).
 
-**Was bringt wirklich etwas?** Dynamik statt Pegel. Ein Leveller vor dem Encoder
-hebt den Recall leiser Passagen auf das Niveau der lauten Sprache und lässt die
-laute Hälfte unangetastet (Abschnitt 12). Alle vier getesteten Leveller wirken
-signifikant, `dynaudnorm` am stärksten, und der Gewinn wächst mit der Dynamik:
+**Was bringt wirklich etwas?** Auf konstruiertem Material: ein Dynamik-Leveller,
+ab etwa 20 dB Abstand zwischen lauter und leiser Sprache (Abschnitte 12 und 18).
+**Auf echtem Material: nichts von dem, was hier geprüft wurde** — und der
+Leveller schadet sogar (Abschnitt 22). Der Widerspruch ist aufgeklärt
+(Abschnitt 23): der konstruierte Test dämpfte saubere Sprache, was ihren
+Störabstand künstlich erhält, und keine unserer echten Passagen erreicht die
+Wirkschwelle. Sie liegen bei 2,9 bis 13,8 dB.
 
-| Abstand laut ↔ leise | Recall leise roh | mit `dynaudnorm` |
-|---|---|---|
-| 10 dB | 96,3 % | 96,6 % |
-| 15 dB | 96,1 % | 96,6 % |
-| 20 dB | 94,8 % | 96,5 % |
-| 25 dB | 90,5 % | 96,3 % |
-| 30 dB | 82,4 % | 96,0 % |
-| 35 dB | **62,4 %** | **95,2 %** |
+**Und ein Nutzen ist auf echtem Material nirgends nachweisbar.** Auf der
+Zoom-Passage ist `dynaudnorm` gegen eine faire Basis neutral, `speechnorm` und
+`loudnorm16` sind signifikant schlechter; auf der rohen Podcast-Passage
+verschlechtert `dynaudnorm` von 5,06 auf 6,93 % CER.
 
-Die rechte Spalte ist die eigentliche Aussage: **der Leveller hält die Erkennung
-leiser Sprache konstant, unabhängig von der Dynamik der Aufnahme.** Wirksam wird
-er ab etwa 20 dB Spreizung; darunter tut er nichts, aber er schadet auch nicht.
-Bei 35 dB Abstand verliert der unbehandelte Pfad mehr als ein Drittel der leisen
-Sprache. Das ist zwei Größenordnungen mehr als alles andere in diesem Dokument,
-und es erklärt nebenbei, warum das Auphonic-gemasterte Testmaterial dieses
-Projekts so gut läuft: der Leveller ist dort längst gelaufen.
+**Was auf echtem Material tatsächlich hilft, ist die Aufnahme selbst.** Dieselbe
+Episode roh gegen Auphonic-bearbeitet: CER 5,06 % gegen 2,70 %, fast eine
+Halbierung. Davon gehen 0,54 Punkte auf die Bitrate (26 kbps) und rund 1,8 Punkte
+auf Auphonics Bearbeitung — die aber mehr enthält als Levelling, nämlich auch
+Rausch- und Hallreduktion. Nachbauen lässt sich das mit einem Dynamikregler
+nicht: derselbe Regler auf dieselbe Datei angewandt verschlechtert von 5,06 auf
+6,93 %.
 
 ### Was daraus für den Umbau folgt
 
 1. **Nichts am Resampler, nichts an der Bittiefe, nichts am Headroom ändern.**
-   Alle drei sind am Transkript gemessen und alle drei sind wirkungslos. Der
-   bestehende Pfad ist nicht der beste denkbare, aber der Unterschied ist für das
-   Modell nicht hörbar. Wer ihn trotzdem umbauen will, braucht ein anderes
-   Argument als Qualität — etwa die Nähe zu Mistrals Referenzimplementierung.
-2. **Einen Leveller in den Voxtral-Pfad aufnehmen — als Versicherung, nicht als
-   Gewinnbringer.** `dynaudnorm` macht die Erkennung unabhängig von der Dynamik
-   der Aufnahme, wirkt ab etwa 20 dB Spreizung, schadet unterhalb der Schwelle
-   nicht, schadet auf verrauschtem Material nicht und opfert in keiner Messung
-   laute Sprache. Er kostet keine neue Abhängigkeit und wenige Sekunden
-   Rechenzeit. **Aber:** Abschnitt 20 zeigt, dass unser rohes Testmaterial
-   innerhalb einer Passage typisch nur 6 dB und maximal 18,5 dB Spreizung hat,
-   also unterhalb bis knapp an der Schwelle liegt. Auf dem, was wir haben, ist
-   der Gewinn klein; der Fall, für den er gebaut würde, liegt nicht in unserem
-   Testbestand.
-3. **Er gehört in den Voxtral-Pfad, nicht in `convert.py`.** Die temporäre WAV
-   füttert auch pyannote, und für die Diarisierung ist eine Dynamikänderung eine
-   eigene Frage, die hier nicht gemessen wurde.
+   Alle drei sind am Transkript gemessen und alle drei sind wirkungslos. Wer den
+   Pfad trotzdem umbauen will, braucht ein anderes Argument als Qualität — etwa
+   die Nähe zu Mistrals Referenzimplementierung.
+2. **Keinen Leveller einbauen.** Auf jeder echten Passage, die geprüft wurde,
+   ist er messbar schlechter als nichts zu tun. Er wirkt erst ab etwa 20 dB
+   Spreizung innerhalb einer Passage, und so etwas kam im gesamten Testbestand —
+   4,8 Stunden Zoom, mehrere Podcast-Episoden, Interviews — kein einziges Mal
+   vor. Falls er je gebaut wird, dann **bedingt**: Spreizung messen, und nur
+   oberhalb der Schwelle eingreifen. Die Messung dafür steht in
+   `docs/skripte/find_passage.py`.
+3. **Den Nutzern Vorverarbeitung empfehlen, statt sie nachzubauen.** Der
+   Auphonic-Vorsprung ist mit fast einer Halbierung der CER der größte Effekt in
+   diesem ganzen Dokument. Er stammt aber aus einer Kette, die wir nicht haben,
+   und der Teil davon, den wir nachbilden können, ist der, der schadet.
 4. **Den Chunker die 30-s-Fenstergrenze mitbedenken lassen** (Abschnitt 16).
-   Führende Stille kürzen und Schnitte nach Möglichkeit so legen, dass Sprache
-   nicht über eine Fenstergrenze läuft. Klar nachgeordnet — 0,4 CER-Punkte — aber
-   kostenlos.
+   Führende Stille kürzen, Schnitte nach Möglichkeit nicht mitten durch eine
+   Äußerung legen. 0,4 CER-Punkte, kostenlos — und damit nach diesem Dokument
+   der einzige verbliebene Hebel im Code.
 
 ### Was offen bleibt
 
-* Ob `dynaudnorm=f=150:g=9:p=0.9:m=20` die richtige Einstellung ist. Sie wurde an
-  konstruierten Sprachpaaren kalibriert, nicht optimiert.
-* Wie sich der Leveller auf die **Diarisierung** auswirkt, falls er doch vor
-  pyannote landen sollte.
-* Ob der Leveller auf echtem, rohem Material schadet. Eine Passage zur
-  Handkorrektur liegt bereit — die dynamikreichste 5-Minuten-Stelle des Zoom-
-  Mitschnitts, 848 Wörter, mit markierten leisen Strecken
-  (`Audiotest2/referenz/zoom_9890-10190_LIESMICH.md`). Sie kann Schadensfreiheit
-  belegen, den *Nutzen* aber nicht beziffern: dafür ist ihre Spreizung mit
-  13,8 dB zu klein und ihr Bootstrap-Intervall mit ±1,8 CER-Punkten zu breit.
-* Den Nutzen auf echtem Material zu beziffern, bräuchte einen referenzfreien
-  gepaarten Vergleich über Stunden nach der Methode von
-  `docs/skripte/encoder_diff.py`.
+* Wie sich Auphonics Vorsprung aufteilt. Rausch- und Hallreduktion sind die
+  naheliegenden Kandidaten; unser Versuch mit `afftdn` und `anlmdn` half nicht
+  (Abschnitt 17), war aber gegen weisses Rauschen geprüft, nicht gegen Raumhall.
+* Ob es überhaupt reales Material mit mehr als 20 dB Spreizung innerhalb einer
+  Passage gibt. Im Testbestand nicht. Eine Aufnahme mit einem sehr leisen
+  Gesprächspartner neben einem lauten wäre der Fall — sie fehlt uns.
 * Getrennte Transkription echter Zweikanal-Aufnahmen (Abschnitt 14).
+* Die Zoom-Referenz ist durch Korrektur des `p0-ist`-Entwurfs entstanden und
+  damit an diesen Arm angelehnt (Abschnitt 22). Die Streitstellen sind wenige und
+  mit `docs/skripte/adjudicate.py` gezielt nachhörbar.

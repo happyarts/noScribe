@@ -89,6 +89,18 @@ def blocks(cost, size):
     return out
 
 
+def rate(blks):
+    """The observed error rate over the unsampled blocks, in percent.
+
+    This is the point estimate. It is NOT the middle of the bootstrap interval:
+    the resampling distribution can sit off-centre, so the midpoint is a
+    different quantity and would disagree with the per-build numbers.
+    """
+    e = sum(x for x, _ in blks)
+    u = sum(x for _, x in blks)
+    return e / u * 100 if u else 0.0
+
+
 def boot(blks, rng):
     """Bootstrap distribution of the error rate over blocks."""
     n = len(blks)
@@ -154,10 +166,8 @@ for name in names:
     wd, cd = boot(wb, rng), boot(cb, rng)
     wl, wh = ci(wd)
     cl, ch = ci(cd)
-    wpt = sum(e for e, _ in wb) / len(ref_words) * 100
-    cpt = sum(e for e, _ in cb) / len(ref_chars) * 100
-    print(f"{name:32s} WER {wpt:5.2f}%  [{wl:5.2f}, {wh:5.2f}]"
-          f"   CER {cpt:5.2f}%  [{cl:5.2f}, {ch:5.2f}]")
+    print(f"{name:32s} WER {rate(wb):5.2f}%  [{wl:5.2f}, {wh:5.2f}]"
+          f"   CER {rate(cb):5.2f}%  [{cl:5.2f}, {ch:5.2f}]")
 
 if len(table) > 1:
     print("\nGepaarte Differenzen (95%-Intervall; enthaelt es 0, ist der "
@@ -174,6 +184,8 @@ if len(table) > 1:
             wsig = " " if wl <= 0 <= wh else "*"
             csig = " " if cl <= 0 <= ch else "*"
             print(f"  {ka} - {kb}")
-            print(f"      dWER {(wl+wh)/2:+5.2f}  [{wl:+5.2f}, {wh:+5.2f}] {wsig}"
-                  f"   dCER {(cl+ch)/2:+5.2f}  [{cl:+5.2f}, {ch:+5.2f}] {csig}")
+            dw = rate(table[ka][0]) - rate(table[kb][0])
+            dc = rate(table[ka][1]) - rate(table[kb][1])
+            print(f"      dWER {dw:+5.2f}  [{wl:+5.2f}, {wh:+5.2f}] {wsig}"
+                  f"   dCER {dc:+5.2f}  [{cl:+5.2f}, {ch:+5.2f}] {csig}")
     print("\n* = Intervall schliesst 0 aus")

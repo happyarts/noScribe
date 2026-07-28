@@ -16,8 +16,14 @@ speech at the cost of loud speech cannot hide behind a flat overall CER.
 Conditions are gains ("-12"), named filter chains from audio_filters.CHAINS
 ("speechnorm"), or "raw".
 
-    python docs/skripte/fleurs_quiet.py <n_pairs> <build> <drop_db> <cond> [cond ...]
+Mit `--rauschen <dB>` wird ein gleichmässiger Rauschteppich daruntergelegt, so
+viele dB unter der lauten Haelfte. Ohne ihn behaelt die gedaempfte Haelfte ihren
+Stoerabstand, was in echtem Material nie der Fall ist -- siehe die Warnung in
+build_pairs.
+
+    python docs/skripte/fleurs_quiet.py <n_pairs> <build> <drop_db> [--rauschen <dB>] <cond> [cond ...]
     python docs/skripte/fleurs_quiet.py 90 models/voxtral-mini-8bit 25 raw -12 speechnorm
+    python docs/skripte/fleurs_quiet.py 90 models/voxtral-mini-8bit 25 --rauschen 45 raw dynaudnorm
 """
 import collections
 import json
@@ -39,14 +45,26 @@ GAP = int(0.5 * SR)
 RESAMPLES = 10000
 
 
-def build_pairs(clips, refs, drop_db):
-    """LOUD | gap | QUIET | gap, plus the two reference word lists."""
+def build_pairs(clips, refs, drop_db, noise_db=None, seed=20260728):
+    """LOUD | gap | QUIET | gap, plus the two reference word lists.
+
+    `noise_db` lays an even noise floor over the finished pair, that many dB
+    below the RMS of the loud half. Without it the test is unrealistic in
+    exactly the way that decides the question: attenuating a clean recording
+    preserves its signal-to-noise ratio, a genuinely quiet voice in the same
+    room does not. A leveller can undo the attenuation, but it lifts the noise
+    with it and cannot give back an SNR that was never there.
+    """
     out = []
+    rng = np.random.default_rng(seed)
     g = 10 ** (-abs(drop_db) / 20)
     for i in range(0, len(clips) - 1, 2):
         a, b = clips[i], clips[i + 1]
         x = np.concatenate([a, np.zeros(GAP, np.float32),
                             (b * g).astype(np.float32), np.zeros(GAP, np.float32)])
+        if noise_db is not None:
+            loud_rms = float(np.sqrt((a.astype(np.float64) ** 2).mean()))
+            x = x + rng.standard_normal(len(x)) * loud_rms * 10 ** (-abs(noise_db) / 20)
         out.append((np.ascontiguousarray(x, np.float32),
                     norm(refs[i]), norm(refs[i + 1])))
     return out
@@ -88,15 +106,24 @@ def paired(a, b, num, den):
 
 def main():
     n_pairs, build, drop = int(sys.argv[1]), sys.argv[2], float(sys.argv[3])
-    conds = sys.argv[4:] or ["raw"]
+    args = sys.argv[4:]
+    noise = None
+    if "--rauschen" in args:
+        k = args.index("--rauschen")
+        noise = float(args[k + 1])
+        args = args[:k] + args[k + 2:]
+    conds = args or ["raw"]
 
     import fleurs_gain
     fleurs_gain.N = n_pairs * 2
     clips, refs = fleurs_gain.load_clips()
-    pairs = build_pairs(clips, refs, drop)
+    pairs = build_pairs(clips, refs, drop, noise)
     sec = sum(len(p[0]) for p in pairs) / SR
     print(f"# FLEURS de_de, {len(pairs)} Paare, {sec/60:.1f} min, "
-          f"leise Haelfte {drop:.0f} dB unter der lauten")
+          f"leise Haelfte {drop:.0f} dB unter der lauten"
+          + (f", Rauschteppich {noise:.0f} dB unter der lauten, "
+             f"die leise Haelfte liegt damit {noise-drop:+.0f} dB darueber"
+             if noise else ""))
     print(f"# Build: {build}\n")
     print(f"{'Bedingung':14s} {'peak':>6s} {'laut recall':>12s} {'leise recall':>13s} "
           f"{'WER':>7s} {'CER':>7s} {'Speed':>7s}")
