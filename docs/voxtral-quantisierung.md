@@ -183,10 +183,12 @@ it does not — but because the encoder's precision demonstrably changes what is
 heard while the direction is unknown, and 0.5 GB is a cheap price for holding
 the highest precision until that is resolved.
 
-Resolving it needs ground truth on hard audio, and the diff makes that
-affordable: it localises the disagreements to ~109 unique spans of a few seconds
-each. Adjudicating those by ear is an evening, against the many days a second
-hand-corrected reference passage would cost.
+**And it stays unresolved, deliberately.** Resolving it would mean listening to
+the ~109 localised disagreements and judging each by ear. That is the cheapest
+route there is — far cheaper than a second hand-corrected reference passage —
+and it is still an evening of someone's attention for a question whose answer
+changes nothing: bf16 is kept either way, because it is the safe side of an
+open question and costs 0.5 GB. Do not re-propose it.
 
 ## Clean audio and hard audio rank the models differently
 
@@ -432,11 +434,12 @@ bounded memory) are irrelevant to offline file transcription. Not adopted.
 
 ## What is still open
 
-- **Which encoder precision is actually better on the 3B model?** Measured: the
-  bit width changes what is heard, at ~2-3 acoustic differences per 1000 words,
-  scaling with the reduction. Unmeasured: the direction. The ~109 localised
-  disagreement spans from `encoder_diff.py` are the cheap way in — adjudicate
-  them by ear rather than building a second reference passage.
+- **Which encoder precision is better on the 3B model — closed as not worth
+  answering.** Measured: the bit width changes what is heard, at ~2-3 acoustic
+  differences per 1000 words, scaling with the reduction. The direction is
+  unknown and will stay that way; the only route to it is listening to the
+  disagreements one by one, and the answer would not change the build. bf16
+  stays.
 - **Why is the 24B model's encoder so much more sensitive?** Its sweep held the
   language model at 4 bit while the 3B sweep ran at 8. A coarsely quantised body
   may amplify encoder noise instead of averaging it out. Untested, and it would
