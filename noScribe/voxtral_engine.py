@@ -1027,11 +1027,14 @@ def _salvage_prefix(text, audio, align_cb):
 # before the take: on Auto the pass returned 3620 words without it, with `de`
 # 3631 words with it, and the two agreed everywhere else. The reverse has been
 # seen too (a pinned language costing the first ~150 words of a 1426 s window),
-# so no prompt setting is the safe side. Every observed instance is long: on that
-# recording 20 s through 1180 s all kept the opening in both language settings,
-# and only 1195 s and 1226 s lost it. FLEURS material never shows it at any
-# length, so it depends on the recording as well -- which is why this is a check
-# rather than a length rule.
+# so no prompt setting is the safe side, and it depends on the recording as much
+# as on the length -- which is why this is a check rather than a length rule. On
+# that recording 20 s through 1180 s all kept the opening and only 1195 s and
+# 1226 s lost it; FLEURS material never shows it at any length; but on a raw
+# 4.8 h Zoom recording it happens well inside the passes we actually run: of 32
+# windows cut at 300 s and 600 s, three lost their opening on Auto and two with
+# `de`, the worst dropping 18 words of fluent speech from a 600 s window and one
+# dropping a whole quoted sentence from a 300 s one in both language settings.
 #
 # That is the repair: decode a short head of the same audio and splice back
 # whatever the long pass is missing. The seam is found in the text rather than
