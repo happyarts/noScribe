@@ -442,8 +442,11 @@ bounded memory) are irrelevant to offline file transcription. Not adopted.
   stays.
 - **Why is the 24B model's encoder so much more sensitive?** Its sweep held the
   language model at 4 bit while the 3B sweep ran at 8. A coarsely quantised body
-  may amplify encoder noise instead of averaging it out. Untested, and it would
-  change how mixed builds are laid out if true.
+  may amplify encoder noise instead of averaging it out. **Not answerable on a
+  32 GB machine:** the clean counter-test is the 24B encoder sweep repeated with
+  an 8-bit body, and small-8bit is 25 GB of weights, which `_auto_chunk_sec()`
+  refuses outright. It needs a bigger machine, and it would only matter if mixed
+  builds are ever laid out differently.
 - **`MEM_MODEL` for the 24B builds is stale.** The `small`, `small6` and
   `small8` entries still hold one-shot-prefill numbers; `generate_step` cut the
   3B model's slope by ~2.5x. Re-measuring would probably lengthen the 24B pass
