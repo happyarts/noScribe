@@ -1662,6 +1662,43 @@ class _Voxtral:
                         pass
         return out
 
+    def _merged_embeddings(self, mi):
+        """Audio embeddings written into the prompt at the [AUDIO] placeholders.
+
+        Bit-identical to mlx_voxtral's `_merge_input_embeddings`, but it places
+        them in one scatter instead of walking the sequence. That walk tests
+        `j in audio_positions` against a *list* for every token, so it is
+        quadratic in the prompt, and the prompt is almost all audio (375 tokens
+        per 30 s): measured 1.75 s on a 600 s pass, against ~0.1 s here. The
+        reference does the same thing in one `masked_scatter`.
+
+        The dtype promotion is load-bearing. `embed_tokens` returns bf16 while
+        the projector returns float32, and the walk's final `mx.stack` promotes
+        the whole sequence to float32. Scattering into the bf16 array instead
+        would silently round every audio embedding to bf16 -- a change that
+        looks like nothing and shows up only as different logits.
+        """
+        mx = self._mx
+        import numpy as np
+        model = self.model
+        input_ids = mi["input_ids"]
+        features = mi.get("input_features")
+        if features is None:
+            return model.embed_tokens(input_ids)
+        audio_embeds = model.get_audio_embeds(features)
+        embeds = model.embed_tokens(input_ids).astype(audio_embeds.dtype)
+        ids = np.array(input_ids)
+        for i in range(ids.shape[0]):
+            pos = np.where(ids[i] == model.config.audio_token_id)[0]
+            if pos.size == 0:
+                continue
+            if pos.size != audio_embeds.shape[1]:
+                raise ValueError(
+                    f"Batch {i}: {audio_embeds.shape[1]} audio embeddings for "
+                    f"{pos.size} [AUDIO] placeholders in the prompt.")
+            embeds[i, mx.array(pos)] = audio_embeds[i]
+        return embeds
+
     def _fast_generate(self, mi, max_new_tokens, token_cb=None,
                        temperature=0.0, seed=None, breaker=None):
         """Decode through the maintained mlx_lm.generate_step, returning the
@@ -1695,8 +1732,7 @@ class _Voxtral:
             sampler = make_sampler(temp=temperature)
 
         # [seq, hidden] merged audio+text embeddings; generate_step adds the batch.
-        embeds = model._merge_input_embeddings(
-            input_ids=mi["input_ids"], input_features=mi.get("input_features"))[0]
+        embeds = self._merged_embeddings(mi)[0]
         cache = [KVCache() for _ in range(len(model.language_model.layers))]
         stream = generate_step(prompt=mx.array([], dtype=mx.int32),
                                input_embeddings=embeds, model=self._lm_adapter,
