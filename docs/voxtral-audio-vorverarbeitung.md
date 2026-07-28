@@ -500,7 +500,12 @@ ihr deshalb gar nicht sichtbar — auf rohem Material aber sehr wohl.
   Korrelation über ein paar Sekunden. Das ist allerdings ein Feature, keine
   Vorverarbeitung.
 
-## 16. Nachtrag: die Position im 30-s-Fenster kostet messbar
+## 16. Nachtrag: die Position im 30-s-Fenster kostet messbar (nur bei Einzelsätzen)
+
+> **Überholt für den praktischen Zweck.** Dieser Effekt ist auf einzelnen kurzen
+> Äußerungen real, überträgt sich aber nicht auf durchgehende Rede — und nur die
+> schneidet unser Chunker. Abschnitt 26 misst das mit Trennschärfe nach und zieht
+> die hier abgeleitete Empfehlung zurück.
 
 Der Feature-Extractor zerlegt jede Eingabe in 30-Sekunden-Fenster und füllt das
 letzte mit Nullen auf. Unser Chunker schneidet an Sprechpausen, nicht am
@@ -899,10 +904,17 @@ nicht: derselbe Regler auf dieselbe Datei angewandt verschlechtert von 5,06 auf
    Auphonic-Vorsprung ist mit fast einer Halbierung der CER der größte Effekt in
    diesem ganzen Dokument. Er stammt aber aus einer Kette, die wir nicht haben,
    und der Teil davon, den wir nachbilden können, ist der, der schadet.
-4. **Den Chunker die 30-s-Fenstergrenze mitbedenken lassen** (Abschnitt 16).
-   Führende Stille kürzen, Schnitte nach Möglichkeit nicht mitten durch eine
-   Äußerung legen. 0,4 CER-Punkte, kostenlos — und damit nach diesem Dokument
-   der einzige verbliebene Hebel im Code.
+4. **Auch am Chunker nichts ändern.** Die 30-s-Fenstergrenze sah nach einem
+   kostenlosen Hebel aus (Abschnitt 16), ist aber auf durchgehender Rede
+   wirkungslos: 18 lange Ströme mit bekanntem Transkript ergeben dWER +0,00
+   [−0,75, +0,52] (Abschnitt 26). Der Umbau wurde gebaut, gemessen und wieder
+   entfernt.
+
+**Damit bleibt am Audiopfad nichts zu tun.** Jeder einzelne Kandidat, der in
+diesem Dokument geprüft wurde, ist entweder wirkungslos oder schädlich. Das ist
+ein Ergebnis, kein Fehlschlag: der bestehende Pfad ist nicht verbesserungsfähig
+mit den Mitteln, die hier zur Verfügung standen, und jede der naheliegenden
+„Verbesserungen" hätte ohne Messung Schaden angerichtet.
 
 ### Was offen bleibt
 
@@ -916,3 +928,120 @@ nicht: derselbe Regler auf dieselbe Datei angewandt verschlechtert von 5,06 auf
 * Die Zoom-Referenz ist durch Korrektur des `p0-ist`-Entwurfs entstanden und
   damit an diesen Arm angelehnt (Abschnitt 22). Die Streitstellen sind wenige und
   mit `docs/skripte/adjudicate.py` gezielt nachhörbar.
+
+## 25. Was die Literatur dazu sagt
+
+Ein Blogartikel eines Transkriptionsanbieters (`vocova.app/de/blog/transcribe-noisy-audio`)
+verweist auf drei Arbeiten. Der Artikel selbst ist Werbematerial und gibt einen
+der Titel falsch wieder, die Primärquellen sind aber echt und wurden geprüft:
+
+**Chondhekar u. a. 2025**, *When De-noising Hurts: A Systematic Study of Speech
+Enhancement Effects on Modern Medical ASR Systems*
+([arXiv:2512.17562](https://arxiv.org/abs/2512.17562)). MetricGAN+ auf
+500 medizinischen Aufnahmen, vier ASR-Systeme, verschiedene Störbedingungen.
+Ergebnis: die Aufbereitung **verschlechtert die Erkennung in allen Bedingungen
+und bei allen Modellen**, um 1,1 bis 46,6 %. Unbehandeltes verrauschtes Audio
+schlägt durchweg das aufbereitete. Die Autoren führen es darauf zurück, dass
+moderne ASR-Modelle von sich aus störfest sind und klassisches Entrauschen
+akustische Information entfernt, die für die Erkennung gebraucht wird.
+
+**Islam, Nahar & Hamid 2026**, *When Audio Separation Hurts Zero-Shot ASR:
+Evaluating SAM-Audio with Whisper on Bengali and English Speech*
+([arXiv:2603.04710](https://arxiv.org/abs/2603.04710)). SAM-Audio hebt den PSNR
+von 32,28 auf 35,99 dB — und verschlechtert dabei jede Konfiguration: Whisper
+large-v3 auf Bengali von 65,83 auf 77,35 % WER, das Basismodell auf Englisch von
+10,53 auf 21,66 %. Fazit der Autoren: besserer Signalabstand führt nicht zu
+besserer Erkennung.
+
+**Mu u. a. 2022**, *Performance evaluation of automatic speech recognition systems
+on integrated noise-network distorted speech*, Frontiers in Signal Processing —
+im Blog als Beleg für den Zusammenhang von WER und Störabstand angeführt.
+
+### Was das für dieses Dokument bedeutet
+
+**Es bestätigt Abschnitt 17 unabhängig.** Unser Ergebnis — Entrauschen bringt
+nichts, `anlmdn` kratzt an der Signifikanz und verschlechtert dabei die WER —
+steht damit nicht mehr allein. Dass unsere Effekte kleiner ausfallen, passt ins
+Bild: `afftdn` und `anlmdn` sind klassische Spektralverfahren und greifen viel
+sanfter ein als MetricGAN+ oder SAM-Audio, die als neuronale Verfahren mehr
+Artefakte hinterlassen.
+
+**Es bestätigt außerdem die Methodik dieses Dokuments.** Beide Arbeiten finden
+genau die Trennung, die hier von Abschnitt 3 an durchgehalten wird: ein Maß, das
+das Signal besser aussehen lässt (PSNR, Mel-Abstand), sagt nichts darüber, was
+das Modell hört. Nur das Transkript entscheidet.
+
+**Und es schafft eine Spannung, die notiert gehört.** Auphonics Kette enthält
+Rausch- und Hallreduktion. Wenn Entrauschen der Erkennung schadet, kann der in
+Abschnitt 22 gemessene Vorsprung der Auphonic-Fassung (CER 2,70 gegen 5,06 %)
+kaum daher kommen. Dann bleibt als Erklärung vor allem die **Quelle**: die rohe
+Datei ist ein 26-kbps-Export, die bearbeitete verlustfrei. Der Bitraten-Versuch
+hat davon 0,54 Punkte erklärt — aber er hat nur *eine* Kompressionsstufe auf die
+bearbeitete Datei angewandt. Wenn die rohe Fassung aus einer anderen, schlechteren
+Kette stammt als die, die Auphonic zu sehen bekam, ist der Rest ebenfalls
+Quellenqualität und nicht Bearbeitung.
+
+Damit verschiebt sich die Empfehlung aus dem Fazit noch etwas: **nicht „lasst
+Auphonic drüberlaufen", sondern „exportiert in ordentlicher Qualität".** Was
+davon Bearbeitung und was Bitrate ist, lässt sich mit dem vorhandenen Material
+nicht weiter trennen — dafür bräuchte es dieselbe Aufnahme in guter Qualität
+unbearbeitet.
+
+## 26. Das angebrochene Fenster kostet nichts — und Abschnitt 16 trägt nicht
+
+Abschnitt 16 hat einzelne FLEURS-Aufnahmen im 30-s-Raster verschoben und einen
+kleinen, signifikanten Effekt gefunden. Der Versuch, daraus eine Änderung am
+Chunker abzuleiten, ist gescheitert — und die Fehlersuche ist lehrreich genug,
+um sie aufzuschreiben.
+
+### Was auf zwei Passagen passierte
+
+Auf der Zoom-Passage kostete ein angebrochenes letztes Fenster viel: bei
+exakt 10 Fenstern CER 0,89 %, mit einem Restfragment von 5 s dagegen 3,04 %, und
+das zweimal unabhängig reproduziert (Fragment 5 s bei 5 s und bei 35 s Vorlauf:
+3,04 % und 3,26 %; volles Fenster bei 0, 30 und 60 s Vorlauf: 0,89, 1,26 und
+1,26 %). Ein sauberes Muster.
+
+Ein erster Umbau — führende Stille abschneiden — machte es **vervierfacht
+schlechter** (CER 0,89 → 9,97 %), weil er aus einem 15-s-Fragment eines von
+0,25 s machte. Das war der Hinweis, dass nicht der Vorlauf zählt, sondern das
+Fragment.
+
+Auf der zweiten handkorrigierten Passage kehrte sich das Vorzeichen dann um:
+dasselbe Rezept verschlechterte dort von 5,06 auf 8,95 % CER.
+
+### Was der Test mit Trennschärfe sagt
+
+18 Ströme von je ~300 s, aus FLEURS-Aufnahmen aneinandergehängt, Transkript
+bekannt, 92 min Audio, jeder Strom einmal mit vollem und einmal mit
+angebrochenem letztem Fenster, gepaart ausgewertet
+(`docs/skripte/fleurs_stream.py`):
+
+| Zustand | Fragment | WER | CER |
+|---|---|---|---|
+| voll | 0 s | 4,83 % | 1,68 % |
+| angebrochen | 5 s | 4,83 % | 1,35 % |
+
+> dWER **+0,00** [−0,75, +0,52] · dCER **−0,32** [−1,16, +0,16]
+
+**Nichts.** Die WER ist auf zwei Nachkommastellen identisch, und beide Intervalle
+schließen die Null ein — eng genug, um alles über 0,75 WER-Punkte auszuschließen.
+
+Damit ist der Fall klar: das saubere Muster auf der Zoom-Passage war Rauschen.
+859 Wörter haben ein Bootstrap-Intervall von rund ±1,8 CER-Punkten, die zweite
+Passage ±2,5 — Unterschiede von zwei Punkten sind dort schlicht nicht
+auflösbar, und unter Greedy-Decoding macht ein einziger gekippter Token eine
+lange Divergenz (dieselbe Kaskade, die `docs/skripte/encoder_diff.py` beschreibt).
+Zwei Passagen, die sich widersprechen, sind kein Rätsel, sondern das erwartbare
+Ergebnis zu kleiner Stichproben.
+
+### Folge
+
+**Am Chunker wird nichts geändert.** Der Effekt aus Abschnitt 16 existiert für
+einzelne kurze Äußerungen, überträgt sich aber nicht auf durchgehende Rede — und
+genau die ist der Fall, den unser Chunker schneidet. Der dort genannte
+„kostenlose Hebel" ist damit zurückgezogen.
+
+Und die Warnung, die dazugehört: die Zwischenmessung, mit der der Umbau
+zunächst gerechtfertigt schien, war vollständig reproduzierbar und trotzdem
+falsch. Reproduzierbarkeit ersetzt keine Stichprobe.
