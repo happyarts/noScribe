@@ -624,7 +624,55 @@ Material, das Auphonic schon durchlaufen hat, liegt genau dort.
 
 ---
 
-## 20. Fazit: eine Antwort auf jede Ausgangsfrage
+## 20. Nachtrag: wie viel Dynamik hat echtes Material überhaupt?
+
+Abschnitt 13 nennt für den rohen Zoom-Mitschnitt eine Spreizung von 14,2 dB.
+Diese Zahl ist über **Fünf-Minuten-Fenster** gemessen — also langsame Drift über
+die Aufnahme hinweg. Für die Leveller-Frage ist das die falsche Größe. Was zählt,
+ist der Abstand zwischen lauten und leisen Stellen **innerhalb** einer Passage,
+denn nur der steht im selben Encoder-Fenster.
+
+Langsame Drift ist nachweislich harmlos: sie wirkt wie eine Pegeländerung, und
+die ist im Mel-Raum ein reiner Offset, gegen den das Modell unempfindlich ist
+(Abschnitte 8 und 9).
+
+Also nachgemessen, Sekundenpegel über die ganzen 4,8 Stunden, Spreizung als
+p90 − p10 über die Sprachsekunden je Fenster (`docs/skripte/find_passage.py`):
+
+| Fensterlänge | Median | p90 | Maximum |
+|---|---|---|---|
+| 120 s (726 Fenster) | 5,9 dB | 8,3 dB | **18,5 dB** |
+| 300 s (710 Fenster) | 6,0 dB | 7,6 dB | **13,8 dB** |
+
+**Das dämpft die Empfehlung aus Abschnitt 18 erheblich.** Der Leveller wirkt dort
+ab etwa 20 dB Spreizung; bei 15 dB streift der Effekt gerade die Signifikanz. Die
+typische Passage dieser Aufnahme liegt bei 6 dB, die extremste bei 18,5 dB. Auf
+diesem Material ist also **kein großer Gewinn zu erwarten** — die konstruierten
+Paare aus Abschnitt 12 mit 25 und 35 dB Abstand sind härter als das, was hier
+vorliegt.
+
+Was bleibt trotzdem für den Leveller:
+
+* Er **schadet nicht** — nicht unterhalb der Schwelle (Abschnitt 18, 10-dB-Zeile),
+  nicht auf verrauschtem Material (Abschnitt 17), nie der lauten Sprache.
+* Er macht die Erkennung **unabhängig** von der Dynamik. Für einen Einzelfall mit
+  einem sehr leisen Gesprächspartner ist das der Unterschied zwischen 62 % und
+  95 % Recall — und solche Aufnahmen liegen nicht in unserem Testbestand, wohl
+  aber im Posteingang der Nutzer.
+
+Die ehrliche Formulierung ist damit nicht „der Leveller bringt X", sondern:
+**er ist eine Versicherung gegen Aufnahmen, die wir nicht getestet haben, und
+kostet auf denen, die wir getestet haben, nichts.** Ob dieser Handel es wert
+ist, ist eine Produktentscheidung, keine Messfrage.
+
+Um wenigstens die Schadensfreiheit auf echtem, rohem Material zu belegen, liegt
+eine Passage zur Handkorrektur bereit — die dynamikreichste 5-Minuten-Stelle der
+Aufnahme, 848 Wörter, mit markierten leisen Strecken. Aufbau und Grenzen stehen
+in `Audiotest2/referenz/zoom_9890-10190_LIESMICH.md`.
+
+---
+
+## 21. Fazit: eine Antwort auf jede Ausgangsfrage
 
 **Welches Herunterrechnen benutzen wir genau?** Alle drei Reduktionen auf einmal,
 in einer Zeile: 44,1/48 kHz → 16 kHz mit libswresample (Kaiser, −3 dB bei
@@ -685,11 +733,16 @@ Projekts so gut läuft: der Leveller ist dort längst gelaufen.
    bestehende Pfad ist nicht der beste denkbare, aber der Unterschied ist für das
    Modell nicht hörbar. Wer ihn trotzdem umbauen will, braucht ein anderes
    Argument als Qualität — etwa die Nähe zu Mistrals Referenzimplementierung.
-2. **Einen Leveller in den Voxtral-Pfad aufnehmen.** `dynaudnorm` macht die
-   Erkennung unabhängig von der Dynamik der Aufnahme, wirkt ab etwa 20 dB
-   Spreizung, schadet unterhalb der Schwelle nicht, schadet auf verrauschtem
-   Material nicht und opfert in keiner Messung laute Sprache. Er kostet keine
-   neue Abhängigkeit und wenige Sekunden Rechenzeit.
+2. **Einen Leveller in den Voxtral-Pfad aufnehmen — als Versicherung, nicht als
+   Gewinnbringer.** `dynaudnorm` macht die Erkennung unabhängig von der Dynamik
+   der Aufnahme, wirkt ab etwa 20 dB Spreizung, schadet unterhalb der Schwelle
+   nicht, schadet auf verrauschtem Material nicht und opfert in keiner Messung
+   laute Sprache. Er kostet keine neue Abhängigkeit und wenige Sekunden
+   Rechenzeit. **Aber:** Abschnitt 20 zeigt, dass unser rohes Testmaterial
+   innerhalb einer Passage typisch nur 6 dB und maximal 18,5 dB Spreizung hat,
+   also unterhalb bis knapp an der Schwelle liegt. Auf dem, was wir haben, ist
+   der Gewinn klein; der Fall, für den er gebaut würde, liegt nicht in unserem
+   Testbestand.
 3. **Er gehört in den Voxtral-Pfad, nicht in `convert.py`.** Die temporäre WAV
    füttert auch pyannote, und für die Diarisierung ist eine Dynamikänderung eine
    eigene Frage, die hier nicht gemessen wurde.
@@ -704,10 +757,13 @@ Projekts so gut läuft: der Leveller ist dort längst gelaufen.
   konstruierten Sprachpaaren kalibriert, nicht optimiert.
 * Wie sich der Leveller auf die **Diarisierung** auswirkt, falls er doch vor
   pyannote landen sollte.
-* Ob der Gewinn auf echtem Material der Größenordnung entspricht, die die
-  konstruierten Paare zeigen. Der rohe Zoom-Mitschnitt hat 14 dB Spreizung
-  zwischen Fünf-Minuten-Fenstern und damit sicher mehr innerhalb einzelner
-  Fenster — aber für ihn gibt es keine handkorrigierte Referenz.
+* Ob der Leveller auf echtem, rohem Material schadet. Eine Passage zur
+  Handkorrektur liegt bereit — die dynamikreichste 5-Minuten-Stelle des Zoom-
+  Mitschnitts, 848 Wörter, mit markierten leisen Strecken
+  (`Audiotest2/referenz/zoom_9890-10190_LIESMICH.md`). Sie kann Schadensfreiheit
+  belegen, den *Nutzen* aber nicht beziffern: dafür ist ihre Spreizung mit
+  13,8 dB zu klein und ihr Bootstrap-Intervall mit ±1,8 CER-Punkten zu breit.
+* Den Nutzen auf echtem Material zu beziffern, bräuchte einen referenzfreien
+  gepaarten Vergleich über Stunden nach der Methode von
+  `docs/skripte/encoder_diff.py`.
 * Getrennte Transkription echter Zweikanal-Aufnahmen (Abschnitt 14).
-
----
