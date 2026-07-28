@@ -51,6 +51,7 @@ gepaarte 95-%-Bootstrap-Intervalle.
 | **Entrauschen** | **nichts**, `anlmdn` verschlechtert die WER | `fleurs_noise.py` |
 | **Hochpass** (Headroom gewinnen) | untauglich: hebt die Spitze eher an (−0,58 bis **+1,21** dB) | — |
 | **Chunks am 30-s-Fenster ausrichten** | **nichts.** dWER +0,00 [−0,75, +0,52] | Abschnitt 5 |
+| **log-Mel über die ganze Datei statt je 30-s-Block** | **nichts.** dWER +0,02 [−0,19, +0,24] | Abschnitt 6 |
 | **Kanäle getrennt transkribieren** | gegenstandslos: alles Testmaterial ist Dual-Mono (Korrelation +0,98 bis +1,0000) | `audio_audit.py` |
 
 ### Warum die Bittiefe egal ist
@@ -98,7 +99,7 @@ auf 26 kbps gebracht: 2,70 → 3,24 %).
 Der Rest ist **nicht** durch Levelling nachzubauen: derselbe Regler auf dieselbe
 rohe Datei angewandt verschlechtert von 5,06 auf 6,93 %. Und Auphonics übrige
 Kette enthält Rausch- und Hallreduktion — von der die Literatur sagt, dass sie
-ASR schadet (Abschnitt 6). Damit bleibt als wahrscheinlichste Erklärung die
+ASR schadet (Abschnitt 7). Damit bleibt als wahrscheinlichste Erklärung die
 **Quellenqualität**: die rohe Datei ist ein 26-kbps-Export, die bearbeitete
 stammt aus einer besseren Kette.
 
@@ -170,7 +171,39 @@ zweimal reproduzierbar — auf der zweiten Passage kehrte sich das Vorzeichen um
 (`noScribe/whisper_mp_worker.py:140`); Segmentierung und Fensterung passieren
 dort intern, wir haben keinen Hebel.
 
-## 6. Was die Literatur bestätigt
+## 6. Warum der Mel-Pfad unverändert bleibt
+
+mlx-voxtral berechnet das log-Mel **je 30-s-Block** und normalisiert jeden Block
+gegen sein eigenes Maximum. Voxtral spezifiziert ein Spektrogramm über die ganze
+Eingabe, das erst danach geteilt wird (arXiv:2507.13264 §2.1) — beim Clamp auf
+`log_max − 8` landet ein Block mit eigenem Maximum also auf einem anderen Boden.
+Auf 90 s Sprache waren die Blockmaxima 1,897 / 1,721 / 1,526 bei einem
+Dateimaximum von 1,897.
+
+Eine echte Abweichung, gemeldet und mit Patch
+([mzbac/mlx.voxtral#3](https://github.com/mzbac/mlx.voxtral/issues/3),
+[PR #5](https://github.com/mzbac/mlx.voxtral/pull/5)) — aber am Transkript ändert
+sie nichts. 18 FLEURS-Ströme à 300 s, 92 min, beide Fassungen auf bitgleichem
+Audio, gepaart:
+
+> dWER **+0,02** [−0,19, +0,24] · dCER **−0,03** [−0,13, +0,04]
+
+Enge Intervalle: ein Effekt über ±0,24 WER-Punkten ist ausgeschlossen. Der Test
+ist dabei schärfer als der Anwendungsfall — die Blockpegel-Spanne der Ströme
+liegt bei 1,87 log10 gegen 0,94 und 0,12 auf den beiden handkorrigierten
+Passagen, weil dort verschiedene Aufnahmen aneinanderhängen.
+
+Dieselbe Falle wie in Abschnitt 5: `hart_780-900` (Spanne 0,12) lieferte
+wortgleiche Ergebnisse, `zoom_9890-10190` einen scheinbar signifikanten
+Unterschied — jene Referenz ist aber um 0,25 CER-Punkte zugunsten des Builds
+verzerrt, aus dessen Entwurf sie korrigiert wurde. Zwei Passagen entscheiden das
+nicht. Skript: `mel_stream.py`.
+
+**Also nicht eingebaut.** Ohne Qualitätsgewinn wiegt ein Patch auf einer
+Fremdbibliothek schwerer als die Architekturtreue; upstream ist die Änderung
+trotzdem richtig, dort kostet sie nichts.
+
+## 7. Was die Literatur bestätigt
 
 Zwei Arbeiten, gegen die arXiv-Originale geprüft:
 
@@ -185,7 +218,7 @@ Zwei Arbeiten, gegen die arXiv-Originale geprüft:
 Beide finden genau die Trennung, die dieses Dokument durchhält: ein besseres
 Signalmaß sagt nichts darüber, was das Modell hört.
 
-## 7. Was beim Messen zu beachten ist
+## 8. Was beim Messen zu beachten ist
 
 Vier Fallen, in alle einmal hineingetappt:
 
@@ -205,7 +238,7 @@ Vier Fallen, in alle einmal hineingetappt:
    Chunker-Umbau rechtfertigte, war vollständig reproduzierbar und trotzdem
    falsch.
 
-## 8. Werkzeuge
+## 9. Werkzeuge
 
 Alle in `docs/skripte/`. Herkunft, Qualität und Ausrichtung des Testmaterials
 stehen in `Audiotest2/MATERIAL.md`.
@@ -221,3 +254,4 @@ stehen in `Audiotest2/MATERIAL.md`.
 | `adjudicate.py` | Streitstellen zweier Arme mit Zeitmarke |
 | `wer.py` · `bootstrap_cer.py` · `encoder_diff.py` | Bewertung, Intervalle, referenzfreier Vergleich |
 | `fleurs_*.py` | die Einzelfragen auf FLEURS: Pegel, Resampler, leise Passagen, Rauschen, Fensterposition, lange Ströme |
+| `mel_stream.py` | Per-Block- gegen Ganzdatei-Normalisierung des log-Mel, gepaart über lange Ströme |

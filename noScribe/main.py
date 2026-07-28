@@ -629,6 +629,10 @@ class TranscriptionQueue:
     
 
 # Word endings that close a sentence, ignoring trailing quotes and brackets.
+# Deliberately narrower than voxtral_engine._SENTENCE_END, which also counts a
+# colon: that one hunts for a place to cut a looping decode, where any clause
+# boundary will do. Here a cut claims "the speaker may change here", and a colon
+# lands mid-utterance ("Und dann sagte er: ich komme").
 _SEGMENT_SENTENCE_END = ('.', '!', '?', '…')
 _SEGMENT_SENTENCE_TRAIL = '"\'»)] '
 
@@ -639,11 +643,9 @@ def _join_words(words):
     Whisper's words carry their own leading space, Voxtral's are bare tokens,
     so the separator has to follow the source rather than be assumed.
     """
-    if any((w.get('word') or '').startswith((' ', ' ')) for w in words):
-        text = ''.join(w.get('word') or '' for w in words)
-    else:
-        text = ' '.join(w.get('word') or '' for w in words)
-    return ' ' + text.strip()
+    tokens = [w.get('word') or '' for w in words]
+    separator = '' if any(t.startswith((' ', '\u00a0')) for t in tokens) else ' '
+    return ' ' + separator.join(tokens).strip()
 
 
 def split_at_speaker_change(segment, speaker_of):

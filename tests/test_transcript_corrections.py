@@ -341,15 +341,30 @@ def test_pinned_chunk_sec_cannot_bypass_the_memory_ceiling(monkeypatch, tmp_path
     monkeypatch.setattr(v, "_total_ram_gb", lambda: 16.0)
     with pytest.raises(MemoryError):
         v.transcribe(wav, voxtral_repo="models/voxtral-small-8bit", chunk_sec=60)
-    # a huge machine must still respect the model-context cap (MAX_CHUNK_SEC)
+    # A huge machine still gets the shorter of the two caps, and the warning has
+    # to name the one that actually bound. Saying "more context than the model
+    # has" about a window the model has plenty of context for is worse than
+    # saying nothing.
     monkeypatch.setattr(v, "_total_ram_gb", lambda: 128.0)
-    warnings.clear()
-    with pytest.raises(_StopRun):
-        v.transcribe(wav, voxtral_repo="models/voxtral-mini-8bit",
-                     chunk_sec=2400, need_timestamps=False,
-                     log_cb=lambda lvl, msg: warnings.append((lvl, msg)))
-    assert any(lvl == "warn" and str(v.MAX_CHUNK_SEC) in msg
-               for lvl, msg in warnings)
+
+    def pin(seconds):
+        warnings.clear()
+        with pytest.raises(_StopRun):
+            v.transcribe(wav, voxtral_repo="models/voxtral-mini-8bit",
+                         chunk_sec=seconds, need_timestamps=False,
+                         log_cb=lambda lvl, msg: warnings.append((lvl, msg)))
+        return [msg for lvl, msg in warnings
+                if lvl == "warn" and "voxtral_chunk_sec" in msg]
+
+    msgs = pin(2400)
+    assert any(str(v.TRUSTED_CHUNK_SEC) in m and "measured" in m for m in msgs), msgs
+    assert not any("context" in m for m in msgs), msgs
+
+    # With the measured cap lifted past the context cap, the context wording is
+    # the correct one again.
+    monkeypatch.setattr(v, "TRUSTED_CHUNK_SEC", v.MAX_CHUNK_SEC + 600)
+    msgs = pin(2400)
+    assert any("context" in m and str(v.MAX_CHUNK_SEC) in m for m in msgs), msgs
 
 
 def test_low_reserve_is_not_a_refusal(monkeypatch):

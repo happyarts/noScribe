@@ -117,11 +117,15 @@ def test_too_little_text_to_anchor_on_is_left_alone():
 
 
 def test_a_degenerate_probe_is_not_spliced_in():
-    """A looping probe must never reach the transcript."""
+    """A looping probe must never reach the transcript -- and must not be grown.
+
+    A loop is a property of this speech, not of the window length, and a
+    degenerate decode is the one that runs to its full token budget. Growing it
+    buys a longer loop, not an answer."""
     vox = FakeVox("ja ja " * 60)
     out = _recover_lost_head(vox, _audio(1226), None, BODY, _log, "x")
     assert out is BODY
-    assert len(vox.windows_sec) > 1  # gave up by growing, not by splicing
+    assert vox.windows_sec == [HEAD_PROBE_SEC], "grew the probe instead of giving up"
 
 
 def test_the_probe_grows_when_the_seam_is_beyond_it():

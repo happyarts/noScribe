@@ -49,19 +49,21 @@ _EST_TOKENS_PER_SEC = 3.0
 # `_auto_chunk_sec()` -- see MEM_MODEL below -- unless the caller/config pins it.
 PREF_MIN_CHUNK_SEC = 180     # preferred quality floor (below this we warn)
 HARD_MIN_CHUNK_SEC = 60      # absolute floor; memory safety wins over this only with a warning
-# 10 min: the longest pass Voxtral has been *measured* on. The 30/40-minute
+MAX_CHUNK_SEC = 1500         # 25 min: safely under Voxtral's ~30 min / 32k ctx
+# 10 min: the longest pass Voxtral has been *measured* on, which is a different
+# fact from what fits its context and so a different constant. The 30/40-minute
 # figure everyone quotes is a capacity calculation -- 12.5 Hz frame rate against
-# a 32k context -- not a quality result, and this used to be sized against it
-# (1500 s). The paper's own long-form ASR protocol is shorter: "we take the
-# one-hour long earnings calls from Earnings-21 and Earnings-22, and segment
-# them into shorter, 10 minute variants" (arXiv:2507.13264). Beyond that there
-# is no published measurement, and past it this project has now recorded two
-# distinct failures -- whole chunks coming back translated (windows around 1425
-# s) and passes returning without their opening (1195 s and 1226 s of a 1226 s
-# file, while 15 shorter points came back clean). Neither is a threshold effect
-# that a slightly shorter window would dodge, so this is not a fix for either;
-# it is a refusal to run the model twice as far out as anyone has measured it.
-MAX_CHUNK_SEC = 600
+# 32k tokens -- not a quality result. The paper's own long-form ASR protocol is
+# shorter: "we take the one-hour long earnings calls from Earnings-21 and
+# Earnings-22, and segment them into shorter, 10 minute variants"
+# (arXiv:2507.13264). Beyond that there is no published measurement, and past it
+# this project has recorded two distinct failures -- whole chunks coming back
+# translated (windows around 1425 s) and passes returning without their opening
+# (1195 s and 1226 s of a 1226 s file, while 15 shorter points came back clean).
+# Neither is a threshold effect that a slightly shorter window would dodge, so
+# this is not a fix for either; it is a refusal to run the model twice as far
+# out as anyone has measured it. Raise it when a longer window has been measured.
+TRUSTED_CHUNK_SEC = 600
 # The binding limit is the Voxtral *generate* working set: it must fit in
 # physical RAM, because MLX compute on swapped-out buffers thrashes and never
 # finishes. The one-off load transient (weights dict + model briefly duplicated)
@@ -101,9 +103,9 @@ MIN_HEADROOM_GB = 6
 #          margin over the fit (6.5 + 0.0060*s over-predicts every point by
 #          15-25%): the slope is dominated by the audio prompt-token rate (~12.5
 #          tok/s, fixed by the recording), so speech density moves it only ~6%,
-#          but machine/version variance warrants the cushion. On 32 GB mini8 is
-#          capped by MAX_CHUNK_SEC (context) anyway; the recalibration mainly lets
-#          16-24 GB machines run longer single passes. small/small6/small8 below
+#          but machine/version variance warrants the cushion. From 24 GB up,
+#          mini8 is capped by TRUSTED_CHUNK_SEC anyway, so the recalibration now
+#          only binds at 16 GB and for the small builds. small/small6/small8 below
 #          are still on old-path numbers (no local build to re-measure) -- safe,
 #          just conservative, and they target 48 GB+ machines regardless.
 #          Why the encoder stays dense: measured against a hand-corrected
@@ -1057,8 +1059,9 @@ def _find_anchor(probe, anchor, min_hits=HEAD_ANCHOR_MIN_HITS):
     too much would duplicate words the pass already has.
     """
     best_at, best_hits = None, 0
-    for i in range(len(probe) - len(anchor) + 1):
-        hits = sum(1 for a, b in zip(anchor, probe[i:]) if a == b)
+    width = len(anchor)
+    for i in range(len(probe) - width + 1):
+        hits = sum(1 for a, b in zip(anchor, probe[i:i + width]) if a == b)
         if hits > best_hits:
             best_at, best_hits = i, hits
     return best_at if best_hits >= min_hits else None
@@ -1076,23 +1079,34 @@ def _recover_lost_head(vox, audio, language, text, log_cb, label):
         return text
     anchor = [_norm_word(w) for w in words[:HEAD_ANCHOR_WORDS]]
 
+    # Never probe more than half the pass: past that the probe is a second
+    # transcription rather than a check, and the defect is no longer a lost
+    # opening.
+    longest = min(HEAD_PROBE_MAX_SEC, duration / 2)
     sec = HEAD_PROBE_SEC
     while True:
         probe = vox.transcribe_array(audio[:int(sec * SAMPLE_RATE)], language,
                                      max_new_tokens=int(sec * 20) + 512)
-        if probe and not _looks_degenerate(probe):
-            probe_words = probe.split()
-            at = _find_anchor([_norm_word(w) for w in probe_words], anchor)
-            if at is not None:
-                break
-        # The pass' opening is not in this probe, so it lost more than the probe
-        # covers (or the probe itself came back unusable). Reach further once.
-        sec *= 2
-        if sec > min(HEAD_PROBE_MAX_SEC, duration / 2):
+        if not probe or _looks_degenerate(probe):
+            # A looping probe is a property of this speech, not of the window
+            # length, and a degenerate decode is the one that runs to its full
+            # token budget. Growing it would buy a longer loop, not an answer.
             _log(log_cb, "warn",
-                 f"{label}: could not check the opening -- a {sec / 2:.0f}s head "
+                 f"{label}: could not check the opening -- the {sec:.0f}s head "
+                 f"probe came back unusable.")
+            return text
+        probe_words = probe.split()
+        at = _find_anchor([_norm_word(w) for w in probe_words], anchor)
+        if at is not None:
+            break
+        # The pass' opening is not in this probe at all, so it lost more than the
+        # probe covers. Reach further, up to `longest`.
+        if sec * 2 > longest:
+            _log(log_cb, "warn",
+                 f"{label}: could not check the opening -- a {sec:.0f}s head "
                  f"probe does not contain the first words of the pass.")
             return text
+        sec *= 2
 
     if at == 0:
         return text  # the pass starts where the audio does: nothing was lost
@@ -1503,7 +1517,8 @@ def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
     # A reserve below MIN_HEADROOM_GB must not turn into a refusal (the model
     # fits -- the *reserve* is what doesn't); it just can't buy passes beyond
     # the hard ceiling.
-    chunk = int(max(HARD_MIN_CHUNK_SEC, min(MAX_CHUNK_SEC, raw, ceiling)))
+    chunk = int(max(HARD_MIN_CHUNK_SEC,
+                    min(TRUSTED_CHUNK_SEC, MAX_CHUNK_SEC, raw, ceiling)))
     est_peak = m["fixed"] + m["slope"] * chunk
     if raw < HARD_MIN_CHUNK_SEC:
         _log(log_cb, "warn",
@@ -2474,7 +2489,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         # outright, exactly as in the automatic path.
         ceiling = max_safe_chunk_sec(repo)  # raises MemoryError if unfit
         pinned = chunk_sec
-        chunk_sec = int(min(pinned, ceiling, MAX_CHUNK_SEC))
+        chunk_sec = int(min(pinned, ceiling, MAX_CHUNK_SEC, TRUSTED_CHUNK_SEC))
         if chunk_sec < HARD_MIN_CHUNK_SEC:
             # The clamp above only ever shortens, so a value this small came
             # from the config -- and int() turns anything under 1 s into 0,
@@ -2487,8 +2502,16 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                  f"{HARD_MIN_CHUNK_SEC}s minimum; using {HARD_MIN_CHUNK_SEC}s.")
             chunk_sec = HARD_MIN_CHUNK_SEC
         elif chunk_sec < pinned:
-            what = ("more memory than this machine has"
-                    if ceiling < MAX_CHUNK_SEC else "more context than the model has")
+            # Three different reasons a pin gets shortened, and saying the wrong
+            # one is worse than saying nothing: the machine, the model's context,
+            # or our own refusal to run further out than Voxtral was measured.
+            if ceiling < min(MAX_CHUNK_SEC, TRUSTED_CHUNK_SEC):
+                what = "more memory than this machine has"
+            elif MAX_CHUNK_SEC <= TRUSTED_CHUNK_SEC:
+                what = "more context than the model has"
+            else:
+                what = ("a longer window than Voxtral has been measured on "
+                        f"({TRUSTED_CHUNK_SEC}s)")
             _log(log_cb, "warn",
                  f"voxtral_chunk_sec={pinned:.0f}s would need {what}; "
                  f"using {chunk_sec}s.")
