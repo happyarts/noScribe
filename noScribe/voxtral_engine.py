@@ -1004,6 +1004,93 @@ def _salvage_prefix(text, audio, align_cb):
 # is why this is a reason for the ladder to run rather than a repair of its own.
 
 
+# --------------------------------------------------------------------------- #
+# Recovering a head a long pass dropped
+# --------------------------------------------------------------------------- #
+# A long window sometimes comes back missing its first seconds of speech: no
+# loop, no wrong language, nothing else wrong with it -- the opening is simply
+# not in the text. Measured on a 1226 s recording whose first 2.4 s are a remark
+# before the take: on Auto the pass returned 3620 words without it, with `de`
+# 3631 words with it, and the two agreed everywhere else. The reverse has been
+# seen too (a pinned language costing the first ~150 words of a 1426 s window),
+# so no prompt setting is the safe side, and the same window decoded SHORT keeps
+# the opening every time -- 20, 30, 60, 90, 120, 180 and 300 s all did.
+#
+# That is the repair: decode a short head of the same audio and splice back
+# whatever the long pass is missing. The seam is found in the text rather than
+# assumed, so a pass that lost nothing (the normal case) is left untouched.
+HEAD_PROBE_SEC = 60.0
+# Grown only when the seam is not in the probe at all, i.e. the pass lost more
+# than the probe covers. Past this the loss is no longer a dropped opening.
+HEAD_PROBE_MAX_SEC = 240.0
+# The run of words from the pass that is looked for in the probe. Long enough
+# that common words cannot line up by chance, short enough to survive the small
+# wording differences between two independent decodes.
+HEAD_ANCHOR_WORDS = 8
+HEAD_ANCHOR_MIN_HITS = 6
+
+
+def _norm_word(word):
+    """A word reduced to what two decodes of the same speech agree on."""
+    return re.sub(r"[^\w]", "", word.lower())
+
+
+def _find_anchor(probe, anchor, min_hits=HEAD_ANCHOR_MIN_HITS):
+    """Where in `probe` the `anchor` run begins, or None. Both normalised.
+
+    Two independent decodes of the same speech differ in small ways ("Ja,
+    herzlich" against "Ja. Herzlich"), so the match is scored rather than exact.
+    Ties go to the earliest position: that is the one that recovers the least
+    text, and recovering too little only leaves the status quo while recovering
+    too much would duplicate words the pass already has.
+    """
+    best_at, best_hits = None, 0
+    for i in range(len(probe) - len(anchor) + 1):
+        hits = sum(1 for a, b in zip(anchor, probe[i:]) if a == b)
+        if hits > best_hits:
+            best_at, best_hits = i, hits
+    return best_at if best_hits >= min_hits else None
+
+
+def _recover_lost_head(vox, audio, language, text, log_cb, label):
+    """Put back the opening a long pass dropped. Returns the text either way.
+
+    Left alone when there is no long-window defect to repair (a short pass), no
+    seam to find (too little text), or nothing missing at the seam.
+    """
+    words = text.split()
+    duration = len(audio) / SAMPLE_RATE
+    if len(words) < HEAD_ANCHOR_WORDS or duration <= HEAD_PROBE_SEC * 1.5:
+        return text
+    anchor = [_norm_word(w) for w in words[:HEAD_ANCHOR_WORDS]]
+
+    sec = HEAD_PROBE_SEC
+    while True:
+        probe = vox.transcribe_array(audio[:int(sec * SAMPLE_RATE)], language,
+                                     max_new_tokens=int(sec * 20) + 512)
+        if probe and not _looks_degenerate(probe):
+            probe_words = probe.split()
+            at = _find_anchor([_norm_word(w) for w in probe_words], anchor)
+            if at is not None:
+                break
+        # The pass' opening is not in this probe, so it lost more than the probe
+        # covers (or the probe itself came back unusable). Reach further once.
+        sec *= 2
+        if sec > min(HEAD_PROBE_MAX_SEC, duration / 2):
+            _log(log_cb, "warn",
+                 f"{label}: could not check the opening -- a {sec / 2:.0f}s head "
+                 f"probe does not contain the first words of the pass.")
+            return text
+
+    if at == 0:
+        return text  # the pass starts where the audio does: nothing was lost
+    missing = " ".join(probe_words[:at]).strip()
+    _log(log_cb, "warn",
+         f"{label}: the pass dropped its opening ({at} words); recovered from a "
+         f"{sec:.0f}s head probe.")
+    return f"{missing} {text.lstrip()}"
+
+
 def _other_language(text, want):
     """The language `text` reads as when that is decidedly not `want`, else None.
 
@@ -2471,6 +2558,10 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                                    want_lang=want)
         if not text:
             continue
+        # Before anything reads the text: a pass that silently dropped its
+        # opening is not otherwise detectable, and the words are simply gone
+        # from the transcript.
+        text = _recover_lost_head(vox, chunk, language, text, log_cb, label)
         chunk_lang, _ = _detect_language(text)
         if _other_language(text, want):
             _log(log_cb, "warn",
