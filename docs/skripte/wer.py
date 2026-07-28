@@ -58,37 +58,45 @@ def wer(ref, hyp):
     return prev[m]
 
 
-raw = open(sys.argv[1], encoding="utf-8").read()
-overlap_words = norm(" ".join(OVERLAP.findall(raw)))
-ref = norm(OVERLAP.sub(" ", raw))
-# German lets the writer choose between "Balanceöl" and "Balance Öl", or
-# "Hokuspokus" and "Hocus Pocus" -- identical speech, different typing. The
-# word metric charges those as errors, so a character metric on the SPACE-FREE
-# text runs alongside it: it can only move when the sounds were heard
-# differently. Where WER and CER disagree, the difference was orthographic.
-ref_chars = "".join(ref)
-audio, sr = sf.read(sys.argv[2], dtype="float32")
-dur = len(audio) / sr
-print(f"# Referenz {len(ref)} Woerter / {len(ref_chars)} Zeichen "
-      f"(+{len(overlap_words)} ueberlappend), {dur:.0f}s\n")
-print(f"{'Build':30s} {'WER':>7s} {'CER':>7s} {'Sub':>5s} {'Del':>5s} {'Ins':>5s} "
-      f"{'Speed':>7s} {'Peak':>7s}  Overlap")
+# Everything below is the command line. It lives in main() so that other
+# scripts can `from wer import norm, wer` without this running -- the
+# normalisation must stay identical across every script that scores a build.
+def main():
+    raw = open(sys.argv[1], encoding="utf-8").read()
+    overlap_words = norm(" ".join(OVERLAP.findall(raw)))
+    ref = norm(OVERLAP.sub(" ", raw))
+    # German lets the writer choose between "Balanceöl" and "Balance Öl", or
+    # "Hokuspokus" and "Hocus Pocus" -- identical speech, different typing. The
+    # word metric charges those as errors, so a character metric on the SPACE-FREE
+    # text runs alongside it: it can only move when the sounds were heard
+    # differently. Where WER and CER disagree, the difference was orthographic.
+    ref_chars = "".join(ref)
+    audio, sr = sf.read(sys.argv[2], dtype="float32")
+    dur = len(audio) / sr
+    print(f"# Referenz {len(ref)} Woerter / {len(ref_chars)} Zeichen "
+          f"(+{len(overlap_words)} ueberlappend), {dur:.0f}s\n")
+    print(f"{'Build':30s} {'WER':>7s} {'CER':>7s} {'Sub':>5s} {'Del':>5s} {'Ins':>5s} "
+          f"{'Speed':>7s} {'Peak':>7s}  Overlap")
 
-for path in sys.argv[3:]:
-    vox = _Voxtral(path)
-    mx.reset_peak_memory()
-    t0 = time.time()
-    text = vox.transcribe_array(audio, "de", max_new_tokens=int(dur * 20) + 512)
-    el = time.time() - t0
-    hyp = norm(text)
-    err, sub, dele, ins = wer(ref, hyp)
-    cer = wer(ref_chars, "".join(hyp))[0] / max(1, len(ref_chars))
-    # how much of the overlapping utterance did it pick up?
-    got = sum(1 for w in overlap_words if w in hyp) if overlap_words else 0
-    name = path.rstrip('/').split('/')[-1]
-    print(f"{name:30s} {err/len(ref)*100:6.2f}% {cer*100:6.2f}% {sub:5d} {dele:5d} {ins:5d} "
-          f"{dur/el:6.2f}x {mx.get_peak_memory()/1e9:6.1f}G  {got}/{len(overlap_words)}",
-          flush=True)
-    open(f"/tmp/wer_{name}.txt", "w").write(text)
-    del vox
-    mx.clear_cache()
+    for path in sys.argv[3:]:
+        vox = _Voxtral(path)
+        mx.reset_peak_memory()
+        t0 = time.time()
+        text = vox.transcribe_array(audio, "de", max_new_tokens=int(dur * 20) + 512)
+        el = time.time() - t0
+        hyp = norm(text)
+        err, sub, dele, ins = wer(ref, hyp)
+        cer = wer(ref_chars, "".join(hyp))[0] / max(1, len(ref_chars))
+        # how much of the overlapping utterance did it pick up?
+        got = sum(1 for w in overlap_words if w in hyp) if overlap_words else 0
+        name = path.rstrip('/').split('/')[-1]
+        print(f"{name:30s} {err/len(ref)*100:6.2f}% {cer*100:6.2f}% {sub:5d} {dele:5d} {ins:5d} "
+              f"{dur/el:6.2f}x {mx.get_peak_memory()/1e9:6.1f}G  {got}/{len(overlap_words)}",
+              flush=True)
+        open(f"/tmp/wer_{name}.txt", "w").write(text)
+        del vox
+        mx.clear_cache()
+
+
+if __name__ == "__main__":
+    main()
