@@ -330,26 +330,38 @@ plus Overlap bereits.
 **Fazit:** 8-bit small abhaken; KV-Quantisierung ebenfalls. Der einzige lohnende
 Punkt bleibt die zeitliche Trennung von Voxtral und Aligner.
 
-## 9. Offene Punkte
+## 9. Was aus den offenen Punkten wurde
 
-- **mini 8-bit als Standard** — identische Ausgabe, ~5× Tempo, 1816-s-Pässe statt
-  1068 s. Liegt konvertiert unter `/tmp/mini8` (5,1 GB), noch nicht registriert.
-- **small 8-bit** — 26,5 GB Gewichte; ob es auf 32 GB überhaupt läuft, ist offen.
-  Quellgewichte liegen lokal, Konvertierung dauert ~25 s.
-- **Sprach-Fixierung über mehrere Pässe** (siehe 3).
-- **Voxtral-Mini-4B-Realtime-2602** — neuer, offen, Streaming mit rollendem
-  KV-Cache (unbegrenzte Länge, konstanter Speicher). Eigenes Projekt.
-- `voxtral-mini-2602` („Transcribe 2", native Timestamps) ist **API-only** und
-  damit für vertrauliche Interviews ungeeignet.
+Alle fünf sind entschieden; die Liste bleibt, damit niemand sie ein zweites Mal
+aufmacht.
+
+- **mini 8-bit als Standard** — gebaut und registriert als `voxtral-mini-8bit`,
+  inzwischen die Empfehlung.
+- **small 8-bit** — gebaut und registriert als `voxtral-small-8bit`. Die Frage
+  „läuft es auf 32 GB?" ist beantwortet: nein, es braucht ~34 GB für seinen
+  kürzesten Pass und wird darunter vor dem Start abgelehnt.
+- **Sprach-Fixierung über mehrere Pässe** — gebaut: die erwartete Sprache wird
+  als `want_lang` in `_transcribe_guarded` gereicht und macht einen übersetzten
+  Pass zu einem Grund für die Reparaturleiter. Rest-Lücke: Chunks, die schon
+  geschrieben waren, bevor die Dateisprache feststand, bekommen nur eine
+  Warnung mit ihrer Nummer.
+- **Voxtral-Mini-4B-Realtime** — **verworfen**, an Mistrals eigenen
+  FLEURS-Zahlen: Deutsch 6,19 % WER bei 480 ms, 4,15 % selbst bei 2,4 s
+  Verzögerung, gegen 3,54 % beim offline Mini 3B — ein kleineres Modell schlägt
+  es. Streaming tauscht Vorausschau gegen Latenz, und Latenz ist bei einer
+  Datei-Transkription wertlos.
+- **`voxtral-mini-2602` („Transcribe 2")** — weiterhin **API-only** und damit
+  für vertrauliche Interviews ungeeignet.
 
 ---
 
 ## 10. Reproduzieren
 
-Skripte liegen unter `/tmp` (flüchtig!):
-`quantize6.py` (Konvertierung, beliebige Bit-Breite), `bitmatrix.py`
-(Tempo/Worttreue), `decisive.py` (Satzzeichen je Strafe), `split_retry.py`
-(Schleifenreparatur), `cli_check.py` (Formatprüfung).
+Die Skripte liegen in `docs/skripte/`: `bitmatrix.py` (Tempo/Worttreue),
+`decisive.py` (Satzzeichen je Strafe), `split_retry.py` (Schleifenreparatur),
+`cli_check.py` (Formatprüfung). Einzig `quantize6.py` (Konvertierung, beliebige
+Bit-Breite) liegt neben dem Testmaterial in `Audiotest2/skripte/` und ist damit
+nicht im Repository.
 
 Relevante Commits auf `feature/voxtral-engine`:
 `3232ec8` (Decoding-Fixes) · `355be19` (Namen nur Deutsch) · `7031aed` (Loop-Erkennung) ·
