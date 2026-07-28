@@ -628,6 +628,77 @@ class TranscriptionQueue:
         return True
     
 
+# Word endings that close a sentence, ignoring trailing quotes and brackets.
+_SEGMENT_SENTENCE_END = ('.', '!', '?', '…')
+_SEGMENT_SENTENCE_TRAIL = '"\'»)] '
+
+
+def _join_words(words):
+    """Rebuild a segment's text from its words.
+
+    Whisper's words carry their own leading space, Voxtral's are bare tokens,
+    so the separator has to follow the source rather than be assumed.
+    """
+    if any((w.get('word') or '').startswith((' ', ' ')) for w in words):
+        text = ''.join(w.get('word') or '' for w in words)
+    else:
+        text = ' '.join(w.get('word') or '' for w in words)
+    return ' ' + text.strip()
+
+
+def split_at_speaker_change(segment, speaker_of):
+    """Cut a segment at sentence boundaries where the diarization speaker changes.
+
+    A segment is the unit a speaker is assigned to, so one that straddles a
+    turn silently loses the shorter half: the whole thing goes to whoever
+    overlaps it most. That is not hypothetical. Voxtral's cue builder merges a
+    short trailing cue into the one before it so subtitles don't get one-word
+    fragments, and a turn-final "Ja, unbedingt." merged that way went to the
+    previous speaker on 40.4% overlap against 39.3% -- the answer ended up in
+    the question's paragraph.
+
+    Speakers change between sentences, not inside them, so cutting at sentence
+    ends undoes it. The pieces still go through the unchanged assignment in the
+    caller, which stays the single place a speaker is decided; `speaker_of`
+    (start_ms, end_ms) is only consulted to find where to cut.
+
+    Returns a list of segment dicts -- `[segment]` when there is nothing to cut.
+    """
+    words = segment.get('words')
+    if not words:
+        return [segment]
+
+    runs, current = [], []
+    for word in words:
+        if word.get('start') is None or word.get('end') is None:
+            return [segment]  # incomplete stamps: no basis to cut on
+        current.append(word)
+        token = (word.get('word') or '').rstrip(_SEGMENT_SENTENCE_TRAIL)
+        if token.endswith(_SEGMENT_SENTENCE_END):
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    if len(runs) < 2:
+        return [segment]
+
+    pieces = []
+    for run in runs:
+        spkr = speaker_of(round(run[0]['start'] * 1000.0),
+                          round(run[-1]['end'] * 1000.0))
+        # No overlap at all ('') is not a speaker change -- cutting there would
+        # only add a segment that the caller hands to the current speaker anyway.
+        if pieces and (spkr == pieces[-1][0] or spkr == ''):
+            pieces[-1][1].extend(run)
+        else:
+            pieces.append((spkr, list(run)))
+    if len(pieces) < 2:
+        return [segment]
+
+    return [{'start': ws[0]['start'], 'end': ws[-1]['end'],
+             'text': _join_words(ws), 'words': ws} for _spkr, ws in pieces]
+
+
 # Command Line Interface
 
 def parse_speaker_names(speaker_names):
@@ -3053,6 +3124,15 @@ class App(ctk.CTk):
                     self._speaker_name_overflow_warned = False
 
                     def on_segment(seg):
+                        if job.speaker_detection == 'none' or not diarization:
+                            pieces = [seg]
+                        else:
+                            pieces = split_at_speaker_change(
+                                seg, lambda s, e: find_speaker(diarization, s, e))
+                        for piece in pieces:
+                            emit_segment(piece)
+
+                    def emit_segment(seg):
                         nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
                         # Map dict to simple object-like for existing code
                         class _Seg:
