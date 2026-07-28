@@ -2632,7 +2632,16 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         # Before anything reads the text: a pass that silently dropped its
         # opening is not otherwise detectable, and the words are simply gone
         # from the transcript.
-        text = _recover_lost_head(vox, chunk, language, text, log_cb, label)
+        #
+        # Only the first pass needs this. Every later one starts OVERLAP_SEC
+        # early and its overlap words are dropped again below by timestamp, so a
+        # recovered opening would land before `a0` and be discarded -- which is
+        # exactly what happened the one time the probe fired on a later chunk.
+        # The previous pass already transcribed that audio. A loss LONGER than
+        # the overlap would reach past `a0` and stays uncovered; no such loss has
+        # been observed, and probing every pass for it cost ~10% of each decode.
+        if a_read == 0:
+            text = _recover_lost_head(vox, chunk, language, text, log_cb, label)
         chunk_lang, _ = _detect_language(text)
         if _other_language(text, want):
             _log(log_cb, "warn",
