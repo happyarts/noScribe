@@ -637,6 +637,60 @@ _SEGMENT_SENTENCE_END = ('.', '!', '?', '…')
 _SEGMENT_SENTENCE_TRAIL = '"\'»)] '
 
 
+# A speaker who never holds the floor is not a speaker. On automatic speaker
+# counting, pyannote sometimes spends one label on the short, quiet utterances
+# ("mh", "genau") of a recording -- and it collects them from *everyone*, so the
+# label is not a person and its turns are scattered through the whole file.
+#
+# Thresholds are the gap measured over 14 runs of the same seven two-speaker
+# recordings: real speakers held 38-62% of the speech time with turns up to 29 s,
+# while the one spurious label had 1.7% and never a turn longer than 1.52 s. Both
+# conditions have to hold, because either alone has honest counter-examples: a
+# third person who only answers one question is small but speaks in sentences,
+# and a very short recording can leave a real speaker with few seconds.
+#
+# This only reports. Reassigning the turns was measured and rejected: that label
+# held material from *both* real speakers (24 turns of one, 32 of the other), so
+# there is no single speaker to merge it into, and folding each turn into its
+# nearest neighbour placed 10 of 56 wrong -- trading a visible phantom speaker
+# for invisible misattributions. Re-running the diarization with a corrected
+# count is the fix, and that is the user's call.
+GHOST_SPEAKER_MAX_SHARE = 0.05
+GHOST_SPEAKER_MAX_TURN_MS = 2000
+
+
+def find_ghost_speakers(diarization,
+                        max_share=GHOST_SPEAKER_MAX_SHARE,
+                        max_turn_ms=GHOST_SPEAKER_MAX_TURN_MS):
+    """Labels that look like a spurious speaker rather than a person.
+
+    Returns a list of (label, share_of_speech, longest_turn_ms), smallest share
+    first, or [] when every label looks like a real speaker. Needs at least
+    three labels: with two, "one of them is spurious" is not a conclusion this
+    can draw -- the remaining one would have to be everybody.
+    """
+    totals, longest = {}, {}
+    for segment in diarization or ():
+        label = segment['label']
+        length = max(0, segment['end'] - segment['start'])
+        totals[label] = totals.get(label, 0) + length
+        longest[label] = max(longest.get(label, 0), length)
+    if len(totals) < 3:
+        return []
+    speech = sum(totals.values())
+    if speech <= 0:
+        return []
+    ghosts = [(label, totals[label] / speech, longest[label])
+              for label in totals
+              if totals[label] / speech < max_share
+              and longest[label] < max_turn_ms]
+    # Never call *every* label spurious, however lopsided the file: that says the
+    # recording has no speaker at all, which is never the useful reading.
+    if len(ghosts) >= len(totals):
+        return []
+    return sorted(ghosts, key=lambda g: g[1])
+
+
 def _join_words(words):
     """Rebuild a segment's text from its words.
 
@@ -2943,6 +2997,16 @@ class App(ctk.CTk):
                         for segment in diarization:
                             line = f'{utils.ms_to_str(job.start + segment["start"], include_ms=True)} - {utils.ms_to_str(job.start + segment["end"], include_ms=True)} {segment["label"]}'
                             self.logn(line, where='file')
+
+                        # Say so when a label looks like a spurious speaker
+                        # rather than a person -- only on automatic counting,
+                        # since a count the user gave is not ours to doubt.
+                        if not str(job.speaker_detection).isdigit():
+                            for label, share, longest in find_ghost_speakers(diarization):
+                                self.logn(t('warn_ghost_speaker',
+                                            speaker=f'S{label[8:]}',
+                                            share=f'{100 * share:.1f}',
+                                            longest=f'{longest / 1000:.1f}'), 'error')
 
                         self.logn()
 
