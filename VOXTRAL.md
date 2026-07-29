@@ -161,6 +161,15 @@ Matches are whole-word and case-insensitive. The file is created empty (with
 commented examples) on first use — add your recurring brand, product and
 programme names (e.g. from earlier podcast transcripts).
 
+Why this and not a prompt: the transcription request has exactly one text slot
+(`lang:xx`), and putting terms there was measured to act as a decode
+perturbation rather than a vocabulary hint — on three clips it fixed one term,
+ignored another and broke a third that the plain request had got right.
+Voxtral's chat mode *does* use a term list, but it is not a verbatim
+transcriber: one of four clips came back as a 12-word answer instead of an
+84-word transcript, and another wrote the instruction into the text. A term
+Voxtral does not know is therefore fixed after the fact, here.
+
 ## Author
 
 The Voxtral integration for noScribe (engine, forced alignment, quantised

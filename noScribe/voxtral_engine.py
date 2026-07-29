@@ -2382,9 +2382,22 @@ def _segments_from_words(word_stamps):
 
     # Merge a tiny leftover cue (e.g. a lone "habe.") back into the previous one
     # when the result still fits, so subtitles don't get one-word fragments.
+    #
+    # A lone word is a fragment however long it is drawn out, so only the
+    # two-word case still needs the duration guard. With the guard applied to
+    # both, a stretched final word survived on its own: "angesagt." after a cue
+    # closed by SUB_MAX_CHARS ran ~1.2 s into the pause before the next cue and
+    # stayed a one-word segment. A segment that short takes its speaker from
+    # whatever the diarization happens to put under it -- 0.4 s of a spurious
+    # backchannel cluster was enough to hand one word its own speaker and its own
+    # paragraph, mid-sentence. The combined-length checks below still refuse the
+    # merge when the result would be an oversized cue, so a lone word after a
+    # long pause is left alone as before.
     merged = []
     for seg in segments:
-        if merged and len(seg["words"]) <= 2 and (seg["end"] - seg["start"]) < 1.2:
+        short = (len(seg["words"]) == 1
+                 or (len(seg["words"]) == 2 and (seg["end"] - seg["start"]) < 1.2))
+        if merged and short:
             prev = merged[-1]
             combined = prev["words"] + seg["words"]
             if len(combined) <= SUB_MAX_WORDS + 3 and (seg["end"] - prev["start"]) <= SUB_MAX_SEC + 2:

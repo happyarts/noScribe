@@ -121,3 +121,43 @@ def test_no_cue_has_zero_duration():
               _w("Genau.", 3.0, 3.4)]
     for start, end, text in _cues(stamps):
         assert end > start, f"Cue ohne Dauer: {text!r}"
+
+
+def test_a_lone_word_never_keeps_its_own_cue():
+    """Der Reparaturschritt gegen Ein-Wort-Fragmente hatte die Dauerbedingung
+    auch auf ein einzelnes Wort angewandt. Gemessen an "Digitale Welt Video 7"
+    (00:03:47): SUB_MAX_CHARS schloss den Cue nach "...Reorganisation" (49
+    Zeichen), und "angesagt." lief gedehnt ~1.2 s in die Pause bis zum naechsten
+    Cue -- die Bedingung kippte, das Wort blieb ein eigenes Segment. Ein so
+    kurzes Segment bekommt seinen Sprecher von dem, was die Diarisierung darunter
+    legt: 0.4 s eines Backchannel-Clusters gaben dem Wort mitten im Satz einen
+    eigenen Sprecher und einen eigenen Absatz."""
+    words = "haben sie jetzt schon die nächste Reorganisation".split()
+    stamps = [_w(w, 225.0 + i * 0.40, 225.0 + i * 0.40 + 0.35)
+              for i, w in enumerate(words)]
+    stamps.append(_w("angesagt.", 227.85, 229.05))   # 1.2 s, gedehnt
+    cues = _cues(stamps)
+    assert len(cues) == 1, cues
+    assert cues[0][2].endswith("Reorganisation angesagt."), cues
+
+
+def test_a_lone_word_after_a_long_pause_still_stands_alone():
+    """Gegenprobe: die Laengengrenzen bleiben zustaendig. Liegt das Wort so weit
+    hinter dem vorigen Cue, dass der zusammengefasste Cue ueber SUB_MAX_SEC + 2
+    reichen wuerde, darf er nicht entstehen -- sonst steht ein Untertitel ueber
+    die ganze Pause."""
+    stamps = [_w("Also", 0.0, 0.4), _w("gut", 0.5, 0.9)]
+    stamps.append(_w("weiter.", 12.0, 13.2))
+    cues = _cues(stamps)
+    assert len(cues) == 2, cues
+
+
+def test_the_two_word_fragment_keeps_its_duration_guard():
+    """Nur das einzelne Wort ist von der Dauer unabhaengig. Zwei Woerter, die
+    zusammen laenger als 1.2 s dauern, sind ein normaler kurzer Cue und werden
+    weiter nicht angeklebt."""
+    stamps = [_w("Das", 0.0, 0.3), _w("ist", 0.4, 0.7), _w("so.", 0.8, 1.1)]
+    stamps.append(_w("Sehr", 4.0, 4.9))
+    stamps.append(_w("gut.", 5.0, 5.8))               # 2 Woerter, 1.8 s
+    cues = _cues(stamps)
+    assert len(cues) == 2, cues
