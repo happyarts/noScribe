@@ -637,25 +637,42 @@ _SEGMENT_SENTENCE_END = ('.', '!', '?', '…')
 _SEGMENT_SENTENCE_TRAIL = '"\'»)] '
 
 
-# A speaker who never holds the floor is not a speaker. On automatic speaker
-# counting, pyannote sometimes spends one label on the short, quiet utterances
-# ("mh", "genau") of a recording -- and it collects them from *everyone*, so the
-# label is not a person and its turns are scattered through the whole file.
+# A label that never holds the floor is worth a second look: on automatic
+# speaker counting the diarization sometimes spends one on speech it could not
+# place, and the transcript then carries a speaker column nobody spoke in.
 #
-# Thresholds are the gap measured over 14 runs of the same seven two-speaker
-# recordings: real speakers held 38-62% of the speech time with turns up to 29 s,
-# while the one spurious label had 1.7% and never a turn longer than 1.52 s. Both
-# conditions have to hold, because either alone has honest counter-examples: a
-# third person who only answers one question is small but speaks in sentences,
-# and a very short recording can leave a real speaker with few seconds.
+# Scored against ground truth on VoxConverse v0.3 (216 dev + 232 test
+# recordings, 1 to 21 speakers each, RTTM reference), asking per label "is this
+# one surplus, i.e. does a longer label already cover the same reference
+# speaker?":
 #
-# This only reports. Reassigning the turns was measured and rejected: that label
-# held material from *both* real speakers (24 turns of one, 32 of the other), so
-# there is no single speaker to merge it into, and folding each turn into its
-# nearest neighbour placed 10 of 56 wrong -- trading a visible phantom speaker
-# for invisible misattributions. Re-running the diarization with a corrected
-# count is the fix, and that is the user's call.
-GHOST_SPEAKER_MAX_SHARE = 0.05
+#   share < 0.05, turn < 2000 ms   dev 71% correct   test 67%
+#   share < 0.02, turn < 2000 ms   dev 83%           test 69%   <- shipped
+#   share < 0.01, turn < 2000 ms   dev 100%          test 67%
+#
+# So roughly two in three reports are right, and no threshold does better: 0.01
+# looked perfect on dev and lost on test, which is what tuning 32 positives
+# does. 0.02 is the only value better than the original on *both* splits.
+#
+# Two limits this cannot argue away, and the wording of the message respects
+# both. Recall is low -- about one in eight surplus labels (9 of 77 on test) --
+# so silence means nothing. And automatic counting errs the *other* way far more
+# often: too few speakers in 62 of 216 dev and 93 of 232 test recordings against
+# too many in 16 and 30. Several of the false reports are on recordings that are
+# short of speakers, where "one too many" would be exactly backwards. Hence a
+# report that describes what it sees and asks, rather than diagnosing.
+#
+# Both conditions are needed. Share alone flags real speakers wholesale: on a
+# 25-minute round with 14 of them, 13 hold less than 5% of the speech time --
+# but every one speaks in sentences, and only 2 of 860 real speakers across
+# VoxConverse dev ever stay under a 2 s turn.
+#
+# This only reports. Reassigning the turns was measured and rejected: on the
+# recording that prompted this, the label held material from *both* real
+# speakers (24 turns of one, 32 of the other), so there is no single speaker to
+# merge it into, and folding each turn into its nearest neighbour placed 10 of
+# 56 wrong -- trading a visible phantom speaker for invisible misattributions.
+GHOST_SPEAKER_MAX_SHARE = 0.02
 GHOST_SPEAKER_MAX_TURN_MS = 2000
 
 

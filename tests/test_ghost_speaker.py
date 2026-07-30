@@ -1,12 +1,16 @@
-"""Wann ein Diarisierungs-Label kein Sprecher ist.
+"""Wann ein Diarisierungs-Label einen zweiten Blick wert ist.
 
-Die Schwellen von `find_ghost_speakers` stammen aus gemessenen Läufen, nicht aus
-dem Gefühl, und die Zahlen unten sind die echten: der eine falsche Sprecher, den
-die automatische Zählung über 14 Läufe erzeugte (1,7 % Sprechzeit, längster
-Redebeitrag 1,52 s) gegen die 14 Sprecher einer Q&A-Passage, von denen 13
-ebenfalls unter 5 % liegen -- die aber alle in Sätzen sprechen (kürzester
-längster Beitrag 5,86 s). Genau dieser Abstand trägt die Warnung, deshalb steht
-er hier fest.
+Die Schwellen sind gegen Ground Truth gemessen, nicht geraten: VoxConverse v0.3,
+216 dev- plus 232 test-Aufnahmen mit 1 bis 21 Sprechern und RTTM-Referenz. Auf
+Label-Ebene liegt die Genauigkeit bei rund zwei Dritteln (dev 83 %, test 69 %),
+die Trefferquote bei etwa einem Achtel. Beide Zahlen sind hier festgehalten,
+weil sie die Aussage der Meldung begrenzen -- und weil eine engere Schwelle
+nachweislich NICHT hilft: 0,01 traf auf dev 100 % und auf test 67 %.
+
+Die Gegenprobe, die die zweite Bedingung rechtfertigt: auf einer 25-minütigen
+Fragerunde mit 14 echten Sprechern liegen 13 unter 5 % Sprechzeit -- alle
+sprechen aber in Sätzen, und über VoxConverse dev bleiben nur 2 von 860 echten
+Sprechern unter einem 2-s-Beitrag.
 """
 import yaml
 from pathlib import Path
@@ -36,7 +40,7 @@ def _floor(label, n, length, step=60.0, offset=5.0):
 
 def test_the_measured_ghost_is_reported():
     """Die echte Stelle: zwei Sprecher mit je ~50 % und Beiträgen bis 29 s, dazu
-    ein Label mit 1,7 % und keinem Beitrag über 1,52 s."""
+    ein Label mit 1,7 % und keinem Beitrag über 1,52 s -- beides unter den Schwellen."""
     diarization = (_floor('SPEAKER_00', 20, 28.0)
                    + _floor('SPEAKER_01', 20, 26.0, offset=35.0)
                    + _spread('SPEAKER_02', 56, 0.35))
@@ -95,10 +99,38 @@ def test_empty_and_degenerate_input():
 
 
 def test_thresholds_are_the_documented_ones():
-    """Die Werte tragen die Aussage der Warnung; ein stiller Dreh daran macht
-    aus einer belegten Schwelle eine geratene."""
-    assert GHOST_SPEAKER_MAX_SHARE == 0.05
+    """Die Werte tragen die Aussage der Meldung; ein stiller Dreh daran macht aus
+    einer gemessenen Schwelle eine geratene. 0,02 ist der einzige Wert, der auf
+    dev UND test besser war als der ursprüngliche 0,05."""
+    assert GHOST_SPEAKER_MAX_SHARE == 0.02
     assert GHOST_SPEAKER_MAX_TURN_MS == 2000
+
+
+def test_a_quiet_real_speaker_can_trip_this_and_that_is_known():
+    """Die Grenze des Verfahrens, absichtlich festgehalten. Auf VoxConverse test
+    war etwa ein Drittel der Meldungen ein echter Sprecher, der einfach fast
+    nichts sagte -- gemessen z. B. 0,32 % Sprechzeit mit 1266 ms als längstem
+    Beitrag, extremer als der Geist, der das Ganze ausgelöst hat (1,7 % /
+    1519 ms). Auf diesen zwei Achsen ist diese Verwechslung nicht auflösbar;
+    deshalb meldet die Funktion und entscheidet nicht."""
+    diarization = (_floor('SPEAKER_00', 20, 30.0)
+                   + _floor('SPEAKER_01', 20, 28.0, offset=35.0)
+                   + [_seg(400.0, 401.27, 'SPEAKER_02'),
+                      _seg(700.0, 701.1, 'SPEAKER_02')])
+    ghosts = find_ghost_speakers(diarization)
+    assert [g[0] for g in ghosts] == ['SPEAKER_02'], ghosts
+
+
+def test_many_short_turns_are_not_required():
+    """Die naheliegende dritte Achse ist gemessen und verworfen: der auslösende
+    Geist hatte 56 kurze Beiträge, aber auf VoxConverse haben überzählige Labels
+    typisch wenige -- eine Mindestzahl an Beiträgen brach die Treffer von 5 auf 1
+    ein. Ein Label mit nur zwei kurzen Beiträgen muss also gemeldet werden."""
+    diarization = (_floor('SPEAKER_00', 20, 30.0)
+                   + _floor('SPEAKER_01', 20, 28.0, offset=35.0)
+                   + [_seg(400.0, 400.9, 'SPEAKER_02'),
+                      _seg(900.0, 901.4, 'SPEAKER_02')])
+    assert [g[0] for g in find_ghost_speakers(diarization)] == ['SPEAKER_02']
 
 
 def test_warning_string_exists_in_every_locale_or_falls_back_to_english():
