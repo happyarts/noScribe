@@ -13,18 +13,17 @@ forced_align invocation stays under the cap while still timestamping
 every word.
 
 When can the cap go away?
-    The kernel fix is pytorch/audio#4209 (issue #4208), still unmerged as
-    of 2026-08-03, so the earliest release carrying it is 2.12. The
-    segfault is a regression from pytorch/audio#4021 (torchaudio 2.8) and
-    is present in every release from 2.8 through 2.11.
+    The kernel fix is pytorch/audio#4209 (issue #4208), unmerged as of
+    2026-08-04, so no release before 2.12 can carry it. The segfault is a
+    regression from pytorch/audio#4021, which merged five days after 2.8
+    shipped: 2.8 is safe, 2.9 through 2.11 are affected.
 
     Once our minimum torchaudio is at or above the first fixed release,
     the *crash* rationale expires -- but do not simply drop the cap with
-    it. Splitting also bounds memory and latency: one forced_align call
-    at 2**30 cells peaks around 1.0 GB and 3.9 s (see the note on
-    FORCED_ALIGN_MAX_CELLS in voxtral_engine). What may then go is the
-    hard-failure path for windows that cannot be split far enough; the
-    splitting itself should stay.
+    it. Splitting also bounds memory and latency; the measured figures
+    live next to the constants in voxtral_engine, not here, so they stay
+    in one place. What may then go is the hard-failure path for windows
+    that cannot be split far enough; the splitting itself should stay.
 """
 import numpy as np
 import pytest

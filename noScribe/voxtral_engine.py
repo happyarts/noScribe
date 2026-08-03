@@ -142,7 +142,10 @@ EMISSION_WINDOW_SEC = 20
 # torchaudio's CPU kernel indexes that buffer with 32-bit ints and segfaults
 # once the product nears 2**31 (empirically: 2.10e9 cells fine, 2.17e9 crashes,
 # torchaudio 2.11, int32 and int64 targets alike). 2**30 leaves a 2x safety
-# margin and keeps a single align call under ~5 s.
+# margin and keeps a single align call under ~5 s. Affects 2.9 through 2.11;
+# fixed upstream by pytorch/audio#4209. Before lifting this once a fixed
+# release is our minimum, read tests/test_forced_align_cap.py: the splitting
+# has a second, independent justification and must stay.
 FORCED_ALIGN_MAX_CELLS = 2**30
 # `_Aligner.align_prefix` is free to choose its own piece sizes, so it uses a
 # smaller budget than the hard cap: measured, one forced_align call peaks at
