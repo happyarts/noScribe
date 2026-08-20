@@ -349,26 +349,37 @@ python docs/skripte/encoder_diff.py models/voxtral-mini-8bit \
 # the requirements -- it pulls only dacite on top of what is already installed,
 # and mlx 0.32.0 satisfies its floor, so it can be added and removed without
 # disturbing the pinned Voxtral stack)
-python docs/skripte/parakeet_wer.py ref \
+python docs/skripte/engines/parakeet_wer.py ref \
     Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav 5      # trailing 5 = beam width
-python docs/skripte/parakeet_wer.py fleurs 100
+python docs/skripte/engines/parakeet_wer.py fleurs 100
 
 # the Qwen3-ASR comparison (no extra dependency -- transformers 5.13+ has it)
-python docs/skripte/qwen_asr_wer.py ref \
+python docs/skripte/engines/qwen_asr_wer.py ref \
     Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav chunk60
-python docs/skripte/qwen_asr_wer.py ref \
+python docs/skripte/engines/qwen_asr_wer.py ref \
     Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav "vocab:Xtend, BalanceOil"
-python docs/skripte/qwen_asr_wer.py fleurs 100
+python docs/skripte/engines/qwen_asr_wer.py fleurs 100
 
 # VibeVoice-ASR: same yardsticks, plus its own diarization
-python docs/skripte/vibevoice_wer.py ref \
+python docs/skripte/engines/vibevoice_wer.py ref \
     Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav
-python docs/skripte/vibevoice_wer.py fleurs 100
+python docs/skripte/engines/vibevoice_wer.py fleurs 100
+
+# Cohere Transcribe (gated repo -- accept on the model page first; its Xet
+# transfer is broken, so HF_HUB_DISABLE_XET=1 for the download)
+python docs/skripte/engines/cohere_asr_wer.py tokens
+python docs/skripte/engines/cohere_asr_wer.py ref \
+    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
+    Audiotest2/referenz/hart_780-900.wav plain
+python docs/skripte/engines/cohere_asr_wer.py fleurs 100
 ```
+
+The four scripts under `docs/skripte/engines/` share a README and the same three
+yardsticks; see [`docs/skripte/engines/README.md`](skripte/engines/README.md).
 
 Each build is ~20 seconds to make and 5–21 GB on disk. On macOS, remember that
 hourly Time Machine snapshots keep deleted builds alive: reclaim with
@@ -470,7 +481,7 @@ repetition loops, whole-chunk language drift and a dropped head are structurally
 impossible, and word timestamps fall out of the predicted durations instead of
 needing a CTC forced aligner.
 
-Measured with `docs/skripte/parakeet_wer.py` (which reuses `norm` and `wer` from
+Measured with `docs/skripte/engines/parakeet_wer.py` (which reuses `norm` and `wer` from
 `wer.py` unchanged, so the metric is identical), via `parakeet-mlx` 0.5.2 at its
 default bf16:
 
@@ -524,7 +535,7 @@ Not adopted. The result says nothing about Parakeet in English or in the other
 24 languages, and nothing about the ONNX build's speed on a CPU — only that it
 is the wrong engine for German conversational audio.
 
-### Qwen3-ASR-1.7B (measured, not adopted — but the closest thing yet)
+### Qwen3-ASR-1.7B (measured, not adopted)
 
 `Qwen/Qwen3-ASR-1.7B-hf` is the Voxtral principle at half the size: an audio
 encoder in front of a Qwen3-Omni language model, Apache-2.0, 30 languages. Two
@@ -532,7 +543,7 @@ things make it easier to try than anything else here — **transformers supports
 natively** (`AutoModelForMultimodalLM`, no new dependency at all in this venv),
 and it takes an explicit language as well as a free-form context prompt.
 
-Measured with `docs/skripte/qwen_asr_wer.py`, bf16 on MPS, same metric:
+Measured with `docs/skripte/engines/qwen_asr_wer.py`, bf16 on MPS, same metric:
 
 | Hard passage (422 words) | WER | CER | Sub | Del | Ins |
 |---|---:|---:|---:|---:|---:|
@@ -606,7 +617,7 @@ ASR, diarization and timestamping in **one pass** and emits speaker-attributed
 segments directly — noScribe's whole pipeline collapsed into one model. MIT
 licence, 16.7 GB in bf16, natively supported by transformers (again no new
 dependency), 4-bit and 8-bit MLX ports published by mlx-community. Measured with
-`docs/skripte/vibevoice_wer.py`, bf16 on MPS.
+`docs/skripte/engines/vibevoice_wer.py`, bf16 on MPS.
 
 | Hard passage (422 words) | WER | CER | Sub | Del | Ins | Commas/100w |
 |---|---:|---:|---:|---:|---:|---:|
@@ -661,6 +672,72 @@ and text at pyannote-grade diarization quality.** The thing to watch is a model
 of this shape that hears German conversation as well as Voxtral does. Nothing
 here suggests that is far off.
 
+### Cohere Transcribe (measured — the best challenger so far, and still not close enough)
+
+`CohereLabs/cohere-transcribe-03-2026` came out of the leaderboard below: ~2B
+parameters, Apache-2.0, 3.9 GB, transformers-native, and the best open-weight
+model on the leaderboard's English long-form tab. Measured with
+`docs/skripte/engines/cohere_asr_wer.py`, bf16 on MPS, language forced to `de`.
+
+| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Speed | Commas/100w |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 6.79x | 10.87 |
+| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 | 2.43x | 10.62 |
+| **cohere-transcribe** | 10.43 % | 3.69 % | 25 | 4 | 15 | **16.58x** | 11.74 |
+| qwen3-asr-1.7b, 60 s chunks | 10.90 % | 4.33 % | 29 | 5 | 12 | — | 8.73 |
+| vibevoice-asr | 13.03 % | 6.98 % | 34 | 2 | 19 | 0.66x | 11.34 |
+| parakeet-tdt-0.6b-v3, beam 5 | 14.69 % | 6.49 % | 49 | 6 | 7 | 9.13x | — |
+
+| Second reference (859 words) | WER | CER | Speed |
+|---|---:|---:|---:|
+| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 7.58x |
+| **cohere-transcribe** | 9.20 % | 6.12 % | **27.93x** |
+| qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | — |
+| vibevoice-asr | 12.34 % | 7.58 % | 0.87x |
+
+| FLEURS German (100 recordings) | WER | CER | Speed |
+|---|---:|---:|---:|
+| qwen3-asr-1.7b | **3.96 %** | **1.23 %** | — |
+| whisper-precise | 4.05 % | 1.40 % | 4.11x |
+| **cohere-transcribe** | 4.55 % | 1.85 % | 13.51x |
+| voxtral-mini-8bit | 4.81 % | 1.44 % | 7.64x |
+
+**On the hard passage its character error is within noise of Voxtral's** — 3.69
+against 3.39, where this document's own noise floor is ~0.15 points and a single
+build's word-error interval is ±3. By the measure that tracks what was *heard*
+rather than how it was spelled, a 2B model at 16x realtime is level with the 3B
+Voxtral build at 6.8x, on the hardest audio here. That is the best result any
+challenger has produced.
+
+**The second reference kills it anyway.** 9.20 % against 0.81 %, character error
+6.12 against 0.64 — an order of magnitude, far outside anything the error bars
+cover, on the larger of the two references. Whatever the hard passage suggests,
+this model does not transcribe ordinary German conversation to the standard the
+shipped engine does.
+
+Three limitations from its own model card, all of which matter for an engine:
+
+* **No timestamps, no diarization.** The tokenizer knows `<|timestamp|>` and
+  `<|diarize|>` and the decoder prompt accepts them — they are leftovers of the
+  training format. Setting them changes nothing useful (the diarize arm just
+  truncates, 307 words against 426), and the card says plainly that the model
+  does not feature either. Word timestamps would still need the CTC aligner.
+* **No language detection**, and explicitly inconsistent on code-switched audio.
+  noScribe's "Auto" would have to be resolved before the engine is called.
+* **It hallucinates on silence** and wants a VAD or noise gate in front. Visible
+  here: the first window opens with a header of its own, `Input transcript
+  corrected:`, once per file, regardless of what is put in the context slot.
+  That is stripped before scoring; leaving it in costs 0.7 WER points.
+
+Not adopted. But it is the first challenger where the gap is about a specific
+weakness rather than the whole model, and its ecosystem is the broadest of
+anything here — transformers, vLLM, mlx-audio, ONNX, GGUF, a Rust port and a
+WebGPU demo. Worth re-measuring when Cohere ships a successor.
+
+*Practical note:* the repo is gated (click-through) and its Xet transfer fails
+with `Unable to parse string as hex hash value`. `HF_HUB_DISABLE_XET=1` in front
+of the download falls back to plain HTTP and works.
+
 ### What the Open ASR Leaderboard says (German tab, checked 2026-08-20)
 
 The leaderboard has a German tab of its own, fed by `hf-audio/multilingual_evals`
@@ -696,13 +773,13 @@ difference being normalisation. Our 4-bit Voxtral-Small scores 2.82 against the
 leaderboard's 2.61 for the unquantised model, so the quantisation costs about
 0.2 points on clean audio, which is the same story the sweeps above tell.
 
-Two things the table adds that we had not seen. **`CohereLabs/cohere-transcribe-03-2026`
-is the candidate to look at next**: Apache-2.0, ~4.1 GB (about 2B parameters),
-transformers-native, 607 RTFx, and the best Common Voice German of any open model
-in the list — 2.87, ahead of Voxtral-Small's 3.19. On the leaderboard's English
-long-form tab it is the best open model outright (9.73 average, only proprietary
-APIs above it), and it ships as GGUF, ONNX and CoreML, so it would run off Apple
-Silicon. Unmeasured on our references. And the long-form tab is **English only**,
+Two things the table adds that we had not seen. **`CohereLabs/cohere-transcribe-03-2026`** was the one candidate the table added
+that we had not seen — best Common Voice German of any open model in the list at
+2.87, ahead of Voxtral-Small's 3.19, and best open model outright on the English
+long-form tab. It has since been measured; see the section above. Note how little
+that predicted: two Common Voice points ahead of Voxtral-Small, and an order of
+magnitude behind Voxtral-Mini on a real conversation. The long-form tab is
+**English only**,
 so it says nothing about German conversation — the gap this document keeps
 running into has no public benchmark at all.
 

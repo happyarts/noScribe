@@ -18,7 +18,7 @@ import mlx.core as mx
 import numpy as np
 import soundfile as sf
 
-REPO = pathlib.Path(__file__).resolve().parents[2]
+REPO = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 # Reuse norm/wer/OVERLAP from wer.py verbatim -- the metric must not drift
