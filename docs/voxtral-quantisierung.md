@@ -344,6 +344,30 @@ python docs/skripte/bootstrap_cer.py Audiotest2/referenz/hart_780-900_REFERENZ.t
 # compare two builds over hours of audio, no reference needed
 python docs/skripte/encoder_diff.py models/voxtral-mini-8bit \
     models/voxtral-mini-8bit-enc6 --audio <file> [file ...]
+
+# the Parakeet comparison (needs `pip install parakeet-mlx`, which is NOT in
+# the requirements -- it pulls only dacite on top of what is already installed,
+# and mlx 0.32.0 satisfies its floor, so it can be added and removed without
+# disturbing the pinned Voxtral stack)
+python docs/skripte/parakeet_wer.py ref \
+    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
+    Audiotest2/referenz/hart_780-900.wav 5      # trailing 5 = beam width
+python docs/skripte/parakeet_wer.py fleurs 100
+
+# the Qwen3-ASR comparison (no extra dependency -- transformers 5.13+ has it)
+python docs/skripte/qwen_asr_wer.py ref \
+    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
+    Audiotest2/referenz/hart_780-900.wav chunk60
+python docs/skripte/qwen_asr_wer.py ref \
+    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
+    Audiotest2/referenz/hart_780-900.wav "vocab:Xtend, BalanceOil"
+python docs/skripte/qwen_asr_wer.py fleurs 100
+
+# VibeVoice-ASR: same yardsticks, plus its own diarization
+python docs/skripte/vibevoice_wer.py ref \
+    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
+    Audiotest2/referenz/hart_780-900.wav
+python docs/skripte/vibevoice_wer.py fleurs 100
 ```
 
 Each build is ~20 seconds to make and 5–21 GB on disk. On macOS, remember that
@@ -423,6 +447,8 @@ python tools/quantize_voxtral.py mistralai/Voxtral-Small-24B-2507 \
 
 ## Other options considered
 
+### Voxtral-Mini-4B-Realtime
+
 The streaming **Voxtral-Mini-4B-Realtime** model (Awni Hannun's
 [voxmlx](https://github.com/awni/voxmlx) runs it with a bounded rotating KV cache)
 was considered as a low-memory option, then ruled out on Mistral's own published
@@ -431,6 +457,226 @@ at 2.4s delay — worse than the offline Voxtral Mini 3B (3.54%), a smaller mode
 The causal/streaming architecture trades look-ahead for latency, and on hard
 conversational audio the gap would only widen. Its advantages (sub-500ms latency,
 bounded memory) are irrelevant to offline file transcription. Not adopted.
+
+### Parakeet-TDT (measured, rejected)
+
+`nvidia/parakeet-tdt-0.6b-v3` is the obvious structural alternative: a
+FastConformer encoder with a Token-and-Duration Transducer decoder, 0.6B
+parameters, CC-BY-4.0, 25 European languages including German, and — unlike
+anything else here — distributed as MLX, ONNX, CoreML and GGUF, so it would run
+on Windows and Linux CPUs as well. A transducer also cannot do several things
+this engine has to defend against: it emits tokens bound to audio frames, so
+repetition loops, whole-chunk language drift and a dropped head are structurally
+impossible, and word timestamps fall out of the predicted durations instead of
+needing a CTC forced aligner.
+
+Measured with `docs/skripte/parakeet_wer.py` (which reuses `norm` and `wer` from
+`wer.py` unchanged, so the metric is identical), via `parakeet-mlx` 0.5.2 at its
+default bf16:
+
+| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Speed |
+|---|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 6.79x |
+| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 | 2.43x |
+| parakeet-tdt-0.6b-v3, beam 5 | 14.69 % | 6.49 % | 49 | 6 | 7 | 9.13x |
+| parakeet-tdt-0.6b-v3, greedy | 18.01 % | 9.88 % | 49 | 20 | 7 | 26.47x |
+
+The second hand-corrected reference was scored alongside it — 859 words, five
+minutes, a video-call recording, cleaner than the hard passage but still real
+conversation:
+
+| Second reference (859 words) | WER | CER | Sub | Del | Ins | Speed |
+|---|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 | 7.58x |
+| parakeet-tdt-0.6b-v3, beam 5 | 8.50 % | 5.18 % | 34 | 15 | 24 | 10.30x |
+| parakeet-tdt-0.6b-v3, greedy | 10.59 % | 6.81 % | 36 | 14 | 41 | 41.75x |
+
+| FLEURS German (100 recordings) | WER | CER | Speed |
+|---|---:|---:|---:|
+| whisper-precise | **4.05 %** | **1.40 %** | 4.11x |
+| voxtral-mini-8bit | 4.81 % | 1.44 % | 7.64x |
+| parakeet-tdt-0.6b-v3, greedy | 4.81 % | 2.15 % | **44.45x** |
+
+**The benchmark is worthless here, and that is the finding.** On FLEURS the two
+models tie to the second decimal. On real conversation Parakeet is an order of
+magnitude behind — 0.81 % against 8.50 % on 859 words, far outside any noise
+floor this document works with.
+
+**The failure has a name: uncontrolled code-switching.** Parakeet v3 is
+multilingual with no language conditioning — the model has no language token, so
+`transcribe()` has no `language` argument to pass. When the acoustics get
+ambiguous it writes German function words as their English homophones: *und* as
+"and", *wenn* as "when", *es ist* as "it is", *gut* as "good", *ja* as "yeah".
+Counted: **14 English function-word tokens in 407 words** on the hard passage,
+**0 in 882 words** on the cleaner second reference. It is triggered by audio
+quality, and there is no input that suppresses it.
+
+The error *profile* is the second problem. 49 substitutions against Voxtral's 10
+on the same passage: Parakeet replaces where Voxtral omits, and a wrong word
+survives proof-reading in a way a missing one does not — the same argument that
+decided this engine against `whisper-precise`.
+
+Beam search (width 5) is worth having if the model is ever revisited: it cuts
+deletions from 20 to 6 and roughly 3 WER points, for two thirds of the
+throughput. It does not touch the code-switching.
+
+Not adopted. The result says nothing about Parakeet in English or in the other
+24 languages, and nothing about the ONNX build's speed on a CPU — only that it
+is the wrong engine for German conversational audio.
+
+### Qwen3-ASR-1.7B (measured, not adopted — but the closest thing yet)
+
+`Qwen/Qwen3-ASR-1.7B-hf` is the Voxtral principle at half the size: an audio
+encoder in front of a Qwen3-Omni language model, Apache-2.0, 30 languages. Two
+things make it easier to try than anything else here — **transformers supports it
+natively** (`AutoModelForMultimodalLM`, no new dependency at all in this venv),
+and it takes an explicit language as well as a free-form context prompt.
+
+Measured with `docs/skripte/qwen_asr_wer.py`, bf16 on MPS, same metric:
+
+| Hard passage (422 words) | WER | CER | Sub | Del | Ins |
+|---|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 |
+| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 |
+| qwen3-asr-1.7b, 60 s chunks | 10.90 % | 4.33 % | 29 | 5 | 12 |
+| qwen3-asr-1.7b, one pass | 11.14 % | 4.08 % | 31 | 4 | 12 |
+| qwen3-asr-1.7b, auto language | 11.85 % | 4.33 % | 32 | 5 | 13 |
+
+| Second reference (859 words) | WER | CER | Sub | Del | Ins |
+|---|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 |
+| qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | 36 | 16 | 41 |
+| qwen3-asr-1.7b, one pass | 12.11 % | 7.01 % | 43 | 17 | 44 |
+
+| FLEURS German (100 recordings) | WER | CER |
+|---|---:|---:|
+| **qwen3-asr-1.7b** | **3.96 %** | **1.23 %** |
+| whisper-precise | 4.05 % | 1.40 % |
+| voxtral-mini-8bit | 4.81 % | 1.44 % |
+| parakeet-tdt-0.6b-v3 | 4.81 % | 2.15 % |
+
+**It wins the benchmark outright and still loses the job.** On FLEURS German it
+is the best model this document has measured — ahead of Whisper and of the
+shipped Voxtral build, in words and in characters. On the two hand-corrected
+conversational references it is two to thirteen times behind Voxtral. That is
+the same lesson the Parakeet section teaches, and it is worth stating once more
+in the strongest form available: **a model can top the read-aloud benchmark and
+be unusable for interview work.**
+
+Unlike Parakeet the cause is not code-switching — there is none, and forcing the
+language buys only 0.7 WER points over auto-detect. It simply hears this
+material less well.
+
+Three findings from the run that outlive the verdict:
+
+**Punctuation collapses on long input, and chunking fixes it.** Fed the whole
+120 s or 300 s clip, the model returns text with *zero* commas and *zero* full
+stops. Cut into ~60 s windows it punctuates normally — 8.73 and 10.33 commas per
+100 words, against Whisper's 10.62 and Voxtral's 10.87. A length sweep on the
+same audio puts the usable band at roughly 30–90 s. The card advertises long
+audio; for German prose output it does not hold, and any engine built on this
+model would have to chunk far more aggressively than Voxtral does.
+
+**The context prompt is a real hotword mechanism — the thing Voxtral lacks.**
+With `Vocabulary: …` in the system message, "Extent" becomes "Xtend", "Balance
+Oil" becomes "BalanceOil" and a mangled compound comes back correct, on a
+controlled 30 s clip with no other change to the text. Over the full passage it
+costs nothing in word error (10.90 % either way) and 0.05 points of character
+error. This is exactly what `voxtral_corrections.yml` exists to work around, and
+it is the one capability that would argue for the model.
+
+**But it is paid for in punctuation:** the same vocabulary hint halves comma
+density, 8.73 to 4.28 per 100 words. A term list behaves as a decode
+perturbation here too, just a cheaper one than in Voxtral — same phenomenon as
+the `repetition_penalty` default, and a reminder to measure punctuation
+whenever a decode-level knob is turned.
+
+Two implementation notes for anyone who picks this up. The `prompt=` argument
+documented on `apply_transcription_request` **does not exist** in transformers
+5.15.0.dev0 — it lands in `**kwargs` and is dropped with a warning; the context
+has to go into a system message next to the language, which is what the chat
+template concatenates anyway. And the speed figures on MPS are not worth quoting:
+the same 120 s clip measured 2.04x cold and 4.45x warm in the same session. An
+MLX port would be the honest place to measure throughput.
+
+### VibeVoice-ASR (measured — the architecture works, the recognition does not)
+
+`microsoft/VibeVoice-ASR-HF` is not another engine behind the same seam. It does
+ASR, diarization and timestamping in **one pass** and emits speaker-attributed
+segments directly — noScribe's whole pipeline collapsed into one model. MIT
+licence, 16.7 GB in bf16, natively supported by transformers (again no new
+dependency), 4-bit and 8-bit MLX ports published by mlx-community. Measured with
+`docs/skripte/vibevoice_wer.py`, bf16 on MPS.
+
+| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Commas/100w |
+|---|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 10.87 |
+| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 | 10.62 |
+| qwen3-asr-1.7b, 60 s chunks | 10.90 % | 4.33 % | 29 | 5 | 12 | 8.73 |
+| vibevoice-asr | 13.03 % | 6.98 % | 34 | 2 | 19 | **11.34** |
+
+| Second reference (859 words) | WER | CER | Sub | Del | Ins | Commas/100w |
+|---|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 | — |
+| qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | 36 | 16 | 41 | 10.33 |
+| vibevoice-asr | 12.34 % | 7.58 % | 35 | 10 | 61 | **12.57** |
+
+| FLEURS German (100 recordings) | WER | CER |
+|---|---:|---:|
+| qwen3-asr-1.7b | **3.96 %** | **1.23 %** |
+| whisper-precise | 4.05 % | 1.40 % |
+| voxtral-mini-8bit | 4.81 % | 1.44 % |
+| vibevoice-asr | 8.26 % | 5.84 % |
+
+FLEURS is arguably the wrong test for this model — its design point is an hour
+of multi-speaker audio, not a 15-second single-utterance clip, and one of the
+100 clips came back as nothing but a `[Silence]` tag. Take the 8.26 % as a lower
+bound on what it can do there rather than a verdict.
+
+**The diarization, however, is the real thing.** Compared frame by frame against
+noScribe's own pyannote pipeline on the same two clips, 10 ms resolution, best
+speaker permutation:
+
+| | speakers | segments | timeline labelled | agreement with pyannote |
+|---|---:|---:|---:|---:|
+| hard passage | 2 vs 2 | 16 vs 22 | 100 % vs 96.4 % | **98.2 %** |
+| second reference | 2 vs 2 | 19 vs 52 | 97.1 % vs 93.3 % | **97.5 %** |
+
+Same speaker count, and near-total agreement on who is speaking — from a model
+that produced the transcript in the same forward pass. The segmentation is much
+coarser (16 and 19 turns against 22 and 52), which would be a problem for
+subtitle cues but not for speaker attribution.
+
+It also punctuates better than anything else measured here — 11.34 and 12.57
+commas per 100 words, above Whisper's 10.62 and Voxtral's 10.87 — and it labels
+non-speech explicitly (`[Silence]`, `[Human Sounds]`); those tags are stripped
+before scoring, and leaving them in costs 3.3 WER points on FLEURS.
+
+**Not adopted, and the reason is only recognition.** Three times Voxtral's word
+error on the hard passage, fifteen times on the second reference, and 0.66–0.87x
+realtime on MPS — slower than the two-stage pipeline it would replace, in which
+pyannote is cheap and Voxtral runs at 6.6x. But the architecture is validated,
+which is worth writing down: **a single model really can deliver speaker, time
+and text at pyannote-grade diarization quality.** The thing to watch is a model
+of this shape that hears German conversation as well as Voxtral does. Nothing
+here suggests that is far off.
+
+### Larger models in the same families (surveyed, not measured)
+
+Scaling up within Parakeet's own family does not help: `parakeet-tdt-1.1b` and
+`canary-qwen-2.5b` are English-only. `nvidia/canary-1b-v2` is the real step up —
+25 languages, CC-BY-4.0, and 4.40 % against Parakeet's 5.04 % on NVIDIA's own
+FLEURS German figure — but it is an attention encoder-decoder rather than a
+transducer, so it gives back the structural guarantees that made the family
+interesting, and a 0.6 FLEURS point says nothing about conversational audio.
+
+`Qwen/Qwen3-ASR-1.7B` was the obvious next candidate and has now been measured;
+see the section above. Its word timestamps, had it worked out, would have come
+from a separate `Qwen3-ForcedAligner-0.6B` capped at five minutes of speech.
+
+`microsoft/VibeVoice-ASR` has now been measured too; see the section above. Its
+nearest relative, `OpenMOSS-Team/MOSS-Transcribe-Diarize`, does the same joint
+trick and is more popular, but supports only Chinese and English.
 
 ## What is still open
 
@@ -451,9 +697,13 @@ bounded memory) are irrelevant to offline file transcription. Not adopted.
   `small8` entries still hold one-shot-prefill numbers; `generate_step` cut the
   3B model's slope by ~2.5x. Re-measuring would probably lengthen the 24B pass
   budget well beyond the 576 s currently allowed on 32 GB.
-- The whole hard-audio side of this document rests on one 422-word, 2034-character
-  passage. That is a deliberate decision, not an oversight — but it is why
-  differences under ~0.15 CER points are treated as noise throughout.
+- Most of the hard-audio side of this document rests on one 422-word,
+  2034-character passage. That is a deliberate decision, not an oversight — but
+  it is why differences under ~0.15 CER points are treated as noise throughout.
+  A second hand-corrected reference (859 words, five minutes, a video call)
+  exists and is used for engine comparisons — the Voxtral build scores 0.81 %
+  WER / 0.64 % CER on it. The build sweeps above have not been repeated against
+  it, and are not going to be.
 - Voxtral drops parentheticals. Whether that is steerable is untested.
 - The measurements are tied to this MLX version and macOS release; re-run the
   scripts after an upgrade before trusting the memory model.
