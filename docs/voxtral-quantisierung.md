@@ -661,6 +661,51 @@ and text at pyannote-grade diarization quality.** The thing to watch is a model
 of this shape that hears German conversation as well as Voxtral does. Nothing
 here suggests that is far off.
 
+### What the Open ASR Leaderboard says (German tab, checked 2026-08-20)
+
+The leaderboard has a German tab of its own, fed by `hf-audio/multilingual_evals`
+(`multilingual_de.csv`), and it is worth quoting because it is an independent
+check on everything above. Ranked by FLEURS German WER, with Common Voice
+alongside:
+
+| Model | FLEURS | MCV | RTFx |
+|---|---:|---:|---:|
+| microsoft/azure-speech-06-2026 *(API)* | 1.93 | 1.88 | — |
+| elevenlabs/scribe_v2 *(API)* | 2.30 | 2.19 | — |
+| assemblyai/universal-3-pro *(API)* | 2.42 | 2.76 | — |
+| reson8/resonant-1 *(API)* | 2.56 | 3.01 | — |
+| **mistralai/Voxtral-Small-24B-2507** | **2.61** | 3.19 | 83 |
+| openai/whisper-large-v3 | 3.20 | 4.79 | 328 |
+| CohereLabs/cohere-transcribe-03-2026 | 3.33 | **2.87** | 607 |
+| Qwen/Qwen3-ASR-1.7B-hf | 3.35 | 4.60 | 369 |
+| nvidia/canary-1b-v2 | 3.43 | 4.69 | 1308 |
+| **mistralai/Voxtral-Mini-3B-2507** | **3.64** | 5.29 | 150 |
+| microsoft/Phi-4-multimodal-instruct | 3.99 | 4.25 | 123 |
+| nvidia/parakeet-tdt-0.6b-v3 | 4.16 | 4.07 | 3363 |
+| microsoft/VibeVoice-ASR-HF | 7.44 | 20.97 | 114 |
+
+**Voxtral-Small is the best open-weight model on German here.** Everything above
+it reports no RTFx, which on this leaderboard marks a proprietary API. That is
+worth knowing: the engine this document settled on is not a compromise pick, it
+is the top of the open field for this language.
+
+It also cross-checks the harness. The ordering on FLEURS matches ours for every
+model we measured ourselves — Qwen3-ASR ahead of Voxtral-Mini, Parakeet behind
+it, VibeVoice far behind — and the absolute values sit within a few tenths, the
+difference being normalisation. Our 4-bit Voxtral-Small scores 2.82 against the
+leaderboard's 2.61 for the unquantised model, so the quantisation costs about
+0.2 points on clean audio, which is the same story the sweeps above tell.
+
+Two things the table adds that we had not seen. **`CohereLabs/cohere-transcribe-03-2026`
+is the candidate to look at next**: Apache-2.0, ~4.1 GB (about 2B parameters),
+transformers-native, 607 RTFx, and the best Common Voice German of any open model
+in the list — 2.87, ahead of Voxtral-Small's 3.19. On the leaderboard's English
+long-form tab it is the best open model outright (9.73 average, only proprietary
+APIs above it), and it ships as GGUF, ONNX and CoreML, so it would run off Apple
+Silicon. Unmeasured on our references. And the long-form tab is **English only**,
+so it says nothing about German conversation — the gap this document keeps
+running into has no public benchmark at all.
+
 ### Larger models in the same families (surveyed, not measured)
 
 Scaling up within Parakeet's own family does not help: `parakeet-tdt-1.1b` and
