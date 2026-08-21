@@ -876,6 +876,44 @@ timestamps and language handling currently depend on:
   there too; this pipeline has no VAD at all, and one would bear on the leading
   speech the model drops.
 
+Both aligner candidates have since been measured on the hard passage
+(418 words, 120 s) against the shipped torch aligner.
+
+**`qwen3_forced_aligner` — fast, close enough in the middle, and it collapses at
+the cap.** 32x realtime against 13.9x, word sequence identical, and agreement with
+the current aligner of 32 ms median on both boundaries, 86.5 % of words within
+100 ms and 96.1 % within 200 ms. Its grid is 80 ms where wav2vec2's is 20 ms, which
+accounts for most of that median. Two things rule it out as it stands: 3 % of spans
+come back with zero duration on the 2-minute clip, where the current aligner
+produces none, and a length sweep on the 5-minute reference shows a cliff exactly
+at the documented cap —
+
+| length | zero-duration spans | last word ends at |
+|---:|---:|---:|
+| 120 s | 6 % | 119.8 s |
+| 180 s | 5 % | 179.9 s |
+| 240 s | 9 % | 239.8 s |
+| 270 s | 10 % | 269.5 s |
+| **300 s** | **20 %** | **271.0 s** (29 s unaccounted) |
+
+In the last 30-second window, 78 of 80 words collapse onto a single timestamp. The
+torch aligner on the same file: no zero-duration spans, last word ending at 300.0 s.
+
+**`wav2vec` — the encoder is a faithful port, and the head was thrown away.**
+`sanitize()` drops `lm_head.*` on purpose, so the module is the base encoder only
+and cannot emit the CTC matrix alignment needs. Re-attaching the head by hand is one
+matmul, and doing so reproduces the torch emissions: over 999 frames of a 20 s clip,
+**max |Δ| 0.00068, mean 0.000024, and an identical argmax on 100 % of frames**, at
+57.6x realtime against torch's 21.1x.
+
+That makes the encoder side a solved problem and leaves exactly one thing behind:
+`torchaudio.functional.forced_align` and `merge_tokens`, the Viterbi pass itself.
+Everything else in the alignment path — emissions, tokenisation, the caps, the
+recursive split — is ours or reproducible. Two upstream contributions would close
+it: a `lm_head` option on mlx-audio's wav2vec, and a CTC forced-align op. Note also
+that the German model ships as `pytorch_model.bin` with no safetensors, so a
+conversion step is needed either way.
+
 **None of this belongs in the migration.** `docs/migration-mlx-audio.md` says to
 leave alignment alone, and that stands: swap the engine first, prove the transcript
 is unchanged, and only then open any of these. They are recorded here so they are
