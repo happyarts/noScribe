@@ -845,6 +845,54 @@ magnitude behind Voxtral-Mini on a real conversation. The long-form tab is
 so it says nothing about German conversation — the gap this document keeps
 running into has no public benchmark at all.
 
+### What mlx-audio holds beyond ASR (surveyed 2026-08-21, deliberately not pursued)
+
+Reviewing mlx-audio's model list for engines we had missed turned up something more
+interesting than another ASR model: it carries the *other two thirds* of this
+pipeline. `mlx_audio/` has `vad/` and `lid/` directories next to `stt/`.
+
+Three candidates, all of which would replace a piece of the torch stack that word
+timestamps and language handling currently depend on:
+
+* **`qwen3_forced_aligner`** — word-level alignment on MLX. Today's word timestamps
+  come from torchaudio's CTC forced alignment against a German wav2vec2 model. That
+  is the stack pinning `torchaudio`, requiring the recorded reference in
+  `tests/data/`, and resting on two unmerged upstream pytorch/audio fixes. German
+  works structurally — its tokenizer routes German into the space-separated branch
+  alongside English — but its own model card caps it at five minutes of speech,
+  against the ten-minute passes chosen here. `mlx_audio/stt/models/wav2vec/` also
+  exists and may be the shorter path: the same aligner model, on MLX rather than
+  torch.
+* **`mlx_audio/lid/`** (ecapa_tdnn, wav2vec2) — spoken language identification.
+  This answers an open item recorded in the engine's own notes: under "Auto" every
+  pass detects language independently and can in principle flip mid-file, and
+  pinning one language across passes was said to need "a detector — a Whisper load
+  or a text-LID dependency". Here it would need neither.
+* **`vad/sortformer`** — NVIDIA's end-to-end diarization, natively on MLX, where
+  noScribe runs pyannote through torch on MPS and the embedding stage was measured
+  to dominate with no cheap lever. **Hard cap of four speakers**, so it is not a
+  replacement for pyannote, which has none — at best a fast path for the two- and
+  three-speaker recordings that make up most of this material. `vad/silero_vad` is
+  there too; this pipeline has no VAD at all, and one would bear on the leading
+  speech the model drops.
+
+**None of this belongs in the migration.** `docs/migration-mlx-audio.md` says to
+leave alignment alone, and that stands: swap the engine first, prove the transcript
+is unchanged, and only then open any of these. They are recorded here so they are
+not rediscovered from scratch.
+
+The ASR side of the same review was thin. With German support and unmeasured:
+`canary` (FLEURS de 4.40), `granite_speech` (EN/FR/DE/ES/PT/JA; the leaderboard puts
+`granite-speech-4.1-2b-nar` at 4.87 FLEURS but 3.78 Common Voice at RTFx 1402), and
+`nemotron_asr` (8.46 FLEURS, not worth it). The rest — FireRedASR2, SenseVoice,
+Fun-ASR-Nano, Moonshine, Distil-Whisper, Qwen2-Audio, Higgs-Audio v3, MOSS-Music —
+carry no German. `mega_asr` looks new but is a router over the Qwen3-ASR backbone
+measured above.
+
+After four of these comparisons the pattern is stable enough to plan around: models
+in this band tie or beat the shipped build on FLEURS and lose badly on real
+conversation. Canary and Granite sit in exactly that band.
+
 ### Larger models in the same families (surveyed, not measured)
 
 Scaling up within Parakeet's own family does not help: `parakeet-tdt-1.1b` and
