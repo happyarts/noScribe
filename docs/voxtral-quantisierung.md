@@ -738,6 +738,46 @@ WebGPU demo. Worth re-measuring when Cohere ships a successor.
 with `Unable to parse string as hex hash value`. `HF_HUB_DISABLE_XET=1` in front
 of the download falls back to plain HTTP and works.
 
+### Moving off mlx-voxtral (evaluated 2026-08-21, deferred)
+
+`mlx-voxtral` has had no release since 2025-08-19. The maintained alternative is
+`mlx-audio`, whose `mlx_audio/stt/models/` holds Voxtral next to cohere_asr,
+qwen3_asr, vibevoice_asr, parakeet and canary — every engine measured above,
+behind one API. The exit route is written up in
+[`../VOXTRAL.md`](../VOXTRAL.md); what belongs here is what it would do to the
+builds and the numbers.
+
+**Re-quantising changes the file format and nothing else.** MLX's affine
+quantisation is data-free — scale and bias come from each group's own min and
+max, there is no calibration set and no randomness. Quantising the same tensor
+twice returns bit-identical results, and so does quantising a fresh copy of it.
+mlx-audio's quantisation predicate is `not p.startswith("audio_tower")`, which
+selects exactly the set these builds already carry: **213 modules, all at 8 bit,
+group size 64, affine, encoder left dense**. Same weights in, same layer set,
+same parameters, therefore the same tensors out. Only the keys change, from
+`language_model.layers.0…` to `language_model.model.layers.0…`.
+
+So a re-quantised build would be *the same build*, and the tables above would
+still describe it. **Quality and speed would not move because of the
+re-quantisation** — quantised matmuls are the same kernels either way.
+
+What could move them is everything around it, and each is a separate check:
+
+* mlx-audio's `_merge_input_embeddings` scatters the float32 audio embeddings
+  into a bfloat16 array. `_merged_embeddings` promotes first, deliberately —
+  the difference is invisible in the text and shows up only as different logits.
+* Its stop-token default includes 32000, an ordinary text token. Left as it is,
+  that silently truncates any pass containing the word.
+* It vendors its own `generate_step` rather than using `mlx_lm`'s. Same chunked
+  prefill (`prefill_step_size=2048`), so the ~18 % peak saving survives — but
+  `MEM_MODEL` is calibrated against the current path and would need
+  re-measuring before the numbers in *Long audio & memory* could be trusted.
+
+None of that argues against the move; it argues that the move is a measurement
+exercise, not a port. The trigger to start it is `mlx-voxtral` breaking against
+a newer MLX, or a decision to ship a second engine — at which point mlx-audio's
+model collection pays for the work in one go rather than one engine at a time.
+
 ### What the Open ASR Leaderboard says (German tab, checked 2026-08-20)
 
 The leaderboard has a German tab of its own, fed by `hf-audio/multilingual_evals`

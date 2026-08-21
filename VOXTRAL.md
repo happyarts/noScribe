@@ -20,6 +20,49 @@ pip install -r environments/requirements_voxtral_macOS_arm64.txt
 The models `voxtral-mini` and `voxtral-small` then appear in the model dropdown.
 They are downloaded on first use.
 
+### A note on the pinned dependencies
+
+`mlx`, `mlx-lm` and `mlx-voxtral` are pinned to exact versions. For
+[`mlx-voxtral`](https://github.com/mzbac/mlx.voxtral) that pin is a deliberate
+freeze rather than a normal version constraint: its last release was
+2025-08-19 and it should be treated as unmaintained. `mlx-lm` is pinned because
+decoding drives `generate_step` directly.
+
+This is a known liability, so here is the exit route, measured rather than
+assumed. **The coupling is five calls** — `load_voxtral_model`,
+`VoxtralProcessor`, `apply_transcrition_request`, `model.generate` (the
+non-greedy fallback only) and `proc.decode`, plus `mlx_voxtral.quantization`
+and `download_model` in `tools/quantize_voxtral.py`. Everything else in
+`voxtral_engine.py` is this project's own: chunking, loop detection, the
+temperature ladder, forced alignment, prefix salvage. None of it depends on
+which package loads the weights.
+
+The replacement, if the pin ever breaks against a newer MLX, is
+[`mlx-audio`](https://github.com/Blaizzy/mlx-audio) — actively maintained, and
+its `mlx_audio/stt/models/` carries Voxtral alongside a dozen other ASR models
+behind one API. Three things to know before starting, all verified against
+mlx-audio 0.5.0:
+
+* **It will not load the published quantised builds, and it fails silently.**
+  Loading `voxtral-mini-8bit` yields *zero* quantised modules and 405 dense
+  `Linear` layers, 211 of them in the language model, with no exception raised.
+  The cause is naming: these builds write `language_model.layers.0…` while
+  mlx-audio's tree is `language_model.model.layers.0…`. Migration therefore
+  means re-quantising and re-publishing both builds, and any smoke test has to
+  assert the number of quantised modules, because the failure mode is quiet.
+* **It carries the same stop-token defect this engine already works around** —
+  `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, and 32000 is the ordinary text
+  token `" Capital"`, not a pad token. See `_resolve_stop_tokens`.
+* **Its `_merge_input_embeddings` scatters float32 audio embeddings into a
+  bfloat16 array**, which is the silent rounding `_merged_embeddings` documents
+  and avoids. Worth checking against the current source before trusting it.
+
+Re-quantising itself is safe: MLX's affine quantisation is deterministic and
+data-free, and mlx-audio's own predicate (`not p.startswith("audio_tower")`)
+selects exactly the layer set these builds already use — 213 modules at 8 bit,
+group size 64, encoder left dense. Same weights in, same tensors out; only the
+keys change.
+
 ## Language & word-timestamp quality
 
 Word timestamps come from a CTC forced aligner. Its model is chosen **per
