@@ -3367,12 +3367,19 @@ class App(ctk.CTk):
                                 save_doc()
                                 job.has_partial_transcript = True
 
-                        # per-segment progress based on total duration
-                        try:
-                            progr = round((segment.end/duration) * 100)
-                            self.set_progress(3, progr, job.speaker_detection)
-                        except Exception:
-                            pass
+                        # Per-segment progress, derived from where this segment
+                        # ends in the file. Whisper sends no progress messages, so
+                        # this is its only source. Voxtral does send them, and its
+                        # own estimate runs ahead of the segments it has already
+                        # emitted -- feeding both to the same bar made it jump
+                        # back roughly 28 points per chunk. The engine's stream is
+                        # authoritative there and is kept monotonic at the source.
+                        if getattr(job.whisper_model, "engine", "whisper") != "voxtral":
+                            try:
+                                progr = round((segment.end/duration) * 100)
+                                self.set_progress(3, progr, job.speaker_detection)
+                            except Exception:
+                                pass
                     
                     try:
                         if getattr(job.whisper_model, "engine", "whisper") == "voxtral":

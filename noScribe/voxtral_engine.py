@@ -24,6 +24,7 @@ Author: Markus Kämmerer <https://markus-kaemmerer.de>
 import functools
 import importlib.resources as impres
 import logging
+import math
 import os
 import re
 import time
@@ -987,9 +988,9 @@ def _salvage_prefix(text, audio, align_cb):
     # single word carried a real score, so a prefix whose head aligned and whose
     # tail was spread or interpolated went straight through and the resume point
     # came from an invented, length-proportional timestamp (measured 27 s past
-    # the truth, worst word 33 s). A real score is a log-probability and thus
-    # negative; a real score of exactly 0.0 is possible in principle and is
-    # treated as untrustworthy here, which costs only a full retry.
+    # the truth, worst word 33 s). `prob` is a probability in (0, 1]; 0.0 is the
+    # sentinel for a word that was spread or interpolated rather than aligned,
+    # so truthiness is exactly the right test.
     if not stamps[-1].get("prob", 0):
         return None, ("the end of the clean part was not really aligned, so the "
                       "resume point would be guesswork")
@@ -1211,14 +1212,21 @@ def _turn_gap_split(audio, turns):
     mid = len(audio) // 2
     ordered = sorted(turns, key=lambda t: t[0])
     best = None
-    for (s0, e0, l0), (s1, e1, l1) in zip(ordered, ordered[1:]):
-        if l1 == l0:
-            continue                    # same speaker resuming after a pause
-        if s1 < e0 - 0.2:
-            continue                    # overlapping speech at the boundary
-        p = int((e0 + max(s1, e0)) / 2 * SAMPLE_RATE)
-        if lo <= p <= hi and (best is None or abs(p - mid) < abs(best - mid)):
-            best = p
+    # Track the furthest point reached so far and who is still speaking there,
+    # not merely the immediately preceding turn. Sorted by start time, a short
+    # turn nested inside a longer one -- pyannote's standard backchannel
+    # pattern, an "mhm" during someone's sentence -- makes the *next* turn look
+    # like it follows the backchannel. Comparing against that one's end put the
+    # cut in the middle of the enclosing speaker's utterance, and made a
+    # speaker resuming after their own backchannel look like a change.
+    prev_end, prev_label = ordered[0][1], ordered[0][2]
+    for s1, e1, l1 in ordered[1:]:
+        if l1 != prev_label and s1 >= prev_end - 0.2:
+            p = int((prev_end + max(s1, prev_end)) / 2 * SAMPLE_RATE)
+            if lo <= p <= hi and (best is None or abs(p - mid) < abs(best - mid)):
+                best = p
+        if e1 >= prev_end:
+            prev_end, prev_label = e1, l1
     if best is None:
         return None
     return _quietest_frame_near(audio, best, 1.0)
@@ -2027,7 +2035,15 @@ class _Aligner:
                     s = t_start + sp.start / fps
                     e = t_start + sp.end / fps
                     if wi not in out:
-                        out[wi] = [s, e, float(sp.score)]
+                        # merge_tokens scores are log probabilities (<= 0);
+                        # whisper_mp_worker puts a plain probability in this
+                        # field, and the module docstring promises the same
+                        # shape. Convert here, at the one place a real score
+                        # enters, so 0.0 keeps its meaning downstream: "not
+                        # actually aligned, spread or interpolated". A genuine
+                        # score of exactly 0.0 now maps to 1.0 rather than
+                        # colliding with that sentinel.
+                        out[wi] = [s, e, math.exp(float(sp.score))]
                     else:
                         out[wi][1] = e
                 ti += 1

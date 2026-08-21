@@ -226,3 +226,28 @@ def test_transcribe_hands_the_ladder_a_real_callback():
     call = src[src.index("_transcribe_guarded("):]
     assert "align_cb=(aligner_pool.align_for_salvage" in call, \
         "die Leiter bekommt keine Zeitabbildung mehr"
+
+
+def test_backchannel_inside_a_turn_does_not_move_the_cut():
+    """A short turn nested inside a longer one must not become a boundary.
+
+    pyannote's standard pattern for an "mhm" during someone's sentence is a
+    0.3 s turn whose start and end both fall inside a much longer one. Sorted
+    by start time, the turn that follows then looks like it succeeds the
+    backchannel, and comparing against *that* turn's end put the cut in the
+    middle of the enclosing speaker's utterance -- here at ~22.7 s, in the
+    middle of A's 10-30 s turn, instead of at the real change at 30 s.
+    """
+    audio = _audio(60, silences=(30,))
+    turns = [(0.0, 30.0, "A"), (15.0, 15.4, "B"), (30.0, 60.0, "A")]
+    # A resumes after B's backchannel -- there is no speaker change at all.
+    assert _turn_gap_split(audio, turns) is None
+
+
+def test_change_after_a_backchannel_cuts_at_the_enclosing_turns_end():
+    """With a real change after the nested turn, the cut belongs at its end."""
+    audio = _audio(60, silences=(30,))
+    turns = [(0.0, 30.0, "A"), (15.0, 15.4, "B"), (30.0, 60.0, "C")]
+    cut = _turn_gap_split(audio, turns)
+    assert cut is not None
+    assert 29.0 <= cut / SAMPLE_RATE <= 31.0
