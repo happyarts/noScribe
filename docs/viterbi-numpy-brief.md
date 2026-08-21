@@ -13,17 +13,15 @@ unreachable: `environments/requirements_macOS_arm64.txt` pins `torch==2.13` and
 `pyannote.audio>=4` in the **base** requirements, because the diarizer is torch-based.
 Removing torchaudio does not remove torch.
 
-The speed motivation is real but **separable**. The German aligner model already runs
-through mlx-audio today — see the `wav2vec` section of
-`docs/voxtral-quantisierung.md` — at 103.8x realtime against torch's 19.2x on the
-same 300 s clip and the same 20 s windows. Emissions are **97 %** of the aligner's
-runtime, so swapping only the emission step is worth about **150 seconds per hour of
-audio**, and it needs no new DP at all: keep `torchaudio.functional.forced_align`
-for the Viterbi pass and feed it emissions computed by mlx-audio.
+The speed motivation is real but **separable, and far cheaper than this task.** The
+aligner currently runs on the **CPU** — there is no `.to(device)` in the file at all.
+Moving it to MPS takes it from 20.2x to 65.2x realtime with an identical argmax on
+every frame, which is about 130 seconds per hour of audio for one line of code.
+Emissions are 97 % of the aligner's runtime, so that captures nearly all of the
+available benefit.
 
-**If nobody has done that swap yet, do it first and measure it. It is smaller, it
-carries the whole speedup, and it is independently useful.** It has its own work
-order: `docs/emission-swap-brief.md`.
+**If that has not been done yet, do it first.** It has its own work order:
+`docs/aligner-gpu-brief.md`.
 
 Also note that `forced_align` is not going away. TorchAudio is in maintenance, but
 its v2.10 release notes name `forced_align` explicitly as one of five C++ extensions
