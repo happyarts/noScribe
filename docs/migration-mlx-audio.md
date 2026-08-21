@@ -101,6 +101,22 @@ re-quantised build. **Do not re-run the bit sweeps.**
   them, so the frozen build likely needs excludes. **Prove that with a throwaway
   PyInstaller build — never infer frozen behaviour from source.**
 
+## The alignment path is not affected — but know this before you touch it
+
+Out of scope here, and stated so you do not go looking: **the German forced-aligner
+model already loads through mlx-audio today**, via `mms/mms.py`, which wraps the same
+`Wav2Vec2Model` encoder and adds the `lm_head` a `Wav2Vec2ForCTC` checkpoint carries.
+It needs no code change, only `model_type: "mms"` in a converted config, and it
+reproduces the torch emissions exactly — identical argmax on every frame, max |Δ|
+0.00068 — at 103.8x realtime against torch's 19.2x on the same 300 s clip and the
+same 20 s windows.
+
+This is **not** part of the migration, for two reasons. It is independent of which
+package loads Voxtral, so it can be done before, after, or never. And it still needs
+a replacement for `torchaudio.functional.forced_align`, which mlx-audio does not
+have. Do not bundle it in; a migration that also rewrites alignment cannot be shown
+to have changed nothing.
+
 ## Do this first: try to avoid re-publishing at all
 
 Before re-quantising 6 GB and 25 GB and making every user re-download, evaluate a

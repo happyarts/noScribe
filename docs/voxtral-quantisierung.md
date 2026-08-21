@@ -899,20 +899,50 @@ at the documented cap —
 In the last 30-second window, 78 of 80 words collapse onto a single timestamp. The
 torch aligner on the same file: no zero-duration spans, last word ending at 300.0 s.
 
-**`wav2vec` — the encoder is a faithful port, and the head was thrown away.**
-`sanitize()` drops `lm_head.*` on purpose, so the module is the base encoder only
-and cannot emit the CTC matrix alignment needs. Re-attaching the head by hand is one
-matmul, and doing so reproduces the torch emissions: over 999 frames of a 20 s clip,
-**max |Δ| 0.00068, mean 0.000024, and an identical argmax on 100 % of frames**, at
-57.6x realtime against torch's 21.1x.
+**`wav2vec` — the German aligner already runs there today, unchanged.**
 
-That makes the encoder side a solved problem and leaves exactly one thing behind:
-`torchaudio.functional.forced_align` and `merge_tokens`, the Viterbi pass itself.
-Everything else in the alignment path — emissions, tokenisation, the caps, the
-recursive split — is ours or reproducible. Two upstream contributions would close
-it: a `lm_head` option on mlx-audio's wav2vec, and a CTC forced-align op. Note also
-that the German model ships as `pytorch_model.bin` with no safetensors, so a
-conversion step is needed either way.
+The `wav2vec` module itself is the base encoder only: its `sanitize()` drops
+`lm_head.*` on purpose, so it cannot emit the CTC matrix alignment needs. But
+`mms/mms.py` wraps that same encoder and adds the head —
+
+```python
+self.wav2vec2 = Wav2Vec2Model(config)
+self.lm_head  = nn.Linear(config.hidden_size, config.vocab_size)
+```
+
+— which is exactly the structure of a `Wav2Vec2ForCTC` checkpoint. Loading
+`jonatasgrosman/wav2vec2-large-xlsr-53-german` through the MMS path needs **no code
+change at all**, only `model_type: "mms"` in the converted config. The result is
+numerically the torch emission matrix: **identical argmax on 100 % of frames and a
+maximum absolute difference of 0.00068.**
+
+Throughput, same 300 s clip, same 20 s windows, same `(14985, 38)` output:
+
+| | time | realtime factor |
+|---|---:|---:|
+| torch `_emission` | 15.64 s | 19.2x |
+| mlx-audio via MMS | **2.89 s** | **103.8x** |
+
+Emissions are 97 % of the aligner's runtime — the full aligner takes 16.1 s on that
+clip, of which the Viterbi pass and everything around it is about half a second. So
+the swap moves alignment from ~19x to roughly ~88x, which is **about 150 seconds
+saved per hour of audio**.
+
+What remains is one thing only: `torchaudio.functional.forced_align` and
+`merge_tokens`, the Viterbi pass. mlx-audio has no equivalent — a search for
+`forced_align` or `viterbi` across that repository returns nothing, and MMS's own
+`_ctc_decode` is greedy argmax, which is transcription rather than alignment. The DP
+is standard (blank-interleaved targets of length 2S+1, three transitions, backtrace)
+and vectorises over the state axis; `tests/test_forced_align_stability.py` already
+pins torchaudio's behaviour against a recorded reference, so the oracle for a
+reimplementation exists. It is sequential in time, so MLX is the wrong tool for it —
+numpy is the natural home.
+
+Two practical notes. The German model ships as `pytorch_model.bin` with no
+safetensors, so a conversion step is needed either way. And nothing here requires an
+upstream change: the config key is ours to write and the DP would live in this
+repository. The only thing worth offering upstream is a `MODEL_REMAPPING` entry so a
+plain `wav2vec2` checkpoint routes without the hand-edit.
 
 **None of this belongs in the migration.** `docs/migration-mlx-audio.md` says to
 leave alignment alone, and that stands: swap the engine first, prove the transcript
