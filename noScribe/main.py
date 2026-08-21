@@ -3046,7 +3046,12 @@ class App(ctk.CTk):
 
                 self.logn()
                 self.logn(t('start_transcription'), 'highlight')
-                if getattr(job.whisper_model, "engine", "whisper") == "voxtral":
+                # Bound once: which engine runs decides the log line, the
+                # subprocess, whether the per-segment progress source is used,
+                # and whether a CUDA failure may retry on CPU.
+                engine = getattr(job.whisper_model, "engine", "whisper")
+                is_voxtral = engine == "voxtral"
+                if is_voxtral:
                     self.logn(t('loading_voxtral'))
                 else:
                     self.logn(t('loading_whisper'))
@@ -3373,8 +3378,9 @@ class App(ctk.CTk):
                         # own estimate runs ahead of the segments it has already
                         # emitted -- feeding both to the same bar made it jump
                         # back roughly 28 points per chunk. The engine's stream is
-                        # authoritative there and is kept monotonic at the source.
-                        if getattr(job.whisper_model, "engine", "whisper") != "voxtral":
+                        # authoritative there and is kept monotonic at the source
+                        # (voxtral_engine._emit_progress).
+                        if not is_voxtral:
                             try:
                                 progr = round((segment.end/duration) * 100)
                                 self.set_progress(3, progr, job.speaker_detection)
@@ -3382,7 +3388,7 @@ class App(ctk.CTk):
                                 pass
                     
                     try:
-                        if getattr(job.whisper_model, "engine", "whisper") == "voxtral":
+                        if is_voxtral:
                             info = self._run_voxtral_subprocess_stream(
                                 tmp_audio_file, job, on_segment, diarization=diarization)
                         else:
@@ -3401,7 +3407,6 @@ class App(ctk.CTk):
                         # MLX and has no CUDA path, so a Voxtral error must
                         # propagate rather than trigger a misleading "retry
                         # Whisper on CPU" prompt and a pointless identical retry.
-                        engine = getattr(job.whisper_model, "engine", "whisper")
                         if engine == "whisper" and self._handle_cuda_fallback('whisper', err):
                             retry_cuda = True
                         else:

@@ -451,13 +451,35 @@ class _AlignerPool:
                      f"No dominant language detected -> alignment model: {model}")
         return self._load(model, remember=remember)
 
+    @staticmethod
+    def _release(evicted):
+        """Give an evicted aligner's GPU memory back to the system.
+
+        Dropping the reference frees torch's *allocator* but not the driver
+        reservation: measured, `driver_allocated_memory` stayed at 2.04 GB
+        after the object was collected and only returned to zero on an
+        explicit `empty_cache()`. On Auto a file with three alignment
+        languages would otherwise hold that for the rest of the job, against a
+        MIN_HEADROOM_GB budget MLX is also drawing on. Costs ~8 ms, and only
+        works on eviction -- calling it while an aligner is still resident
+        reclaims nothing, because weights and activations share heaps.
+        """
+        if getattr(evicted, "device", "cpu") == "cpu":
+            return
+        try:
+            import torch
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+
     def _load(self, model, remember=True):
         aligner = self._cache.pop(model, None)
         if aligner is None:
             _log(self._log_cb, "info", f"Loading alignment model: {model}")
             aligner = _Aligner(model)
             while len(self._cache) >= self.MAX_CACHED:
-                self._cache.pop(next(iter(self._cache)))
+                evicted = self._cache.pop(next(iter(self._cache)))
+                self._release(evicted)
         self._cache[model] = aligner   # re-insert = mark most recently used
         if remember:
             self._last_model = model
@@ -1221,6 +1243,8 @@ def _turn_gap_split(audio, turns):
     # speaker resuming after their own backchannel look like a change.
     prev_end, prev_label = ordered[0][1], ordered[0][2]
     for s1, e1, l1 in ordered[1:]:
+        # Same speaker resuming after a pause is not a boundary; neither is a
+        # boundary buried in overlapping speech (cutting there clips a word).
         if l1 != prev_label and s1 >= prev_end - 0.2:
             p = int((prev_end + max(s1, prev_end)) / 2 * SAMPLE_RATE)
             if lo <= p <= hi and (best is None or abs(p - mid) < abs(best - mid)):
@@ -1824,22 +1848,23 @@ class _Voxtral:
 # --------------------------------------------------------------------------- #
 # CTC forced alignment (text + audio -> word timestamps)
 # --------------------------------------------------------------------------- #
-def _align_device(preference=None):
+def _align_device():
     """Torch device for the alignment forward pass.
 
-    The aligner is the last piece of this module still on the CPU, in a module
-    that only runs on Apple Silicon. On MPS the emissions are the same -- argmax
-    identical on every frame of a 300 s reference, worst log-prob deviation
-    ~5e-3 -- and the pass is measurably faster: 14.85 s to 4.60 s for that clip,
-    which is most of the aligner's runtime since the forward is ~97% of it.
+    The aligner used to be the last piece of this module on the CPU, in a
+    module that only runs on Apple Silicon. On MPS the emissions are the same
+    -- argmax identical on every frame of a 300 s reference, worst log-prob
+    deviation ~5e-3 -- and the pass is measurably faster: 14.85 s to 4.60 s for
+    that clip, which is most of the aligner's runtime since the forward is ~97%
+    of it. fp16 would be faster again and is deliberately not used: it moves
+    0.067% of argmaxes and up to 1.68 in log-prob, enough to shift a word
+    boundary, and this change is meant to be free of effect.
 
-    Mirrors `pyannote_mp_worker.pyannote_proc_entrypoint`'s choice, including
-    its macOS floor: MPS support before 12.3 is not something to rely on.
-    `preference` is the config escape hatch, matching `pyannote_xpu`; anything
-    other than "mps" pins the CPU.
+    Repeats `pyannote_mp_worker.pyannote_proc_entrypoint`'s probe rather than
+    sharing it, macOS floor included -- MPS before 12.3 is not something to
+    rely on. There is no shared helper to call: `utils.py` is deliberately
+    torch-free. Callers that need to pin a device pass `_Aligner(device=...)`.
     """
-    if preference is not None and preference != "mps":
-        return "cpu"
     try:
         import platform
         import torch
@@ -1881,14 +1906,14 @@ class _Aligner:
         self._torch = torch
         self.proc = Wav2Vec2Processor.from_pretrained(model_name)
         self.model = Wav2Vec2ForCTC.from_pretrained(model_name).eval()
-        # fp32 deliberately: fp16 on MPS is faster again but moves 0.067% of
-        # argmaxes and deviates by up to 1.68 in log-prob, which is enough to
-        # shift a word boundary. This change is meant to be free of effect.
+        # Left in its loaded dtype on purpose -- see _align_device on fp16.
         self.device = device or _align_device()
         if self.device != "cpu":
             try:
                 self.model = self.model.to(self.device)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Alignment model will not move to %s (%s); "
+                               "staying on CPU.", self.device, exc)
                 self.device = "cpu"
         self.vocab = self.proc.tokenizer.get_vocab()
         # The CTC blank is the index the network actually emits between labels,
@@ -1918,24 +1943,25 @@ class _Aligner:
         # carries negligible alignment signal, so skip it rather than crash the
         # whole job -- the guard is `< min_win`, not just the empty case.
         min_win = int(0.025 * SAMPLE_RATE)
-        parts = []
         try:
-            parts = self._forward_windows(wav, win, min_win, self.device)
+            parts = self._forward_windows(wav, win, min_win)
         except Exception as exc:
             # An unsupported op on this backend must not cost the whole job a
-            # transcript. Fall back once, for good, and say so.
+            # transcript. Fall back once, for good, and say so. The work done
+            # before the failure is discarded, which is bounded by one chunk
+            # and happens at most once per aligner.
             if self.device == "cpu":
                 raise
             logger.warning("Alignment on %s failed (%s); falling back to CPU.",
                            self.device, exc)
             self.device = "cpu"
             self.model = self.model.to("cpu")
-            parts = self._forward_windows(wav, win, min_win, "cpu")
+            parts = self._forward_windows(wav, win, min_win)
         if not parts:
             return None
         return torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
 
-    def _forward_windows(self, wav, win, min_win, device):
+    def _forward_windows(self, wav, win, min_win):
         """Log-prob emissions per window, always returned on the CPU so the
         forced-align call and everything downstream stay unchanged."""
         torch = self._torch
@@ -1945,8 +1971,8 @@ class _Aligner:
                 seg = wav[i:i + win]
                 if seg.numel() < min_win:
                     continue
-                if device != "cpu":
-                    seg = seg.to(device)
+                if self.device != "cpu":
+                    seg = seg.to(self.device)
                 lg = self.model(seg.unsqueeze(0)).logits[0]
                 parts.append(torch.log_softmax(lg, dim=-1).cpu())
         return parts
@@ -2655,7 +2681,6 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     # RAM-safe length, then split evenly. Even passes share the memory headroom
     # and avoid a tiny leftover tail (e.g. 1143s @1006 -> 2x571s, not 1006+137),
     # which also lowers the per-pass peak.
-    import math
     max_len = max(1, int(chunk_sec * SAMPLE_RATE))
     n_passes = max(1, math.ceil(len(audio) / max_len))
     chunk_len = math.ceil(len(audio) / n_passes)
