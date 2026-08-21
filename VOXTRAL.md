@@ -53,9 +53,13 @@ mlx-audio 0.5.0:
 * **It carries the same stop-token defect this engine already works around** —
   `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, and 32000 is the ordinary text
   token `" Capital"`, not a pad token. See `_resolve_stop_tokens`.
-* **Its `_merge_input_embeddings` scatters float32 audio embeddings into a
-  bfloat16 array**, which is the silent rounding `_merged_embeddings` documents
-  and avoids. Worth checking against the current source before trusting it.
+* **Its `_merge_input_embeddings` scatters without promoting dtype first.**
+  `_merged_embeddings` promotes deliberately, so a build whose projector and
+  token embeddings disagree would round every audio embedding away silently.
+  Measured on the shipped 8-bit builds both sides are bfloat16 and nothing is
+  lost, so this is a latent risk rather than a live defect — but it is the kind
+  of thing that only shows up as different logits, so re-check it against
+  whatever build is in use.
 
 Re-quantising itself is safe: MLX's affine quantisation is deterministic and
 data-free, and mlx-audio's own predicate (`not p.startswith("audio_tower")`)

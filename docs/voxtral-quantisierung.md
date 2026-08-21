@@ -763,15 +763,26 @@ re-quantisation** — quantised matmuls are the same kernels either way.
 
 What could move them is everything around it, and each is a separate check:
 
-* mlx-audio's `_merge_input_embeddings` scatters the float32 audio embeddings
-  into a bfloat16 array. `_merged_embeddings` promotes first, deliberately —
-  the difference is invisible in the text and shows up only as different logits.
+* mlx-audio's `_merge_input_embeddings` scatters without promoting dtype first,
+  where `_merged_embeddings` promotes deliberately. Measured, this is currently
+  moot: on the shipped 8-bit build `get_audio_embeds` and `embed_tokens` both
+  return bfloat16, so there is nothing to round away. It stays worth re-checking
+  because the failure would be invisible in the text and show up only as
+  different logits.
 * Its stop-token default includes 32000, an ordinary text token. Left as it is,
   that silently truncates any pass containing the word.
 * It vendors its own `generate_step` rather than using `mlx_lm`'s. Same chunked
   prefill (`prefill_step_size=2048`), so the ~18 % peak saving survives — but
   `MEM_MODEL` is calibrated against the current path and would need
   re-measuring before the numbers in *Long audio & memory* could be trusted.
+
+Two things that are *not* concerns, checked rather than assumed. mlx-audio does
+not compute the log-Mel at all — it takes `input_features` straight from
+transformers' `VoxtralProcessor`, i.e. the reference — so the per-30-s-block
+normalisation defect reported against mlx-voxtral cannot occur there. And its
+audio path mirrors the reference line for line: `audio_tower(x).reshape(-1,
+intermediate_size)` then the projector, exactly as `VoxtralModel.get_audio_features`
+does, with the embedding merge already a scatter rather than the quadratic walk.
 
 None of that argues against the move; it argues that the move is a measurement
 exercise, not a port. The trigger to start it is `mlx-voxtral` breaking against
