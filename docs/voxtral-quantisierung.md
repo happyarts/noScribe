@@ -845,6 +845,37 @@ magnitude behind Voxtral-Mini on a real conversation. The long-form tab is
 so it says nothing about German conversation — the gap this document keeps
 running into has no public benchmark at all.
 
+### The aligner moved to the GPU (2026-08-22)
+
+Forced alignment ran on the **CPU**: `_Aligner.__init__` never moved its model
+anywhere, in a module that only runs on Apple Silicon, while `pyannote_mp_worker.py`
+selected MPS for the diarizer a few files away. A review recorded this on 2026-07-27
+as the largest single open win and it had been sitting since.
+
+Measured on the 300 s reference, 20 s windows, identical `(14985, 38)` output:
+
+| | time | realtime | argmax vs CPU |
+|---|---:|---:|---:|
+| CPU fp32 — before | 14.76 s | 20.3x | — |
+| **MPS fp32 — now** | **4.24 s** | **70.8x** | **100.0000 %** |
+| MPS fp16 — declined | 3.52 s | 85.1x | 99.933 % |
+
+End to end on both hand-corrected references, 1268 words: **every timestamp
+bit-identical**, at 3.14x and 3.25x. Alignment is ~13 % of a job's runtime, so this
+is roughly **130 seconds per hour of audio**, ten minutes on a four-hour file.
+
+fp16 was measured and declined: faster again, but 0.067 % of frames pick a different
+argmax and the worst log-prob deviation is 1.68 — enough to move a word boundary. A
+change that is free of effect should stay that way.
+
+Shipped with two things worth knowing. The device choice mirrors
+`pyannote_mp_worker`'s, macOS floor included, and falls back to the CPU once and for
+good if the forward raises — an unsupported op on a backend must not cost the whole
+job its transcript. And `clear_cache()` now runs **before** the alignment rather than
+after: the decode pass's MLX buffers are dead by then, and with the aligner on the
+same GPU, leaving them resident is the co-residency `MIN_HEADROOM_GB` exists to
+prevent.
+
 ### What mlx-audio holds beyond ASR (surveyed 2026-08-21, deliberately not pursued)
 
 Reviewing mlx-audio's model list for engines we had missed turned up something more

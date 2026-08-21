@@ -1816,6 +1816,34 @@ class _Voxtral:
 # --------------------------------------------------------------------------- #
 # CTC forced alignment (text + audio -> word timestamps)
 # --------------------------------------------------------------------------- #
+def _align_device(preference=None):
+    """Torch device for the alignment forward pass.
+
+    The aligner is the last piece of this module still on the CPU, in a module
+    that only runs on Apple Silicon. On MPS the emissions are the same -- argmax
+    identical on every frame of a 300 s reference, worst log-prob deviation
+    ~5e-3 -- and the pass is measurably faster: 14.85 s to 4.60 s for that clip,
+    which is most of the aligner's runtime since the forward is ~97% of it.
+
+    Mirrors `pyannote_mp_worker.pyannote_proc_entrypoint`'s choice, including
+    its macOS floor: MPS support before 12.3 is not something to rely on.
+    `preference` is the config escape hatch, matching `pyannote_xpu`; anything
+    other than "mps" pins the CPU.
+    """
+    if preference is not None and preference != "mps":
+        return "cpu"
+    try:
+        import platform
+        import torch
+        if platform.system() != "Darwin":
+            return "cpu"
+        if platform.mac_ver()[0] < "12.3":
+            return "cpu"
+        return "mps" if torch.backends.mps.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
 class _Aligner:
     # Recursion cap for the oversized-window split. Deep enough that halving
     # brings a genuinely too-big window under FORCED_ALIGN_MAX_CELLS (the cell
@@ -1839,12 +1867,21 @@ class _Aligner:
     # word is whole even when CTC let the previous word run long.
     PREFIX_PIECE_BACKOFF_SEC = 0.5
 
-    def __init__(self, model_name=ALIGN_MODEL_MULTILINGUAL):
+    def __init__(self, model_name=ALIGN_MODEL_MULTILINGUAL, device=None):
         import torch
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
         self._torch = torch
         self.proc = Wav2Vec2Processor.from_pretrained(model_name)
         self.model = Wav2Vec2ForCTC.from_pretrained(model_name).eval()
+        # fp32 deliberately: fp16 on MPS is faster again but moves 0.067% of
+        # argmaxes and deviates by up to 1.68 in log-prob, which is enough to
+        # shift a word boundary. This change is meant to be free of effect.
+        self.device = device or _align_device()
+        if self.device != "cpu":
+            try:
+                self.model = self.model.to(self.device)
+            except Exception:
+                self.device = "cpu"
         self.vocab = self.proc.tokenizer.get_vocab()
         # The CTC blank is the index the network actually emits between labels,
         # which is NOT reliably the token spelled "<pad>": the multilingual MMS
@@ -1874,16 +1911,37 @@ class _Aligner:
         # whole job -- the guard is `< min_win`, not just the empty case.
         min_win = int(0.025 * SAMPLE_RATE)
         parts = []
+        try:
+            parts = self._forward_windows(wav, win, min_win, self.device)
+        except Exception as exc:
+            # An unsupported op on this backend must not cost the whole job a
+            # transcript. Fall back once, for good, and say so.
+            if self.device == "cpu":
+                raise
+            logger.warning("Alignment on %s failed (%s); falling back to CPU.",
+                           self.device, exc)
+            self.device = "cpu"
+            self.model = self.model.to("cpu")
+            parts = self._forward_windows(wav, win, min_win, "cpu")
+        if not parts:
+            return None
+        return torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+
+    def _forward_windows(self, wav, win, min_win, device):
+        """Log-prob emissions per window, always returned on the CPU so the
+        forced-align call and everything downstream stay unchanged."""
+        torch = self._torch
+        parts = []
         with torch.inference_mode():
             for i in range(0, len(wav), win):
                 seg = wav[i:i + win]
                 if seg.numel() < min_win:
                     continue
+                if device != "cpu":
+                    seg = seg.to(device)
                 lg = self.model(seg.unsqueeze(0)).logits[0]
-                parts.append(torch.log_softmax(lg, dim=-1))
-        if not parts:
-            return None
-        return torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+                parts.append(torch.log_softmax(lg, dim=-1).cpu())
+        return parts
 
     def _tokenize(self, words):
         tokens, tok_word = [], []
@@ -2680,6 +2738,14 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         if speaker_names:
             text = transcript_corrections.apply_name_corrections(
                 text, speaker_names, language)
+        # Release the decode pass's MLX buffers BEFORE the alignment, not after.
+        # They are dead by now, and the aligner's forward runs on the same GPU --
+        # leaving them resident is exactly the co-residency MIN_HEADROOM_GB is
+        # meant to prevent. Unconditional, so the text-only path frees them too.
+        try:
+            vox._mx.clear_cache()
+        except Exception:
+            pass
         if aligner_pool is not None:
             aligner = aligner_pool.aligner_for(text)
             words = re.findall(r"\S+", text)
@@ -2705,11 +2771,6 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             # and autosave a partial transcript during long files.
             for seg in segs:
                 segment_cb(seg)
-        # Release MLX buffers so memory stays flat across chunks of a long file.
-        try:
-            vox._mx.clear_cache()
-        except Exception:
-            pass
         # Snap the bar to this pass's true end position in the whole audio
         # (duration-weighted; the final pass lands on 100%).
         _emit_progress(a1 / n_samples * 100)

@@ -20,8 +20,10 @@ every frame, which is about 130 seconds per hour of audio for one line of code.
 Emissions are 97 % of the aligner's runtime, so that captures nearly all of the
 available benefit.
 
-**If that has not been done yet, do it first.** It has its own work order:
-`docs/aligner-gpu-brief.md`.
+**That is already done** — the aligner runs on MPS as of 2026-08-22, with every
+timestamp bit-identical to the CPU path. See the *aligner moved to the GPU* section
+of `docs/voxtral-quantisierung.md`. So the speed argument for this task is spent;
+what remains is the code-simplification argument below.
 
 Also note that `forced_align` is not going away. TorchAudio is in maintenance, but
 its v2.10 release notes name `forced_align` explicitly as one of five C++ extensions
