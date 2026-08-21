@@ -738,7 +738,18 @@ WebGPU demo. Worth re-measuring when Cohere ships a successor.
 with `Unable to parse string as hex hash value`. `HF_HUB_DISABLE_XET=1` in front
 of the download falls back to plain HTTP and works.
 
-### Moving off mlx-voxtral (evaluated 2026-08-21, deferred)
+### Moving off mlx-voxtral (evaluated 2026-08-21 — and the licence changes the order)
+
+**The reason to move is no longer maintenance.** `mlx-voxtral` ships under a
+"Personal Use License": MIT plus a prohibition on commercial use, including
+"using the Software to provide commercial services". noScribe is GPL-3.0, which
+does not permit further restrictions, and much of its audience transcribes for
+paid work. `mlx-audio` is MIT. That turns this section from a cleanup into a
+prerequisite — see the licence note in [`../VOXTRAL.md`](../VOXTRAL.md).
+
+The cheaper resolution is to ask the copyright holder to relicense; the licence
+text invites exactly that, and the maintainer is active on GitHub even though
+this repository is not. Everything below is what the move costs if that fails.
 
 `mlx-voxtral` has had no release since 2025-08-19. The maintained alternative is
 `mlx-audio`, whose `mlx_audio/stt/models/` holds Voxtral next to cohere_asr,

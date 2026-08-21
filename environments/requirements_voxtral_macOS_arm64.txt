@@ -16,6 +16,11 @@
 # byte-identity tests were validated against -- bump them deliberately, together.
 mlx==0.32.0
 mlx-lm==0.31.3
+# LICENCE WARNING: mlx-voxtral is NOT open source. It ships under a "Personal
+# Use License" -- MIT plus a ban on commercial use, including "using the
+# Software to provide commercial services". noScribe is GPL-3.0, which does not
+# permit further restrictions, and transcribing for paid work is commercial use.
+# See the licence section in VOXTRAL.md. mlx-audio (MIT) is the way out.
 mlx-voxtral==0.0.4
 # transformers 5 is what the engine was validated against, and mlx-lm 0.31.3
 # already requires it -- a lower floor here only allowed an untested 4.x to
