@@ -22,7 +22,8 @@ audio**, and it needs no new DP at all: keep `torchaudio.functional.forced_align
 for the Viterbi pass and feed it emissions computed by mlx-audio.
 
 **If nobody has done that swap yet, do it first and measure it. It is smaller, it
-carries the whole speedup, and it is independently useful.**
+carries the whole speedup, and it is independently useful.** It has its own work
+order: `docs/emission-swap-brief.md`.
 
 Also note that `forced_align` is not going away. TorchAudio is in maintenance, but
 its v2.10 release notes name `forced_align` explicitly as one of five C++ extensions
