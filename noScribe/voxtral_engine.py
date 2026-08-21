@@ -452,22 +452,28 @@ class _AlignerPool:
         return self._load(model, remember=remember)
 
     @staticmethod
-    def _release(evicted):
-        """Give an evicted aligner's GPU memory back to the system.
+    def _release_gpu_memory():
+        """Return an evicted aligner's GPU memory to the system.
 
         Dropping the reference frees torch's *allocator* but not the driver
-        reservation: measured, `driver_allocated_memory` stayed at 2.04 GB
-        after the object was collected and only returned to zero on an
-        explicit `empty_cache()`. On Auto a file with three alignment
-        languages would otherwise hold that for the rest of the job, against a
-        MIN_HEADROOM_GB budget MLX is also drawing on. Costs ~8 ms, and only
-        works on eviction -- calling it while an aligner is still resident
-        reclaims nothing, because weights and activations share heaps.
+        reservation: measured, `driver_allocated_memory` stayed at 2.04 GB and
+        only fell to zero on an explicit `empty_cache()`. On Auto a file with
+        three alignment languages would otherwise hold that for the rest of the
+        job, against a MIN_HEADROOM_GB budget MLX is also drawing on.
+
+        **Call this only after the last reference to the evicted aligner is
+        gone**, and note that dropping the dict entry is not enough on its own.
+        Measured on one evicted aligner, driver memory went 2.04 GB -> 2.04 GB
+        while a local still held it, -> 1.01 GB once that reference went away,
+        and only -> 0.00 GB after a `gc.collect()`: a `Wav2Vec2ForCTC` sits in
+        reference cycles, so refcounting alone leaves half of it resident until
+        the collector runs.
         """
-        if getattr(evicted, "device", "cpu") == "cpu":
-            return
         try:
+            import gc
+
             import torch
+            gc.collect()
             torch.mps.empty_cache()
         except Exception:
             pass
@@ -478,8 +484,11 @@ class _AlignerPool:
             _log(self._log_cb, "info", f"Loading alignment model: {model}")
             aligner = _Aligner(model)
             while len(self._cache) >= self.MAX_CACHED:
-                evicted = self._cache.pop(next(iter(self._cache)))
-                self._release(evicted)
+                oldest = next(iter(self._cache))
+                on_gpu = getattr(self._cache[oldest], "device", "cpu") != "cpu"
+                del self._cache[oldest]      # last reference to the evicted one
+                if on_gpu:
+                    self._release_gpu_memory()
         self._cache[model] = aligner   # re-insert = mark most recently used
         if remember:
             self._last_model = model
