@@ -61,10 +61,56 @@ Searched 2026-08-22. Nothing usable was found, and the reasons differ:
 | mlx-audio `qwen3_forced_aligner` | measured: collapses at its documented 5-minute cap, 20 % zero-duration spans, last 30 s of a 300 s clip on one timestamp |
 | mlx-audio generally | no `forced_align` or Viterbi anywhere; MMS's `_ctc_decode` is greedy argmax |
 
-**Do not re-run this survey.** If you want a reference implementation to follow
-rather than invent, torchaudio's own "Forced Alignment with Wav2Vec2" tutorial
-carries the DP in a few dozen lines of readable Python; adapt that rather than
-deriving it.
+**Do not re-run this survey.** One candidate did survive it, though, and it
+deserves its own section.
+
+## The one that nearly makes this unnecessary: `ctc-forced-aligner`
+
+PyPI's `ctc-forced-aligner` 1.0.2 exposes
+
+```python
+forced_align(log_probs, targets, input_lengths=None, target_lengths=None, blank=0)
+    -> (paths, scores)
+```
+
+— the same signature as `torchaudio.functional.forced_align`, over numpy arrays,
+backed by a compiled C++ extension. It also ships `merge_repeats`, the counterpart
+to `merge_tokens`. **Measured against torchaudio on 40 random cases** (varying T
+and target length, including tight `T == L + repeats` fits): **40 identical, 0
+divergent**. So the algorithm question is answered — if you adopt it, there is
+nothing to write.
+
+Four things to weigh before you do, none of them fatal on its own:
+
+* **Source distribution only.** A 22 KB tarball that builds a C++ extension at
+  install time. That is the same objection that ruled out `ctc-segmentation`: a
+  click-and-run desktop app cannot ask users for a compiler, and PyInstaller has to
+  be shown to bundle the built extension.
+* **Custom licence.** "Deskpai Open Source License (DOSL) 1.0" — BSD-shaped, but
+  clause 3 requires any distribution to carry a README that *clearly displays*
+  "This software is distributed with permission from https://www.deskpai.com." in
+  a prominent, visible location, and clause 6 requires the licence file in the
+  distribution root. Attribution terms of that kind are plausibly permitted by
+  GPL-3.0 §7(b), but noScribe is GPL-3.0 and this is exactly the class of question
+  that cost this project a week already. Get it read properly before depending on
+  it.
+* **Name confusion.** The PyPI name belongs to `deskpai/ctc_forced_aligner` (11
+  stars, one release burst in 2025-02, untouched since). It is **not**
+  MahmoudAshraf's `ctc-forced-aligner` (552 stars, actively maintained), whose
+  *model* this project uses as its multilingual aligner. Anyone reaching for "the
+  ctc forced aligner package" will assume the wrong one.
+* **It is already in the project venv, and in no requirements file.** Its
+  `REQUESTED` marker says it was installed deliberately rather than pulled in, and
+  no code here imports it. Treat the venv as not matching the declared
+  environment until that is resolved.
+
+**Whatever you decide, use it as a second oracle.** It is an independent
+implementation that agrees with torchaudio, it is already installed, and checking a
+hand-written DP against two implementations rather than one costs nothing.
+
+If you do write the DP instead, torchaudio's own "Forced Alignment with Wav2Vec2"
+tutorial carries it in a few dozen lines of readable Python — adapt that rather
+than deriving it from the paper.
 
 ## The task
 
@@ -117,6 +163,21 @@ starting — their docstrings describe defects that were expensive to find.
   a log probability.
 * **Do not touch the surrounding logic** — the emission windowing, the tokenizer, the
   prefix-salvage path. Swap the DP, nothing else.
+* **A generic HMM Viterbi is the wrong shape, and searching for "Viterbi in numpy"
+  will hand you one.** Those implementations take a dense `N x N` transition matrix
+  and an emission *table* indexed by a discrete observation alphabet, then loop over
+  both time and states in Python. Every part of that fights this problem. CTC's
+  transitions are a narrow band — from state `s` only to `s`, `s+1` or `s+2` — so
+  for a ten-minute pass the dense matrix is 2401 x 2401 entries of which **0.12 %
+  are not `-inf`**, rebuilt on every call because the target sequence changes per
+  chunk. The emissions are already a `[T, vocab]` array from the network, so what
+  you need is a gather `emissions[t, target[s]]`, not a table lookup. And the double
+  loop is **72 million Python iterations** where vectorising over the state axis
+  leaves 30 000. Worse, none of the actual difficulty — the blank interleaving, the
+  advance-by-two rule, the backtrace, `merge_tokens` — appears in a generic
+  implementation at all. Take the torchaudio tutorial instead.
+* **numpy is not a new dependency.** `voxtral_engine.py` already imports it, and a
+  dozen installed packages require it transitively. Nothing to weigh there.
 * Read the docstrings in `voxtral_engine.py` before changing any constant.
 
 ## Rollback
