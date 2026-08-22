@@ -99,18 +99,57 @@ Four things to weigh before you do, none of them fatal on its own:
   MahmoudAshraf's `ctc-forced-aligner` (552 stars, actively maintained), whose
   *model* this project uses as its multilingual aligner. Anyone reaching for "the
   ctc forced aligner package" will assume the wrong one.
-* **It is already in the project venv, and in no requirements file.** Its
-  `REQUESTED` marker says it was installed deliberately rather than pulled in, and
-  no code here imports it. Treat the venv as not matching the declared
-  environment until that is resolved.
+* It was found sitting in the project venv, installed deliberately and listed in no
+  requirements file, imported by nothing. It has since been removed.
 
-**Whatever you decide, use it as a second oracle.** It is an independent
-implementation that agrees with torchaudio, it is already installed, and checking a
-hand-written DP against two implementations rather than one costs nothing.
+**Whatever you decide, install it temporarily as a second oracle.** It is an
+independent implementation that agrees with torchaudio, so checking a hand-written
+DP against two references rather than one costs one `pip install` and no thought.
 
 If you do write the DP instead, torchaudio's own "Forced Alignment with Wav2Vec2"
 tutorial carries it in a few dozen lines of readable Python — adapt that rather
 than deriving it from the paper.
+
+## Writing it is easy. Making it fast is not.
+
+Both halves of that were measured, so plan around the numbers rather than the
+intuition that 151 lines of C++ cannot be doing much.
+
+**Correctness is a short afternoon.** A vectorised numpy DP — state axis
+vectorised, time axis looped, ~30 lines — reproduced `torchaudio.functional.forced_align`
+on **40 of 40 random cases** including tight `T == L + repeats` fits, first try.
+The algorithm is not where the risk is.
+
+**Speed is the problem.** On a real 300 s chunk (T = 14 985 frames, L = 4 886
+tokens, N = 9 773 states, **146 million DP cells**):
+
+| implementation | time | vs C++ |
+|---|---:|---:|
+| `torchaudio.functional.forced_align` (C++) | 264 ms | — |
+| `ctc-forced-aligner` (C++) | 253 ms | 1.0x |
+| vectorised numpy | **3 144 ms** | **11.9x** |
+
+All three returned identical paths.
+
+The gap is not C++ being clever. It is that the recurrence is sequential in time,
+so numpy runs ~15 000 iterations of six array operations on 9 773-element arrays,
+and pays dispatch and allocation overhead on every one of them; C++ runs one tight
+loop with neither. Vectorising harder does not help, because the axis that is long
+is the one that cannot be vectorised.
+
+**And 3.1 s is the wrong kind of slow here.** The emission step for that same chunk
+costs about 2.9 s on the GPU, so a numpy DP would roughly double alignment — giving
+back about half of the ~130 s per hour of audio that moving the aligner to the GPU
+just won.
+
+**The shape that does work: keep C++ for the normal path and use numpy only where
+the cap would otherwise force a split.** `FORCED_ALIGN_MAX_CELLS` is 2^30 cells;
+the real chunk above uses 146 million, so a ten-minute pass sits around 300 million
+and the cap fires only on unusually dense speech. A numpy DP with 64-bit indexing
+has no such limit, so wiring it in as the fallback removes the recursive
+word/audio split — the actual simplification this task is for — while the
+common path keeps the C++ speed. That is a much smaller and safer change than
+replacing the DP outright.
 
 ## The task
 
@@ -159,8 +198,20 @@ starting — their docstrings describe defects that were expensive to find.
 * **Repeated tokens.** Two identical labels in a row require a blank between them —
   advance-by-two must not skip it. torchaudio enforces this; so must you.
 * **Scores.** `merge_tokens` returns a score per span. Check what the existing code
-  does with it before changing its meaning; note that what the engine calls `prob` is
-  a log probability.
+  does with it before changing its meaning; note that what the engine stores as
+  `prob` is `exp()` of that score, so it matches `whisper_mp_worker`'s field.
+* **Span ends are exclusive.** Verified against torchaudio: for a token occupying
+  frames 0, 1, 2, `merge_tokens` returns `start=0, end=3`, so `end - start` is the
+  duration and `sp.end / fps` is the time after the last frame. The engine relies on
+  this. Do not add a `+1` — MahmoudAshraf's aligner needed one
+  ([c344f5b](https://github.com/MahmoudAshraf97/ctc-forced-aligner/commit/c344f5bc900323aa434a7cb200b7c629d463bd02))
+  because *its own* `merge_repeats` returns an inclusive end; the conventions differ.
+* **The frame rate is derived, and that is fine.** `fps = n_frames / duration`
+  rather than the model's `inputs_to_logits_ratio` (320, i.e. exactly 50 fps).
+  Measured on a 300 s chunk the derived value is 49.95, and because it comes from
+  the concatenated total the resulting timestamp error stays within **10-20 ms and
+  oscillates rather than accumulating**. Not worth changing, and changing it would
+  move every timestamp the tests pin.
 * **Do not touch the surrounding logic** — the emission windowing, the tokenizer, the
   prefix-salvage path. Swap the DP, nothing else.
 * **A generic HMM Viterbi is the wrong shape, and searching for "Viterbi in numpy"
