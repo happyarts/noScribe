@@ -34,15 +34,45 @@ future torch versions.
 
 Three things, none of them dependency removal:
 
-1. **It deletes a workaround.** `torchaudio`'s CPU `forced_align` indexes its
-   `frames × (2·tokens+1)` DP buffer with 32-bit integers and segfaults past that.
-   `voxtral_engine.py` carries a hard cap and a recursive word/audio splitting path
-   purely to stay under it. A numpy DP with 64-bit indexing has no such limit, so the
-   cap and the split can go — real simplification of a load-bearing routine.
+1. **It removes a crash class.** `torchaudio`'s CPU `forced_align` indexes its
+   `frames × (2·tokens+1)` DP buffer with 32-bit integers and segfaults past that —
+   observed in a real run. A numpy DP with 64-bit indexing cannot do that, so the
+   worst case degrades from SIGSEGV to slow.
 2. **It drops the `torchaudio==2.11` pin**, which exists for the same kernel.
 3. **It removes the dependency on an unmerged upstream fix.** Our
    [pytorch/audio#4209](https://github.com/pytorch/audio/pull/4209) fixes exactly
    this overflow, was approved by a maintainer on 2026-08-05, and is still unmerged.
+
+**What it does *not* buy — read this before selling the task on simplification.**
+An earlier version of this brief claimed the cap and the recursive split exist
+"purely" to dodge the overflow and could go with it. That is wrong on both counts,
+and `tests/test_forced_align_cap.py` already said so in its docstring:
+
+* **The cap stays, with a new justification.** Measured on the 300 s reference chunk,
+  *both* implementations use **1.0 byte per DP cell** (141 MB vs 140 MB peak over
+  146 M cells). At the measured density — 50 frames and 16.3 tokens per second — a
+  full 1500 s window is 3.66 billion cells, i.e. a **3.4 GB backtrace table and 15.8 s
+  of DP**. So a cell budget around 2^30 is still required; only its comment changes,
+  from "or the process segfaults" to "or it eats a gigabyte". `FORCED_ALIGN_MAX_CELLS`
+  and `SALVAGE_ALIGN_MAX_CELLS` do become two budgets of the same kind and could
+  plausibly merge into one.
+* **The recursive split stays untouched.** It has a second, fully independent
+  trigger: `too_dense`, where a window holds more target tokens than audio frames.
+  That is a property of CTC, not of torchaudio, and it will fire on dense speech and
+  on Voxtral over-generation no matter what runs the DP. `_spread`,
+  `_quietest_frame_near`, `MAX_SPLIT_DEPTH`, `MAX_DENSE_SPLIT_DEPTH`, the halving and
+  the pause-snapped audio cut all survive.
+* **`align_prefix`'s piecing stays** for the same two reasons — density and the
+  memory budget — including `_prefix_piece` and its binary search.
+* **The transcription chunking is not involved at all.** Pause-aware cut points and
+  the 1500 s windows are driven by Voxtral's context length. Nothing there reads a
+  forced-align constant.
+
+So the honest ledger is roughly **+50 lines net** in `voxtral_engine.py`: about 30
+lines go (the constant's overflow comment, `_dp_cells`, the `too_big` explanation and
+its hard-failure branch, the cap half of `_prefix_piece`), and a ~55-line DP plus a
+`merge_tokens` replacement and its tests come in. Take the task for the crash class
+and the pin, not for a smaller file.
 
 If none of those matter today, close the task.
 
