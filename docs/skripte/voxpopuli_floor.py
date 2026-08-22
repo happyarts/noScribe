@@ -20,7 +20,11 @@ bitgleichem Audio.
 Aufbau und Bootstrap aus fleurs_stream.py; verglichen werden zwei
 Feature-Pfade auf denselben Stroemen.
 
-    python docs/skripte/voxpopuli_floor.py [n_stroeme] [sekunden] [perzentil]
+    python docs/skripte/voxpopuli_floor.py [n_stroeme] [sekunden] [perzentile]
+
+`perzentile` darf eine Liste sein (`99.0,99.9,99.99`). Die Max-Basis wird dann
+nur einmal gerechnet und alle Arme gegen dieselbe Basis gepaart -- das ist der
+Sweep, mit dem die Perzentilwahl entschieden wird.
 """
 import io
 import pathlib
@@ -93,7 +97,8 @@ def load_clips(n_rows):
 def main():
     n_streams = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     sec = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
-    pct = float(sys.argv[3]) if len(sys.argv) > 3 else 99.9
+    pcts = ([float(x) for x in sys.argv[3].split(",")]
+            if len(sys.argv) > 3 else [99.9])
 
     clips, refs = load_clips(int(n_streams * sec / 9) + 60)
     st = streams(clips, refs, n_streams, sec)
@@ -102,22 +107,24 @@ def main():
           f"{total/60:.1f} min gesamt")
 
     vox = _Voxtral(str(REPO / "models" / "voxtral-mini-8bit"))
-    stock, pctx = vox.proc.feature_extractor, PercentileFloor(pct)
+    stock = vox.proc.feature_extractor
+    arms = [(f"Perzentil {p:g}", PercentileFloor(p)) for p in pcts]
 
     # Greift der Tausch? Sonst misst der Lauf zweimal dasselbe.
     probe = st[0][0]
-    d = np.abs(np.array(pctx(probe)["input_features"])
-               - np.array(stock(probe, sampling_rate=SR,
-                                return_tensors="mlx")["input_features"]))
-    print(f"# Kontrolle: Feature max|diff| auf Strom 0 = {d.max():.4f}")
-    assert d.max() > 1e-3, "Feature-Pfade unterscheiden sich kaum"
+    base_feat = np.array(stock(probe, sampling_rate=SR,
+                               return_tensors="mlx")["input_features"])
+    for name, ex in arms:
+        d = np.abs(np.array(ex(probe)["input_features"]) - base_feat).max()
+        print(f"# Kontrolle: Feature max|diff| {name} gegen max = {d:.4f}")
+        assert d > 1e-3, f"{name} unterscheidet sich kaum vom eingebauten Pfad"
 
     def rate(rows, num, den):
         return sum(r[num] for r in rows) / max(1, sum(r[den] for r in rows)) * 100
 
     print(f"\n{'Boden':16s} {'WER':>7s} {'CER':>7s} {'Speed':>7s}")
     store = {}
-    for name, ex in (("max (ist)", stock), (f"Perzentil {pct}", pctx)):
+    for name, ex in [("max (ist)", stock)] + arms:
         vox.proc.feature_extractor = ex
         rows, t0 = [], time.time()
         for x, words in st:
@@ -133,15 +140,17 @@ def main():
         store[name] = rows
         mx.clear_cache()
 
-    a, b = store["max (ist)"], store[f"Perzentil {pct}"]
-    lo_w, hi_w = paired(a, b, "w", "ref_w")
-    lo_c, hi_c = paired(a, b, "c", "ref_c")
-    dW = rate(b, "w", "ref_w") - rate(a, "w", "ref_w")
-    dC = rate(b, "c", "ref_c") - rate(a, "c", "ref_c")
+    a = store["max (ist)"]
     star = lambda lo, hi: " *" if (lo > 0) == (hi > 0) else ""
-    print(f"\nGepaart, Perzentil - max (95%; enthaelt es 0, nicht nachweisbar):")
-    print(f"  dWER {dW:+.2f} [{lo_w:+.2f}, {hi_w:+.2f}]{star(lo_w,hi_w)}"
-          f"   dCER {dC:+.2f} [{lo_c:+.2f}, {hi_c:+.2f}]{star(lo_c,hi_c)}")
+    print("\nGepaart gegen max (95%; enthaelt es 0, nicht nachweisbar):")
+    for name, _ in arms:
+        b = store[name]
+        lo_w, hi_w = paired(a, b, "w", "ref_w")
+        lo_c, hi_c = paired(a, b, "c", "ref_c")
+        dW = rate(b, "w", "ref_w") - rate(a, "w", "ref_w")
+        dC = rate(b, "c", "ref_c") - rate(a, "c", "ref_c")
+        print(f"  {name:16s} dWER {dW:+.2f} [{lo_w:+.2f}, {hi_w:+.2f}]{star(lo_w,hi_w)}"
+              f"   dCER {dC:+.2f} [{lo_c:+.2f}, {hi_c:+.2f}]{star(lo_c,hi_c)}")
     print("  (positiv = Perzentil schlechter)")
     if len(st) < 8:
         print(f"  ACHTUNG: nur {len(st)} Stroeme -- das Intervall traegt nicht.")
