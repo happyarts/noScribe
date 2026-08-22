@@ -272,6 +272,53 @@ The backtrace loop is Python over T, which is fine — it is ~15 000 scalar step
 measures under 20 ms. `merge_tokens` still has to be written; see the span-end trap
 below.
 
+## Memory: the standard fix works, and you still should not use it
+
+Asked and measured 2026-08-23, because 3.4 GB for a full window looks like the thing
+to attack. It is fixable, and fixing it buys less than it seems.
+
+**The forward pass already streams.** Only two state vectors of N floats are ever
+live. What cannot stream is the *backtrace*: Viterbi only knows which path won after
+it has seen the last frame, so the per-frame decisions must be kept. That is the
+`T × N` table, and it is inherent to the algorithm, not to this implementation.
+
+**Checkpointing removes it, at 1.7x time.** Pass 1 runs the recurrence with no
+backtrace at all, snapshotting alpha every `seg = 2·√T` frames. Pass 2 walks the
+segments backwards: restore a snapshot, recompute that one segment's backtrace into a
+`seg × N` buffer, follow it down, discard. Memory drops from `O(T·N)` to `O(N·√T)`;
+every cell is computed twice. Implemented and verified **identical on 60 of 60 random
+cases and on the 300 s chunk**:
+
+| | time | memory |
+|---|---:|---:|
+| full table | 579 ms | 140 MB |
+| checkpointed | 977 ms | **5 MB** |
+
+On a projected 1500 s window that is **3.41 GB → 51 MB, a factor of 68.** (The cheaper
+alternative, packing the 0/1/2 backtrace at 2 bits per cell instead of 8, gives a flat
+4x for much less work — worth knowing, not measured.)
+
+**Why it does not let you drop the splitting anyway.** Three reasons, and the first
+was the surprise:
+
+1. **Splitting is a compute optimisation, not a workaround.** Halving a window halves
+   *both* axes, so total DP cells fall by half at every level. Measured on the 300 s
+   chunk: whole 587 ms, two pieces 338 ms, four pieces **200 ms — 2.9x faster than
+   not splitting.** Aligning a 1500 s window in one call is ~5x the cell count of
+   aligning it in five, and with checkpointing's 1.7x on top that is roughly **9x the
+   DP work** to avoid a split you also cannot avoid.
+2. **`too_dense` is untouched by any of this.** More target tokens than audio frames
+   is a CTC constraint; no memory technique makes such a window alignable.
+3. **The 1 GB cap is doing no harm.** The DP already runs in a fraction of a second
+   per piece.
+
+**Where it would genuinely pay:** as a replacement for the `_spread` hard-failure
+path, so a window that cannot be split far enough gets slow real timestamps instead
+of evenly spread wrong ones. Check first whether that path is reachable — with
+`MAX_SPLIT_DEPTH = 12` a too-big window is 1/16 000 000 of its original cell count by
+then, so in practice the reachable hard failure is `too_dense`, which checkpointing
+does not help. Probably dead code to optimise. Measure before building.
+
 ## The task
 
 Replace `torchaudio.functional.forced_align` and `torchaudio.functional.merge_tokens`
