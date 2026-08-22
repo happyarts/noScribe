@@ -42,11 +42,18 @@ def _synthetic_audio(seconds=3.0):
             + 0.03 * np.sin(2 * np.pi * 330 * t)).astype(np.float32)
 
 
-def test_voxtral_stack_runs_and_fast_matches_library():
-    import mlx.core as mx
-    from noScribe.voxtral_engine import _Voxtral, SAMPLE_RATE
+@pytest.fixture(scope="module")
+def voxtral():
+    """One loaded model for the whole file. Loading per test would hold two
+    6 GB builds at once on a machine the suite is expected to run on."""
+    from noScribe.voxtral_engine import _Voxtral
+    return _Voxtral(_MODEL)
 
-    v = _Voxtral(_MODEL)
+
+def test_voxtral_stack_runs_and_fast_matches_library(voxtral):
+    from noScribe.voxtral_engine import SAMPLE_RATE
+
+    v = voxtral
     audio = _synthetic_audio()
 
     # fast path (generate_step) via the public method
@@ -67,3 +74,14 @@ def test_voxtral_stack_runs_and_fast_matches_library():
         "mlx/mlx-lm/mlx-voxtral upgrade may have changed decode semantics.\n"
         f"fast: {fast[:200]!r}\nref : {ref[:200]!r}"
     )
+
+
+def test_the_penalty_rung_still_reaches_the_library(voxtral):
+    """The retry ladder's repetition-penalty rung is the one production path
+    that calls model.generate(), and the only caller passing `stop_tokens=`.
+    Nothing else here exercises it, so an upstream rename of that keyword would
+    surface at runtime -- on a retry, i.e. on a pass that was already going
+    wrong. Content is irrelevant; that the call survives the pin is not."""
+    out = voxtral.transcribe_array(_synthetic_audio(), "de",
+                                   repetition_penalty=1.2)
+    assert isinstance(out, str)

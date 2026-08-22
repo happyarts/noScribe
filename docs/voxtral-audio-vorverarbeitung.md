@@ -51,14 +51,15 @@ gepaarte 95-%-Bootstrap-Intervalle.
 | **Entrauschen** | **nichts**, `anlmdn` verschlechtert die WER | `fleurs_noise.py` |
 | **Hochpass** (Headroom gewinnen) | untauglich: hebt die Spitze eher an (−0,58 bis **+1,21** dB) | — |
 | **Chunks am 30-s-Fenster ausrichten** | **nichts.** dWER +0,00 [−0,75, +0,52] | Abschnitt 5 |
-| **log-Mel über die ganze Datei statt je 30-s-Block** | **nichts.** dWER +0,02 [−0,19, +0,24] | Abschnitt 6 |
+| **log-Mel über die ganze Datei statt je 30-s-Block** (seit 0.0.6 der Produktionspfad) | **nichts.** dWER +0,02 [−0,19, +0,24] | Abschnitt 6 |
 | **Kanäle getrennt transkribieren** | gegenstandslos: alles Testmaterial ist Dual-Mono (Korrelation +0,98 bis +1,0000) | `audio_audit.py` |
 
 ### Warum die Bittiefe egal ist
 
 Whisper/Voxtral klemmen das Log-Mel bei `log_max − 8,0`, also 80 dB unter dem
-lautesten Mel-Bin des jeweiligen 30-s-Fensters
-(`mlx_voxtral/audio_processing.py:341`). Der 16-Bit-Rauschboden liegt bei
+lautesten Mel-Bin der ganzen Eingabe
+(`mlx_voxtral/audio_processing.py:341`; bis 0.0.5 war es der lauteste Bin des
+jeweiligen 30-s-Fensters — siehe Abschnitt 6). Der 16-Bit-Rauschboden liegt bei
 −96 dBFS und damit darunter. Erst wenn eine Aufnahme unter etwa **−24 dBFS
 Spitzenpegel** liegt, wandert der Mel-Boden so weit mit, dass die Quantisierung
 sichtbar wird — und dort liegt das akustische Grundrauschen jeder realen
@@ -171,14 +172,14 @@ zweimal reproduzierbar — auf der zweiten Passage kehrte sich das Vorzeichen um
 (`noScribe/whisper_mp_worker.py:140`); Segmentierung und Fensterung passieren
 dort intern, wir haben keinen Hebel.
 
-## 6. Warum der Mel-Pfad unverändert bleibt
+## 6. Der Mel-Pfad: gemessen, dann von upstream übernommen
 
-mlx-voxtral berechnet das log-Mel **je 30-s-Block** und normalisiert jeden Block
-gegen sein eigenes Maximum. Voxtral spezifiziert ein Spektrogramm über die ganze
-Eingabe, das erst danach geteilt wird (arXiv:2507.13264 §2.1) — beim Clamp auf
-`log_max − 8` landet ein Block mit eigenem Maximum also auf einem anderen Boden.
-Auf 90 s Sprache waren die Blockmaxima 1,897 / 1,721 / 1,526 bei einem
-Dateimaximum von 1,897.
+mlx-voxtral berechnete das log-Mel bis 0.0.5 **je 30-s-Block** und normalisierte
+jeden Block gegen sein eigenes Maximum. Voxtral spezifiziert ein Spektrogramm
+über die ganze Eingabe, das erst danach geteilt wird (arXiv:2507.13264 §2.1) —
+beim Clamp auf `log_max − 8` landet ein Block mit eigenem Maximum also auf einem
+anderen Boden. Auf 90 s Sprache waren die Blockmaxima 1,897 / 1,721 / 1,526 bei
+einem Dateimaximum von 1,897.
 
 Eine echte Abweichung, gemeldet und mit Patch
 ([mzbac/mlx.voxtral#3](https://github.com/mzbac/mlx.voxtral/issues/3),
@@ -199,9 +200,18 @@ Unterschied — jene Referenz ist aber um 0,25 CER-Punkte zugunsten des Builds
 verzerrt, aus dessen Entwurf sie korrigiert wurde. Zwei Passagen entscheiden das
 nicht. Skript: `mel_stream.py`.
 
-**Also nicht eingebaut.** Ohne Qualitätsgewinn wiegt ein Patch auf einer
-Fremdbibliothek schwerer als die Architekturtreue; upstream ist die Änderung
-trotzdem richtig, dort kostet sie nichts.
+**Also nicht selbst gepatcht** — ohne Qualitätsgewinn wiegt ein Patch auf einer
+Fremdbibliothek schwerer als die Architekturtreue. Upstream war die Änderung
+trotzdem richtig, und dort ist sie inzwischen drin: mzbac hat PR #5 am 2026-08-22
+gemergt und mit **0.0.6** veröffentlicht, worauf `requirements_voxtral_macOS_arm64.txt`
+jetzt zeigt. Der Produktionspfad rechnet damit ab sofort referenztreu.
+
+Der Bump ist keine Kosmetik — er ändert die Encoder-Eingabe. Auf 300 s echtem
+Podcast-Material gegen die alte Fassung: max|diff| **1,30**, und **90 %** aller
+Frames weichen um mehr als 1e-4 ab. Gegen die Referenz (transformers'
+`VoxtralFeatureExtractor`, gleicher Aufbau: ganze Datei, dann `reshape` in
+30-s-Blöcke) bleiben **0,00017** — Float32-Rauschen. Es ist genau die Differenz,
+die oben gemessen wurde: der Versionssprung ist am Transkript folgenlos.
 
 ## 7. Was die Literatur bestätigt
 

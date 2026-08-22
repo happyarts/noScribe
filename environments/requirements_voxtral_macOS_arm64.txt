@@ -10,17 +10,22 @@
 #
 # mlx-voxtral is pinned because the engine was validated against one version,
 # not because upstream is dead: it went a year without a release, then in
-# 2026-08 relicensed to MIT and merged a fix. mlx and mlx-lm
-# are pinned too because voxtral_engine drives decoding through mlx_lm internals
-# (generate_step + a small model adapter); a newer mlx-lm could change that API
-# or break the frozen mlx-voxtral. These are the versions the engine and its
-# byte-identity tests were validated against -- bump them deliberately, together.
-mlx==0.32.0
+# 2026-08 relicensed to MIT and shipped two releases in one day. mlx and
+# mlx-lm are pinned too because voxtral_engine drives decoding through mlx_lm
+# internals (generate_step + a small model adapter); a newer mlx-lm could change
+# that API or break the frozen mlx-voxtral. These are the versions the engine
+# and its byte-identity tests were validated against -- bump them deliberately,
+# together.
+mlx==0.32.1
 mlx-lm==0.31.3
-# 0.0.5 carries the stop-token fix (32000 is the text token " Capital", not a
-# pad token) and is the first release under plain MIT -- 0.0.4 and earlier were
-# "Personal Use Only", which GPL-3.0 could not have carried.
-mlx-voxtral==0.0.5
+# 0.0.6 is the first release that carries every fix this engine works around:
+# the stop-token one from 0.0.5 (32000 is the text token " Capital", not a pad
+# token) plus the log-Mel and embedding-merge ones. The log-Mel is now computed
+# over the whole audio and split afterwards, as Voxtral specifies, which changes
+# the encoder input on most frames -- measured to cost nothing at the
+# transcript (dWER +0.02 [-0.19, +0.24]), see docs/voxtral-audio-vorverarbeitung.md
+# section 6. mlx>=0.32.1 is its own floor, not ours.
+mlx-voxtral==0.0.6
 # transformers 5 is what the engine was validated against, and mlx-lm 0.31.3
 # already requires it -- a lower floor here only allowed an untested 4.x to
 # satisfy this file while pip installed 5 anyway.

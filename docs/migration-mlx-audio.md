@@ -23,6 +23,12 @@ otherwise block the Voxtral engine from going upstream. Background:
 > v0.0.5, he merged our stop-token fix, and he cut the first release in a year.
 > The licence conflict that made this migration necessary no longer exists.
 >
+> Seven hours later, he merged the remaining three fixes (log-Mel, single-scatter
+> merge, no in-place mutation of a caller's `inputs_embeds`), vectorised the
+> merge further, added unit tests and released **0.0.6** — which the pin now
+> points at. The two library defects this brief lists as reasons to prefer
+> mlx-audio are fixed in mlx-voxtral itself.
+>
 > Do not work through this file unless something *else* makes the move
 > worthwhile — mlx-voxtral going quiet again, an MLX bump breaking it, or a
 > decision to ship a second engine, where mlx-audio's model collection pays for

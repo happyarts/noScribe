@@ -1,10 +1,10 @@
 """Unit tests for _Voxtral._merged_embeddings, the audio/text prompt merge.
 
 The prompt is almost entirely [AUDIO] placeholders (375 tokens per 30 s), and
-the projected audio embeddings have to land on exactly those positions. This
-replaces mlx_voxtral's `_merge_input_embeddings`, which walks the sequence and
-tests `j in audio_positions` against a list -- quadratic in the prompt, 1.75 s
-on a 600 s pass. The reference (transformers) does it in one `masked_scatter`.
+the projected audio embeddings have to land on exactly those positions. The
+engine merges them itself rather than calling mlx_voxtral's private
+`_merge_input_embeddings` (equivalent since 0.0.6, on the batch of 1 production
+uses) -- so these run in CI, where the model-gated smoke test does not.
 
 Driven with a stub model: no weights, no real Voxtral, but real mlx arrays,
 because the dtype promotion these pin is an mlx behaviour.
@@ -92,6 +92,27 @@ def test_several_batch_rows_each_get_their_own_audio():
     audio = _audio(2, batch=2)
     out = _engine(audio)._merged_embeddings({"input_ids": ids, "input_features": "mel"})
     assert mx.all(out[0, 0:2] == audio[0]) and mx.all(out[1, 1:3] == audio[1])
+
+
+def test_one_audio_stream_is_shared_by_every_batch_row():
+    """get_audio_embeds returns [1, n, hidden] whatever went in, so a multi-row
+    prompt shares it. Indexing it per row reads past the end, and mlx answers
+    that with zeros instead of raising -- audio silently replaced by nothing."""
+    ids = mx.array([[AUDIO_ID, AUDIO_ID, 3], [4, AUDIO_ID, AUDIO_ID]])
+    audio = _audio(2)  # batch 1, as the encoder really returns it
+    out = _engine(audio)._merged_embeddings({"input_ids": ids, "input_features": "mel"})
+    assert mx.all(out[0, 0:2] == audio[0]) and mx.all(out[1, 1:3] == audio[0])
+
+
+def test_an_impossible_stream_count_is_refused_rather_than_zero_filled():
+    """Neither one shared stream nor one per row. Indexing past the end of an
+    mlx array returns zeros rather than raising, so the prompt would silently
+    lose its audio."""
+    ids = mx.array([[AUDIO_ID, AUDIO_ID], [AUDIO_ID, AUDIO_ID],
+                    [AUDIO_ID, AUDIO_ID]])
+    with pytest.raises(ValueError, match="audio streams"):
+        _engine(_audio(2, batch=2))._merged_embeddings(
+            {"input_ids": ids, "input_features": "mel"})
 
 
 def test_a_prompt_without_audio_is_just_the_text_embeddings():

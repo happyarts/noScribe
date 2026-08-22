@@ -4,6 +4,9 @@ Everything here was measured on an M1 Max (32 GB) with `mlx-voxtral` 0.0.4.
 The scripts are in `docs/skripte/`, the builds are made with
 `tools/quantize_voxtral.py`.
 
+(The pin has since moved to 0.0.6; its log-Mel change leaves build-vs-build
+comparisons untouched — see `voxtral-audio-vorverarbeitung.md`, section 6.)
+
 ## The short answer
 
 Ship **`voxtral-mini-8bit`**: the 3B weights at 8 bit with the **audio encoder
@@ -347,7 +350,7 @@ python docs/skripte/encoder_diff.py models/voxtral-mini-8bit \
 
 # the Parakeet comparison (needs `pip install parakeet-mlx`, which is NOT in
 # the requirements -- it pulls only dacite on top of what is already installed,
-# and mlx 0.32.0 satisfies its floor, so it can be added and removed without
+# and mlx 0.32.1 satisfies its floor, so it can be added and removed without
 # disturbing the pinned Voxtral stack)
 python docs/skripte/engines/parakeet_wer.py ref \
     Audiotest2/referenz/hart_780-900_REFERENZ.txt \
@@ -744,8 +747,9 @@ of the download falls back to plain HTTP and works.
 a "Personal Use License" — MIT plus a ban on commercial use — which noScribe's
 GPL-3.0 could not carry, and that made moving to MIT-licensed `mlx-audio` a
 prerequisite rather than a cleanup. Asked the author to relicense; he did, within
-a day, and the repository is plain MIT as of v0.0.5. He also merged the
-stop-token fix and cut a release, after a year of silence.
+a day, and the repository is plain MIT as of v0.0.5. He also merged every fix we
+had reported — stop token, log-Mel, embedding merge, in-place mutation — and cut
+two releases seven hours apart, after a year of silence. The pin is now `0.0.6`.
 
 So the migration is shelved, not cancelled. Everything below stays on record
 because the *technical* findings are independent of the licence and would apply
@@ -790,10 +794,13 @@ What could move them is everything around it, and each is a separate check:
 Two things that are *not* concerns, checked rather than assumed. mlx-audio does
 not compute the log-Mel at all — it takes `input_features` straight from
 transformers' `VoxtralProcessor`, i.e. the reference — so the per-30-s-block
-normalisation defect reported against mlx-voxtral cannot occur there. And its
-audio path mirrors the reference line for line: `audio_tower(x).reshape(-1,
+normalisation defect once reported against mlx-voxtral cannot occur there. And
+its audio path mirrors the reference line for line: `audio_tower(x).reshape(-1,
 intermediate_size)` then the projector, exactly as `VoxtralModel.get_audio_features`
-does, with the embedding merge already a scatter rather than the quadratic walk.
+does, with the embedding merge already vectorised rather than the quadratic walk.
+Both of those were an advantage over mlx-voxtral 0.0.4; since 0.0.6 they are
+merely a draw — that library computes the log-Mel over the whole audio and
+vectorises the merge as well.
 
 None of that argues against the move; it argues that the move is a measurement
 exercise, not a port. The trigger to start it is `mlx-voxtral` breaking against

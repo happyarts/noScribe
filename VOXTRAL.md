@@ -25,12 +25,22 @@ They are downloaded on first use.
 `mlx`, `mlx-lm` and `mlx-voxtral` are pinned to exact versions.
 [`mlx-voxtral`](https://github.com/mzbac/mlx.voxtral) went untouched between
 2025-08 and 2026-08, so the pin started life as a deliberate freeze; the author
-has since relicensed it to plain MIT and merged a fix, so it is a normal
-version constraint again. `mlx-lm` is pinned because decoding drives
-`generate_step` directly.
+has since relicensed it to plain MIT and merged all four fixes this engine had
+reported, so it is a normal version constraint again. `mlx-lm` is pinned because
+decoding drives `generate_step` directly. `tests/test_voxtral_pin.py` checks that
+the installed versions are the pinned ones.
 
-This is a known liability, so here is the exit route, measured rather than
-assumed. **The coupling is five calls** — `load_voxtral_model`,
+The pin is `0.0.6`. One of those fixes moves this engine's output — the log-Mel
+is now computed over the whole audio rather than per 30-second chunk, changing
+the encoder input on most frames — and it was measured over 92 minutes of paired
+audio to cost nothing at the transcript (dWER +0.02 [−0.19, +0.24]); see
+[docs/voxtral-audio-vorverarbeitung.md](docs/voxtral-audio-vorverarbeitung.md),
+section 6.
+
+The pinning is a known liability, so here is the exit route, measured rather
+than assumed. **The coupling is five calls** (plus a handful of attribute reaches —
+`embed_tokens`, `get_audio_embeds`, `config.audio_token_id`, `language_model`,
+`lm_head`) — `load_voxtral_model`,
 `VoxtralProcessor`, `apply_transcrition_request`, `model.generate` (the
 non-greedy fallback only) and `proc.decode`, plus `mlx_voxtral.quantization`
 and `download_model` in `tools/quantize_voxtral.py`. Everything else in

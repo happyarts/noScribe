@@ -39,7 +39,7 @@ scripts to find candidates, never to decide.
 "nothing" means transformers already supports the architecture natively, so the
 venv does not have to be touched at all. `parakeet-mlx` is the one exception: it
 adds only `dacite` on top of what is installed and its `mlx>=0.22.1` floor is
-satisfied by the pinned 0.32.0, so it can be installed and removed without
+satisfied by the pinned 0.32.1, so it can be installed and removed without
 disturbing the Voxtral stack. Verify with `pip freeze` before and after — it
 should come back byte-identical.
 

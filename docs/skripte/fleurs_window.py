@@ -4,7 +4,12 @@ Der Feature-Extractor zerlegt jede Eingabe in 30-Sekunden-Fenster und füllt das
 letzte mit Nullen auf (`mlx_voxtral/audio_processing.py`, `process_audio_chunk`).
 Unser Chunker schneidet an Sprechpausen, nicht am 30-s-Raster -- eine Äußerung
 kann also mitten auf einer Fenstergrenze liegen und wird dann von zwei Encoder-
-Fenstern gesehen, jedes mit eigenem `log_max`-Boden.
+Fenstern gesehen.
+
+(Bis mlx-voxtral 0.0.5 hatte dabei jedes Fenster zusätzlich einen eigenen
+`log_max`-Boden; seit 0.0.6 wird über die ganze Datei normalisiert. Der geteilte
+Encoder-Blick auf die Äußerung bleibt, die Nullmessung unten gilt weiter -- eine
+Wiederholung würde nur noch den Positionseffekt messen, nicht mehr den Boden.)
 
 Wenn die Position im Raster etwas ausmacht, wäre das ein kostenloser Gewinn: der
 Chunker müsste seine Schnitte nur zusätzlich am 30-s-Raster ausrichten. Wenn

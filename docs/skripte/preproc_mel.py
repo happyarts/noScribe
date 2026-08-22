@@ -28,7 +28,15 @@ WINDOW = 30 * SR
 
 
 def mel(a):
-    """Log-mel over the whole clip, one 30 s window at a time, as the model sees it."""
+    """Log-mel over the whole clip, one 30 s window at a time.
+
+    This was how the model saw it up to mlx-voxtral 0.0.5. Since 0.0.6 the
+    spectrogram is computed over the whole audio and split afterwards, so the
+    per-window clamp floor this reproduces is gone -- and the variants that
+    move the file-wide maximum (p1-headroom3, p3-peak1) are exactly the ones
+    that would read differently. `process_audio_chunk` still exists, so a
+    rerun succeeds and silently measures the retired path.
+    """
     out = []
     for i in range(0, len(a), WINDOW):
         out.append(np.array(process_audio_chunk(a[i:i + WINDOW])))

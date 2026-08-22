@@ -1,8 +1,13 @@
 """Kostet die Per-Block-Normalisierung des log-Mel etwas? Auf langen Strömen.
 
-mlx-voxtral berechnet das log-Mel je 30-s-Block und normalisiert jeden Block
-gegen sein eigenes Maximum. Voxtral spezifiziert ein Spektrogramm über die ganze
-Eingabe, das erst danach geteilt wird (arXiv:2507.13264 §2.1) -- der Clamp liegt
+HISTORISCH: seit mlx-voxtral 0.0.6 ist `mel-ref` der eingebaute Pfad; beide
+Varianten sind identisch und die Kontroll-Assertion unten schlägt deshalb fehl.
+Für eine Wiederholung müsste `stock` die 0.0.5-Fassung von
+`_process_audio_array_with_chunking` sein. Ergebnis: §6 des Messdokuments.
+
+mlx-voxtral berechnete das log-Mel bis 0.0.5 je 30-s-Block und normalisierte
+jeden Block gegen sein eigenes Maximum. Voxtral spezifiziert ein Spektrogramm
+über die ganze Eingabe, das erst danach geteilt wird (arXiv:2507.13264 §2.1) -- der Clamp liegt
 bei `log_max - 8`, ein Block mit eigenem Maximum landet also auf einem anderen
 Boden.
 

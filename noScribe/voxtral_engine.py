@@ -1665,12 +1665,13 @@ class _Voxtral:
 
     # Control-token ids that end a generation: </s>, [/INST] and <pad>.
     #
-    # mlx_voxtral.generate_stream defaults to (2, 4, 32000) and calls 32000 "a
-    # potential padding token". It is not one: Voxtral's Tekken vocabulary has
-    # 131072 entries of which only the first 1000 are control tokens, <pad> is
-    # id 11, and id 32000 is the ordinary text token " Capital". Treating it as
-    # a stop truncated every pass that transcribed that word ("Venture Capital")
-    # mid-sentence and threw away the rest of the chunk -- silently, because the
+    # mlx_voxtral.generate_stream defaulted to (2, 4, 32000) up to 0.0.4 and
+    # called 32000 "a potential padding token" (it defaults to (2, 4, 11) since
+    # 0.0.5). It is not one: Voxtral's Tekken vocabulary has 131072 entries of
+    # which only the first 1000 are control tokens, <pad> is id 11, and id 32000
+    # is the ordinary text token " Capital". Treating it as a stop truncated
+    # every pass that transcribed that word ("Venture Capital") mid-sentence and
+    # threw away the rest of the chunk -- silently, because the
     # truncated text is clean prose, so neither _looks_degenerate nor the loop
     # breaker flags it and no retry rung fires. These values are only the
     # fallback; __init__ reads the real ids off the processor.
@@ -1731,18 +1732,16 @@ class _Voxtral:
     def _merged_embeddings(self, mi):
         """Audio embeddings written into the prompt at the [AUDIO] placeholders.
 
-        Bit-identical to mlx_voxtral's `_merge_input_embeddings`, but it places
-        them in one scatter instead of walking the sequence. That walk tests
-        `j in audio_positions` against a *list* for every token, so it is
-        quadratic in the prompt, and the prompt is almost all audio (375 tokens
-        per 30 s): measured 1.75 s on a 600 s pass, against ~0.1 s here. The
-        reference does the same thing in one `masked_scatter`.
+        Kept rather than calling the library's `_merge_input_embeddings`, which
+        since 0.0.6 does the same thing (bit-identical on the batch of 1 that
+        production uses, same peak memory, same wall clock -- measured on a
+        300 s prompt): it is private API, and this copy is testable without the
+        model, so CI covers it where the model-gated smoke test cannot.
 
         The dtype promotion is load-bearing. `embed_tokens` returns bf16 while
-        the projector returns float32, and the walk's final `mx.stack` promotes
-        the whole sequence to float32. Scattering into the bf16 array instead
-        would silently round every audio embedding to bf16 -- a change that
-        looks like nothing and shows up only as different logits.
+        the projector returns float32; scattering into the bf16 array would
+        silently round every audio embedding away -- a change that looks like
+        nothing and shows up only as different logits.
         """
         mx = self._mx
         import numpy as np
@@ -1754,6 +1753,16 @@ class _Voxtral:
         audio_embeds = model.get_audio_embeds(features)
         embeds = model.embed_tokens(input_ids).astype(audio_embeds.dtype)
         ids = np.array(input_ids)
+        # get_audio_embeds returns one stream ([1, n, hidden]) however many 30 s
+        # chunks went in, so a multi-row prompt shares it. Any other count is
+        # refused here rather than indexed: reading past the end of an mlx array
+        # yields *zeros* instead of raising, which would replace the audio with
+        # silence -- invisible in the text, visible only as wrong logits.
+        n_audio = audio_embeds.shape[0]
+        if n_audio not in (1, ids.shape[0]):
+            raise ValueError(
+                f"{n_audio} audio streams for a prompt of {ids.shape[0]} rows; "
+                f"expected one shared stream or one per row.")
         for i in range(ids.shape[0]):
             pos = np.where(ids[i] == model.config.audio_token_id)[0]
             if pos.size == 0:
@@ -1762,7 +1771,7 @@ class _Voxtral:
                 raise ValueError(
                     f"Batch {i}: {audio_embeds.shape[1]} audio embeddings for "
                     f"{pos.size} [AUDIO] placeholders in the prompt.")
-            embeds[i, mx.array(pos)] = audio_embeds[i]
+            embeds[i, mx.array(pos)] = audio_embeds[i if n_audio > 1 else 0]
         return embeds
 
     def _fast_generate(self, mi, max_new_tokens, token_cb=None,
@@ -1852,8 +1861,11 @@ class _Voxtral:
             # 32000 is the ordinary text token " Capital" -- so this branch,
             # the penalty rung of the loop ladder, silently truncated any
             # retry containing that word while the fast path above did not.
-            # Fixed upstream in 0.0.5, but passing it keeps the two paths
-            # provably identical on any version.
+            # Fixed upstream in 0.0.5, but the kwarg is not version paranoia
+            # and must not be dropped: _STOP_TOKENS is resolved from *this
+            # build's* processor, while the library hardcodes (2, 4, 11). On a
+            # build that numbers its control tokens differently, dropping it
+            # would stop this branch on different ids than the fast path.
             out = self.model.generate(**mi, max_new_tokens=max_new_tokens,
                                       temperature=temperature,
                                       repetition_penalty=repetition_penalty,
