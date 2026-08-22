@@ -27,6 +27,12 @@ Usage:
     python tools/quantize_voxtral.py <source-repo-or-dir> <output-dir> \
         [bits] [group] [mode] [--lm-head-bits N] [--encoder-bits N]
 
+    group: 32, 64 (default) or 128 -- the only sizes MLX supports, and it must
+           divide the last dimension of every tensor being quantised. Both
+           Voxtral releases satisfy all three; a checkpoint that does not is
+           refused before quantising, because mlx_lm would otherwise skip the
+           offending tensors silently and leave them dense.
+
     mode: uniform    -- every quantizable tensor at [bits] (default)
           mixed      -- audio tower, projector and lm_head two bits higher
                         (only meaningful below 8 bit)
@@ -68,6 +74,7 @@ from mlx_voxtral.quantization import (
 )
 
 SUPPORTED_BITS = (4, 5, 6, 8)   # MLX affine quantisation
+SUPPORTED_GROUPS = (32, 64, 128)  # mx.quantize accepts no others
 MODES = ("uniform", "mixed", "dense-audio", "dense-encoder")
 
 # Validate EVERYTHING before touching the network: a typo discovered after the
@@ -112,6 +119,10 @@ def _width(flag):
 
 if bits not in SUPPORTED_BITS:
     sys.exit(f"bits must be one of {SUPPORTED_BITS}, got {bits}")
+if group not in SUPPORTED_GROUPS:
+    # Checked here, before the download, because MLX rejects everything else
+    # and the rejection would otherwise arrive an hour into a 48 GB fetch.
+    sys.exit(f"group must be one of {SUPPORTED_GROUPS}, got {group}")
 if mode not in MODES:
     sys.exit(f"mode must be one of {MODES}, got {mode!r}")
 if mode == "mixed" and bits >= 8 and "--lm-head-bits" not in overrides \
@@ -166,8 +177,13 @@ def mixed(path, module, *rest):
     voxtral_mixed_quantization_predicate: the library additionally boosts the
     MLP projections of the first and last two language-model layers and adapts
     group sizes per tensor. Measured here (see docs/voxtral-benchmarks.md),
-    even the sensitive-tensor boost changes nothing on real audio, so the
-    extra machinery was not carried over.
+    even the sensitive-tensor boost changes nothing on real audio, so it was
+    not carried over. The per-tensor group adaptation was not carried over for
+    a different reason: it does not work. mlx_lm's quantize_model filters on
+    the *global* group size before any custom predicate is consulted, so a
+    tensor the group does not divide is skipped whatever a predicate returns
+    for it. The group check before the quantize_model call below covers that
+    case instead, by refusing.
     """
     if not _quantizable(path, module):
         return False
@@ -227,6 +243,50 @@ def predicate(path, module, *rest):
     if encoder_bits is not None and any(x in path for x in ENCODER):
         return False if encoder_bits is False else {"group_size": group, "bits": encoder_bits}
     return result
+
+
+# Refuse a group size that does not divide every tensor we mean to quantise.
+#
+# This is not defensive noise, and it cannot be delegated. mlx_lm's
+# quantize_model wraps our predicate in one of its own that starts with
+#
+#     if module.weight.shape[-1] % group_size != 0: return False
+#
+# against the *global* group size -- so a tensor it does not divide is skipped
+# silently, before our predicate is ever asked, and stays bf16 with no message.
+# The build then looks finished: it loads, it transcribes, it is simply bigger
+# and slower than the tables in docs/voxtral-quantisierung.md say, and nothing
+# names the layer that was left out. mlx_voxtral's own predicate has a fallback
+# to group_size 32 for exactly this case; driven through quantize_model it is
+# dead code, because the wrapper has already skipped the tensor (verified in
+# tests/test_quantize_group_guard.py). Both Voxtral releases divide by all three
+# supported group sizes, so this never fires today -- it exists so that a
+# checkpoint with a different hidden dimension stops here, loudly, instead of
+# producing a quietly mixed build.
+skipped = []
+for _path, _module in model.named_modules():
+    if not _path or not hasattr(_module, "to_quantized"):
+        continue
+    if not predicate(_path, _module):
+        continue                      # meant to stay dense; not our problem
+    _last = _module.weight.shape[-1]
+    if _last % group:
+        skipped.append((_path, _last))
+if skipped:
+    shutil.rmtree(tmp_out)
+    _lines = "\n".join(f"  {p} (last dimension {n})" for p, n in skipped[:10])
+    _more = f"\n  ... and {len(skipped) - 10} more" if len(skipped) > 10 else ""
+    _works = [g for g in SUPPORTED_GROUPS if all(n % g == 0 for _, n in skipped)]
+    sys.exit(
+        f"group size {group} does not divide {len(skipped)} tensor(s) that this "
+        f"mode quantises:\n{_lines}{_more}\n"
+        + (f"Use group {' or '.join(map(str, _works))} instead."
+           if _works else
+           "No supported group size divides all of them; this checkpoint needs "
+           "a per-tensor group size, which mlx_lm's quantize_model cannot "
+           "express.")
+        + "\nRefusing rather than letting those tensors be skipped silently.")
+
 print(f"quantizing to {bits} bit (group size {group}, mode {mode}) ...", flush=True)
 qmodel, qconfig = quantize_model(
     model, config, group_size=group, bits=bits, quant_predicate=predicate,
