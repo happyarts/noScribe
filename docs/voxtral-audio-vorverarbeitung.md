@@ -292,10 +292,14 @@ Kosten. Was vor einem Einbau fehlt: die Dosis-Wirkung auf einer zweiten Passage
 und auf VoxPopuli-Strömen mit eingesetztem Transienten — +5,21 steht bislang auf
 einer Passage.
 
-**Nebenbefund, offen:** `faster_whisper/feature_extractor.py:227` trägt dieselbe
-Zeile, und noScribe übergibt Whisper die ganze Datei. Ein Effekt ließ sich dort
-aber **nicht zeigen**: Whispers eigene Streuung auf `hart` (9,00 % mit VAD gegen
-21,09 % ohne) ist größer als der gesuchte Unterschied. Offen, nicht widerlegt.
+**Nebenbefund, weiterhin offen:** `faster_whisper/feature_extractor.py:227`
+trägt dieselbe Zeile, und noScribe übergibt Whisper die ganze Datei. Auf acht
+Strömen (40,6 min, 28,9 dB Bodenanstieg) kostet der Transient dort
+**+0,60 [−2,85, +3,33]** mit VAD und **+0,95 [−0,44, +2,37]** ohne — im
+Vorzeichen einig mit Voxtral, aber beide Intervalle enthalten die Null. Whispers
+Streuung ist rund viermal so breit wie Voxtrals, die Stichprobe trägt es also
+nicht. Nicht widerlegt, nur nicht gezeigt; für eine Entscheidung bräuchte es
+deutlich mehr Ströme.
 
 ## 7. Was die Literatur bestätigt
 

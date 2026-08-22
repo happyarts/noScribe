@@ -32,15 +32,33 @@ from noScribe.voxtral_engine import _Voxtral                 # noqa: E402
 from voxpopuli_floor import PercentileFloor, load_clips      # noqa: E402
 
 
-def with_spike(x, db_over, at=0.45, ms=100):
-    """Ein `ms` langer Vollpegel-Impuls, skaliert auf `db_over` über der
-    Sprachspitze dieses Stroms."""
+def pair(x, db_over, at=0.45, ms=100):
+    """(sauber, mit Knall) bei garantierter Dosis `db_over` über der Sprachspitze.
+
+    Der Knall wird **nicht** über die Sprachspitze hinaus verstärkt, sondern das
+    Audio wird gedämpft und der Impuls auf Vollausschlag gesetzt. Der Umweg ist
+    nötig, weil echtes Material bereits bis 1,0 ausgesteuert ist: ein
+    hochskalierter Impuls wird dort auf 1,0 gekappt und die Dosis fällt
+    stillschweigend aus. Genau das ist bei einem ersten Lauf passiert -- die
+    verlangten +12 dB kamen als median 5,2 dB Bodenanstieg an, zwei Ströme sahen
+    0,1 dB, und das Ergebnis sah aus wie ein sauberer Nulleffekt.
+
+    Beide Rückgaben tragen dieselbe Dämpfung, der Vergleich ist also gepaart.
+    """
     a = np.array(x, dtype=np.float32, copy=True)
-    amp = float(np.abs(a).max()) * (10.0 ** (db_over / 20.0))
+    a *= (10.0 ** (-db_over / 20.0)) / max(float(np.abs(a).max()), 1e-9)
+    sp = a.copy()
     n = int(ms * SR / 1000)
     pos = int(at * len(a))
-    a[pos:pos + n] = min(amp, 1.0)
-    return a
+    sp[pos:pos + n] = 1.0
+    return a, sp
+
+
+def floor_rise_db(clean, spiked):
+    """Um wie viel hebt der Impuls den Clamp-Boden? Die Kontrolle, ob der
+    Eingriff überhaupt greift."""
+    from mel_outlier_gap import raw_log_mel
+    return (raw_log_mel(spiked).max() - raw_log_mel(clean).max()) * 10.0
 
 
 def main():
@@ -61,11 +79,18 @@ def main():
     def rate(rows, num, den):
         return sum(r[num] for r in rows) / max(1, sum(r[den] for r in rows)) * 100
 
+    # Greift die Dosis? Ohne diese Kontrolle misst der Lauf womöglich nichts.
+    rises = [floor_rise_db(*pair(x, db_over)) for x, _ in st]
+    print(f"# Kontrolle: Bodenanstieg median {np.median(rises):.1f} dB "
+          f"(min {min(rises):.1f}, max {max(rises):.1f})")
+    assert np.median(rises) > 0.7 * db_over, (
+        f"Dosis kommt nicht an: median {np.median(rises):.1f} dB statt ~{db_over}")
+
     def score(ex, spike):
         vox.proc.feature_extractor = ex
         rows, t0 = [], time.time()
         for x, words in st:
-            a = with_spike(x, db_over) if spike else np.ascontiguousarray(x, dtype=np.float32)
+            a = pair(x, db_over)[1 if spike else 0]
             hyp = norm(vox.transcribe_array(
                 a, "de", max_new_tokens=int(len(a) / SR * 20) + 512))
             rc, hc = "".join(words), "".join(hyp)

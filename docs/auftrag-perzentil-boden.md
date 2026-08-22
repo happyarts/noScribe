@@ -4,8 +4,10 @@ Diese Datei ist für eine frische Sitzung geschrieben. Sie ist ein **Arbeitsauft
 keine Dokumentation**: alles darin wurde am 2026-08-22 gemessen, und bei jeder Zahl
 steht, womit — damit nachgeprüft statt geglaubt wird.
 
-**Stand: noch nicht eingebaut.** Die Messlage trägt den Einbau, die Gegenargumente
-sind ernst und stehen vollständig in Abschnitt 4. Wer diesen Auftrag ausführt, soll
+**Stand: noch nicht eingebaut, aber begründet.** Der Schaden ist auf einem
+unabhängigen Korpus mit Intervallen nachgewiesen, die die Null ausschließen; die
+Abhilfe beseitigt ihn vollständig und kostet auf sauberem Material nichts. Die
+Gegenargumente sind ernst und stehen vollständig in Abschnitt 4. Wer diesen Auftrag ausführt, soll
 Abschnitt 4 gelesen haben, bevor er Abschnitt 5 anfasst.
 
 ## 1. Der Mechanismus, konkret
@@ -35,24 +37,39 @@ Frames im unberührten Audio davor.
 
 ## 2. Was das kostet
 
-Dosis-Wirkung auf beiden Handreferenzen. Das Audio wird gedämpft, der Knall bleibt
-konstant, verglichen wird immer *innerhalb* eines Bodens (sauber gegen Knall) —
-damit fällt jede Verzerrung eines Referenztranskripts heraus.
+Das Audio wird gedämpft, der Impuls bleibt auf Vollausschlag — so kommt die Dosis
+garantiert an. (Umgekehrt herum, den Impuls über die Sprachspitze zu verstärken,
+scheiterte still: echtes Material ist bereits bis 1,0 ausgesteuert, der Impuls
+wurde gekappt, und aus verlangten +12 dB wurden 5,2 dB Bodenanstieg. Der Lauf sah
+aus wie ein sauberer Nulleffekt. `voxpopuli_spike.py` bricht deshalb jetzt ab,
+wenn die Dosis nicht ankommt.) Verglichen wird immer *innerhalb* eines Bodens
+(sauber gegen Knall) — damit fällt jede Verzerrung einer Referenz heraus.
 
-| Knall über der Sprachspitze | `hart` max | `hart` Perz. | `zoom` max | `zoom` Perz. |
-|---|---|---|---|---|
-| ~ +2,6 / +0,3 dB | +1,66 | +0,00 | −0,12 | +0,00 |
-| ~ +14,7 / +12,4 dB | +2,61 | +0,24 | +1,86 | +0,00 |
-| ~ +27,1 / +24,8 dB | **+5,21** | +0,00 | **+11,99** | +0,00 |
+**Die belastbare Messung** — zehn VoxPopuli-Ströme à 300 s (50,6 min), jeder
+einmal sauber und einmal mit Transient, gepaart je Boden:
 
-dWER in Punkten. Monoton auf beiden Passagen, der Perzentil-Boden praktisch flach.
-+11,99 Punkte sind 103 Wörter von 859 — bei einer leise ausgesteuerten Aufnahme mit
-einer zugeschlagenen Tür.
+| Bodenanstieg (Median) | max-Boden | Perzentil 99,9 |
+|---|---|---|
+| 5,2 dB | −0,07 [−0,29, +0,15] | +0,04 [+0,00, +0,09] |
+| 16,2 dB | **+0,35 [+0,03, +0,66]** \* | +0,03 [+0,00, +0,07] |
+| 28,2 dB | **+1,52 [+0,78, +2,26]** \* | +0,04 [+0,00, +0,10] |
 
-**Echtheitsmerkmal, das anfangs wie ein Verdachtsmoment aussah:** auf `hart` kostet
-der Knall an drei verschiedenen Positionen (5 %, 45 %, 85 %) **exakt gleich viel**
-(+1,66). Das ist genau, was der Mechanismus vorhersagt — der Boden steigt
-positionsunabhängig — und deshalb ein Beleg, keine Auffälligkeit.
+\* = Intervall schließt die Null aus. Monoton; der Perzentil-Boden ist flach.
+
+**Die Passagenzahlen überschätzen — nicht zitieren.** Auf den beiden
+handkorrigierten Passagen ergab dieselbe Behandlung +5,21 (`hart`) und +11,99
+(`zoom`), also das Vier- bis Achtfache. Unter Greedy-Decoding kippt auf einer
+einzelnen Passage ein Token und der Rest zieht nach. **+1,52 bei 28 dB ist die
+Zahl, die trägt.**
+
+Aus demselben Grund ist eine frühere Beobachtung *kein* Beleg: dass der Schaden
+auf `hart` an drei Knallpositionen exakt gleich groß war, zeigt Determinismus
+(derselbe Boden, dieselbe eine Divergenz), nicht Allgemeinheit.
+
+**Welche echten Geräusche welche Dosis erzeugen** (gleiche Spitzenamplitude,
+leise Aufnahme): Klatschen 10,3 dB, Rauschburst 17,3 dB, **tieffrequenter
+Türknall 27,1 dB**, Rechteckblock 31,5 dB. Der teuerste Fall ist der
+alltäglichste.
 
 **Der Ausreißer ist kein Laborartefakt.** Abstand zwischen der lautesten Mel-Zelle
 und dem 99,9-Perzentil in echtem Material (`mel_outlier_gap.py`):
@@ -85,7 +102,7 @@ dort also real um 13 dB gesenkt, ohne Wirkung.
 
 **Die Asymmetrie, die beide Befunde zusammenbringt:** den Boden zu *senken* zeigt mehr
 Rauschdetail, das das Modell ignoriert (VoxPopuli: null). Den Boden zu *heben* zerstört
-leise Sprachdetails (Knalltests: bis +11,99). Der Perzentil-Boden liegt **immer** unter
+leise Sprachdetails (Knalltests: +1,52 auf Strömen). Der Perzentil-Boden liegt **immer** unter
 oder gleich dem Maximum-Boden — er kann also nur verhindern, dass gehoben wird.
 
 ## 4. Was dagegen spricht — vor dem Einbau lesen
@@ -124,10 +141,18 @@ floor = np.percentile(raw, 99.9) - 8.0
 mel = (np.maximum(raw, floor) + 4.0) / 4.0
 ```
 
-**Perzentil 99,9.** Auf `hart` sauber gemessen: 99,9 → 4,50 %/3,10 %, 99,0 → 5,45 %/3,29 %,
-99,99 → 4,98 %/3,34 %, Maximum → 4,27 %/3,39 %. 99,0 ist erkennbar schlechter, 99,9 der
-beste Kompromiss. **Ein Sweep über mehrere Perzentile auf VoxPopuli fehlt und wäre die
-sinnvollste zusätzliche Messung.**
+**Perzentil 99,9 — die Wahl ist unkritisch.** Sweep auf denselben zehn Strömen,
+alle gegen dieselbe Max-Basis gepaart:
+
+| Boden | WER | gepaart gegen max |
+|---|---|---|
+| max (Ist) | 11,39 % | — |
+| Perzentil 99 | 11,27 % | dWER −0,12 [−0,85, +0,49] |
+| Perzentil 99,9 | 11,29 % | dWER −0,10 [−0,83, +0,47] |
+| Perzentil 99,99 | 11,14 % | dWER −0,25 [−0,99, +0,31] |
+
+Alle drei ununterscheidbar vom Maximum und voneinander, alle drei nominell
+minimal besser. 99,9 nehmen, weil es in den Schadensläufen verwendet wurde.
 
 ## 6. Abnahmekriterien
 
@@ -160,10 +185,12 @@ sinnvollste zusätzliche Messung.**
 
 * **Der Whisper-Pfad trägt dieselbe Zeile** (`faster_whisper/feature_extractor.py:227`),
   und noScribe übergibt Whisper die ganze Datei — es beträfe also die Standard-Engine
-  aller Nutzer. Ein Effekt ließ sich **nicht zeigen**: Whispers eigene Streuung auf
-  `hart` (9,00 % mit VAD gegen 21,09 % ohne) ist größer als der gesuchte Unterschied.
-  Offen, nicht widerlegt. Eine eigene Untersuchung wert, weil die Tragweite größer wäre
-  als bei Voxtral.
+  aller Nutzer. Auf acht Strömen (40,6 min, 28,9 dB Bodenanstieg):
+  **+0,60 [−2,85, +3,33]** mit VAD, **+0,95 [−0,44, +2,37]** ohne. Im Vorzeichen
+  einig mit Voxtral, beide Intervalle enthalten aber die Null — Whispers Streuung
+  ist rund viermal so breit. Nicht widerlegt, nur nicht gezeigt.
+  `docs/skripte/whisper_spike_streams.py` ist fertig; es bräuchte deutlich mehr
+  Ströme. Die Tragweite wäre größer als bei Voxtral.
 * **Chunk-Kopplung.** Der Boden wird über das berechnet, was in einem Durchgang übergeben
   wird — bei uns also über die vom Chunker gewählte Länge. Gemessen: dieselben 150 s in
   zwei Chunkungen verschieben den Boden um 1,14 dB und verändern 100 % der Frames. Der
@@ -177,5 +204,6 @@ sinnvollste zusätzliche Messung.**
 | `docs/skripte/voxpopuli_floor.py` | gepaarter Vergleich der Böden auf sauberem VoxPopuli; enthält `PercentileFloor` und `load_clips` |
 | `docs/skripte/voxpopuli_spike.py` | Transientenschaden über viele Ströme, gepaart je Boden |
 | `docs/skripte/mel_outlier_gap.py` | Abstand Maximum zu Perzentil in echtem Material, ohne Modell |
+| `docs/skripte/whisper_spike_streams.py` | derselbe Test auf der Whisper-Standardengine, beide VAD-Zustände |
 
 Alle mit `venv/bin/python3` starten (es gibt kein `python`).
