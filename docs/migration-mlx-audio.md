@@ -1,39 +1,27 @@
 # Brief: move the Voxtral engine from mlx-voxtral to mlx-audio
 
-Hand this file to a fresh session. It is a work order, not documentation — everything
-in it was verified on 2026-08-21 and the verification method is stated so you can
-re-check rather than trust.
+Hand this file to a fresh session **if** one of the triggers below has fired. It is
+a conditional work order, not a plan of record — nothing here is scheduled.
 
-## Why this is happening
+Facts re-verified 2026-08-22 against `mlx-voxtral` 0.0.6, `mlx-audio` 0.5.0 and
+`mlx` 0.32.1. Each states how it was checked, so you can re-check rather than trust.
 
-`mlx-voxtral` ships under a **"Personal Use License"**: MIT plus a ban on commercial
-use, including "using the Software to provide commercial services". **noScribe is
-GPL-3.0**, whose section 7 forbids further restrictions, and most of noScribe's users
-transcribe for paid work. `mlx-audio` is **MIT**.
+## When this becomes relevant
 
-So this is not a maintenance upgrade. It removes a licence conflict that would
-otherwise block the Voxtral engine from going upstream. Background:
-`VOXTRAL.md` (licence section) and `docs/voxtral-quantisierung.md`
-(*Moving off mlx-voxtral*).
+Not now. `mlx-voxtral` is MIT, actively maintained again, and carries every fix
+this project reported. Do the migration only if one of these happens:
 
-> **STOP — this migration is on hold as of 2026-08-22.**
->
-> [mzbac/mlx.voxtral#9](https://github.com/mzbac/mlx.voxtral/issues/9) asked the
-> copyright holder to relicense, and he did: the repository is **plain MIT** from
-> v0.0.5, he merged our stop-token fix, and he cut the first release in a year.
-> The licence conflict that made this migration necessary no longer exists.
->
-> Seven hours later, he merged the remaining three fixes (log-Mel, single-scatter
-> merge, no in-place mutation of a caller's `inputs_embeds`), vectorised the
-> merge further, added unit tests and released **0.0.6** — which the pin now
-> points at. The two library defects this brief lists as reasons to prefer
-> mlx-audio are fixed in mlx-voxtral itself.
->
-> Do not work through this file unless something *else* makes the move
-> worthwhile — mlx-voxtral going quiet again, an MLX bump breaking it, or a
-> decision to ship a second engine, where mlx-audio's model collection pays for
-> the work in one go. The findings below were measured and remain valid; only
-> the reason to act on them is gone.
+* **mlx-voxtral goes quiet again** and a defect turns up that nobody upstream will
+  fix.
+* **An MLX or mlx-lm bump breaks it.** The likelier break is `mlx-lm`: it calls
+  `mx.metal.is_available()` in five places and `mx.metal` is on the deprecation
+  path, so a removal takes the decode loop with it.
+* **A second engine is worth shipping.** `mlx-audio` carries Voxtral alongside a
+  dozen other ASR models behind one API, so the move pays for itself in one go
+  rather than one engine at a time. See *What mlx-audio holds beyond ASR* in
+  `docs/voxtral-quantisierung.md`.
+
+If none of those is true, close the task.
 
 ## Scope
 
@@ -47,18 +35,19 @@ there.**
 
 ## The coupling is five calls
 
-Verified with `grep -rn "mlx_voxtral\|mlx_lm" noScribe/ tools/ tests/`:
+Verified with `grep -rn "mlx_voxtral\|mlx_lm" noScribe/ tools/ tests/`. Line numbers
+drift — grep rather than trust them:
 
 | where | what |
 |---|---|
-| `voxtral_engine.py:1601` | `load_voxtral_model`, `VoxtralProcessor` |
-| `voxtral_engine.py:1779` | `proc.apply_transcrition_request(...)` (note the upstream typo) |
-| `voxtral_engine.py:1809` | `model.generate(...)` — the non-greedy fallback only |
-| `voxtral_engine.py:1813` | `proc.decode(...)` |
+| `voxtral_engine.py:1642` | `load_voxtral_model`, `VoxtralProcessor` |
+| `voxtral_engine.py:1829` | `proc.apply_transcrition_request(...)` (note the upstream typo) |
+| `voxtral_engine.py:1869` | `model.generate(...)` — the non-greedy fallback only |
+| `voxtral_engine.py:1874` | `proc.decode(...)` |
 | `tools/quantize_voxtral.py` | `mlx_voxtral.quantization`, `utils.model_loading.download_model` |
 
-Plus `_merged_embeddings` and `_LMAdapter`, both of which likely become unnecessary —
-see below.
+Plus `_merged_embeddings` and `_LMAdapter`, both of which likely become unnecessary
+— see below.
 
 ## Verified facts you must not re-derive
 
@@ -78,7 +67,9 @@ with no exception. Mechanism, all in `mlx_audio/utils.py`:
   skipped silently and the language model stays at its initial values.
 
 The audio tower does match and does load, which is why a naive smoke test looks
-half-plausible.
+half-plausible. Reported as
+[Blaizzy/mlx-audio#902](https://github.com/Blaizzy/mlx-audio/issues/902) — check
+whether a warning has landed since.
 
 **2. Re-quantising is format-only. It cannot change quality or speed.**
 
@@ -94,43 +85,47 @@ re-quantised build. **Do not re-run the bit sweeps.**
 
 **3. What could change output, and therefore must be checked:**
 
-* mlx-audio's `_merge_input_embeddings` scatters without promoting dtype.
+* mlx-audio's `_merge_input_embeddings` scatters without promoting dtype, where
   `_merged_embeddings` promotes deliberately. Measured on the current build both
   sides are bfloat16 so nothing is lost — re-check on whatever build you produce,
-  because the failure is invisible in the text and shows up only as different logits.
-* `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`. 32000 is the text token `" Capital"`,
-  and stopping on it silently truncates. Fixed in
-  [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) — **check
-  whether that merged**. If not, resolve stop ids from the processor as
-  `_resolve_stop_tokens` already does; do not rely on the library default.
+  because the failure is invisible in the text and shows up only as different
+  logits.
+* mlx-audio's `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`. 32000 is not a pad token;
+  it is the ordinary text token `" Capital"`, so stopping on it truncates any
+  transcript containing that word — silently, because what comes back is clean
+  prose that merely ends early.
+  [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) fixes it
+  and was still open at the time of writing. **Do not rely on the library default
+  either way**: resolve the ids from the processor, as `_resolve_stop_tokens`
+  already does, and pass them explicitly — the engine does this on both its decode
+  paths for exactly this reason.
 * mlx-audio vendors its own `generate_step` (`mlx_audio.lm.generate`) rather than
   using `mlx_lm`'s. Same chunked prefill (`prefill_step_size=2048`), so the ~18 %
   peak saving survives — but `MEM_MODEL` is calibrated against the current path and
   **must be re-measured**.
 * Voxtral is the only STT model in mlx-audio that uses `AutoProcessor`, which
   resolves to transformers' `VoxtralProcessor` and **requires torch**. noScribe has
-  torch for the aligner, so this is not a blocker, but it changes the worker's
-  import graph — re-check `tests/test_worker_import_lightweight.py` and the
-  PyInstaller specs. mlx-audio also hard-requires `sounddevice` and `miniaudio`
-  (native, PortAudio); the STT import path does not pull them, but pip installs
-  them, so the frozen build likely needs excludes. **Prove that with a throwaway
-  PyInstaller build — never infer frozen behaviour from source.**
+  torch for the diarizer and the aligner, so this is not a blocker, but it changes
+  the worker's import graph — re-check `tests/test_worker_import_lightweight.py`
+  and the PyInstaller specs. mlx-audio also hard-requires `sounddevice` and
+  `miniaudio` (native, PortAudio); the STT import path does not pull them, but pip
+  installs them, so the frozen build likely needs excludes. **Prove that with a
+  throwaway PyInstaller build — never infer frozen behaviour from source.**
 
 ## The alignment path is not affected — but know this before you touch it
 
 Out of scope here, and stated so you do not go looking: **the German forced-aligner
-model already loads through mlx-audio today**, via `mms/mms.py`, which wraps the same
-`Wav2Vec2Model` encoder and adds the `lm_head` a `Wav2Vec2ForCTC` checkpoint carries.
-It needs no code change, only `model_type: "mms"` in a converted config, and it
-reproduces the torch emissions exactly — identical argmax on every frame, max |Δ|
-0.00068 — at 103.8x realtime against torch's 19.2x on the same 300 s clip and the
-same 20 s windows.
+model already loads through mlx-audio**, via `mms/mms.py`, which wraps the same
+`Wav2Vec2Model` encoder and adds the `lm_head` a `Wav2Vec2ForCTC` checkpoint
+carries. It needs no code change, only `model_type: "mms"` in a converted config,
+and it reproduces the torch emissions exactly — identical argmax on every frame,
+max |Δ| 0.00068.
 
-This is **not** part of the migration, for two reasons. It is independent of which
-package loads Voxtral, so it can be done before, after, or never. And it still needs
-a replacement for `torchaudio.functional.forced_align`, which mlx-audio does not
-have. Do not bundle it in; a migration that also rewrites alignment cannot be shown
-to have changed nothing.
+That is not a reason to bundle it in. It is independent of which package loads
+Voxtral, it still needs a replacement for `torchaudio.functional.forced_align`
+which mlx-audio does not have, and the aligner already runs on the GPU where the
+speed was. A migration that also rewrites alignment cannot be shown to have changed
+nothing.
 
 ## Do this first: try to avoid re-publishing at all
 
@@ -138,39 +133,39 @@ Before re-quantising 6 GB and 25 GB and making every user re-download, evaluate 
 key remap in mlx-audio's Voxtral `sanitize()` that accepts the mlx-voxtral layout
 (`language_model.X` → `language_model.model.X`). If that works it is a small
 upstream contribution, it fixes the same problem for every other published
-mlx-voxtral build, and it removes the largest single cost from this migration.
+mlx-voxtral build, and it removes the largest single cost from this migration. It
+is already offered in #902.
 
-Send it as a PR to mlx-audio and see. If it is rejected or takes too long, fall back
-to re-quantising.
+Send it as a PR to mlx-audio and see. If it is rejected or takes too long, fall
+back to re-quantising.
 
 ## Steps
 
-1. **Check `mzbac/mlx.voxtral#9`.** A yes means stop.
-2. Install `mlx-audio[stt]` **in a throwaway venv first** and confirm the current
-   behaviour above still holds against whatever version is current. Do not touch the
-   project venv until the approach is settled — verify with `pip freeze` before and
-   after that it comes back byte-identical.
-3. Try the `sanitize()` remap route. If it works, the build story is solved.
-4. Rewrite the five call sites. Expect `_LMAdapter` to become unnecessary —
+1. Install `mlx-audio[stt]` **in a throwaway venv first** and confirm the facts
+   above still hold against whatever version is current. Do not touch the project
+   venv until the approach is settled — verify with `pip freeze` before and after
+   that it comes back byte-identical.
+2. Try the `sanitize()` remap route. If it works, the build story is solved.
+3. Rewrite the five call sites. Expect `_LMAdapter` to become unnecessary —
    mlx-audio's `Model.__call__(input_ids, input_features, cache)` already returns
    logits — and `_merged_embeddings` likewise, since its merge is already a single
-   scatter. Delete them only after the equality check in step 6 passes.
-5. If re-quantising is needed: rewrite `tools/quantize_voxtral.py` against
+   scatter. Delete them only after the equality check in step 5 passes.
+4. If re-quantising is needed: rewrite `tools/quantize_voxtral.py` against
    mlx-audio's loader, rebuild `voxtral-mini-8bit` and `voxtral-small-8bit`,
    re-publish, update the model URLs.
-6. **Equality check before anything else is believed:** the same audio through the
+5. **Equality check before anything else is believed:** the same audio through the
    old and new paths must produce the same transcript. `tests/test_voxtral_smoke.py`
    asserts fast == library today; extend it to assert **the number of quantised
    modules is non-zero**, because the failure mode in fact 1 is silent.
-7. Re-measure `MEM_MODEL` (see `docs/voxtral-quantisierung.md`, *Decode path and
+6. Re-measure `MEM_MODEL` (see `docs/voxtral-quantisierung.md`, *Decode path and
    memory*) and update the entries.
-8. Re-run the two hand-corrected references and FLEURS with
+7. Re-run the two hand-corrected references and FLEURS with
    `docs/skripte/wer.py` and `docs/skripte/fleurs.py`. Expect the numbers to match
    the tables. **If they do not, something in fact 3 is biting — find it, do not
    update the tables.**
-9. Update `VOXTRAL.md` (drop the licence warning, rewrite the dependency note),
-   `environments/requirements_voxtral_macOS_arm64.txt` (drop the warning block, swap
-   the pin), and the *Moving off mlx-voxtral* section of the measurement doc.
+8. Update the dependency notes in `VOXTRAL.md`,
+   `environments/requirements_voxtral_macOS_arm64.txt` and the *Moving off
+   mlx-voxtral* section of the measurement doc.
 
 ## Acceptance
 
@@ -184,7 +179,8 @@ to re-quantising.
 
 ## Traps
 
-* **Never trust a silent load.** Assert quantised-module count, not just "it loaded".
+* **Never trust a silent load.** Assert quantised-module count, not just "it
+  loaded".
 * **Do not re-run the bit sweeps.** Fact 2 says they still hold; re-running them is
   days of compute for a known answer.
 * **Do not touch the pinned venv** until the approach is settled.
@@ -197,5 +193,5 @@ to re-quantising.
 ## Rollback
 
 The current state is committed and pushed on `local/main`. If the migration stalls,
-the pins are stable and nothing is broken — revert and leave the licence warning in
-place. The measurement documents describe the pre-migration state accurately.
+the pins are stable and nothing is broken — revert. The measurement documents
+describe the pre-migration state accurately.
