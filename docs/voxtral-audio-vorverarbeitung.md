@@ -206,6 +206,24 @@ trotzdem richtig, und dort ist sie inzwischen drin: mzbac hat PR #5 am 2026-08-2
 gemergt und mit **0.0.6** veröffentlicht, worauf `requirements_voxtral_macOS_arm64.txt`
 jetzt zeigt. Der Produktionspfad rechnet damit ab sofort referenztreu.
 
+**Die beiden Handreferenzen dazu, gemessen am 2026-08-22** (gleicher Build,
+nur der Feature-Pfad getauscht, `mel_ab.py`-Aufbau):
+
+| Passage | Spreizung | 0.0.6 ganze Datei | 0.0.5 je Block |
+|---|---|---|---|
+| `hart_780-900` (422 W.) | 0,12 log10 | 4,27 % / 3,39 % | **bitgleicher Text** |
+| `zoom_9890-10190` (859 W.) | 0,94 log10 | 1,98 % / 1,09 % | 0,81 % / 0,64 % |
+
+Auf `hart` ist die Änderung buchstäblich unsichtbar — identischer Text, nicht nur
+identische Rate. Auf `zoom` sieht die alte Fassung besser aus, und **das ist
+genau die Falle, vor der das LIESMICH dieser Referenz warnt**: sie entstand durch
+Korrektur des Entwurfs von `p0-ist`, also des damaligen Produktionspfads mit
+Per-Block-Mel, und ihr eigener Abstand zu jenem Entwurf beträgt 0,81 % WER — die
+Zahl, die die alte Fassung hier erreicht. Der Per-Block-Mel gewinnt dort gegen
+sich selbst. 1,98 % ist der unverzerrte Wert; zwei Substitutionen auf 859 Wörtern
+Gesprächsaudio waren nie plausibel. Für die Richtung entscheidend bleibt die
+gepaarte Messung über 92 Minuten, die keine der beiden Referenzen berührt.
+
 Der Bump ist keine Kosmetik — er ändert die Encoder-Eingabe. Auf 300 s echtem
 Podcast-Material gegen die alte Fassung: max|diff| **1,30**, und **90 %** aller
 Frames weichen um mehr als 1e-4 ab. Gegen die Referenz (transformers'

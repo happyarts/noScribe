@@ -472,6 +472,55 @@ The causal/streaming architecture trades look-ahead for latency, and on hard
 conversational audio the gap would only widen. Its advantages (sub-500ms latency,
 bounded memory) are irrelevant to offline file transcription. Not adopted.
 
+### transcribe.cpp's Voxtral (measured 2026-08-22: on par, and that is the finding)
+
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) is a GGML
+speech-to-text library (MIT) that carries Voxtral alongside fifteen other
+families, with Metal, CUDA, Vulkan and HIP backends. It is therefore the only
+route we know to *this* model on hardware MLX cannot reach — which is the whole
+reason to measure it, since the engine is otherwise Apple-Silicon-only.
+
+Built from source (Metal backend), `Voxtral-Mini-3B-2507-Q8_0.gguf` from the
+project's own GGUF repo — the closest analogue to `voxtral-mini-8bit`. Scored
+with `docs/skripte/engines/transcribe_cpp_wer.py`, which reuses `norm`/`wer`
+from `wer.py` verbatim, and against our own build re-run the same day so both
+columns come from the same machine and the same pin:
+
+| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Speed |
+|---|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit (MLX) | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 7.17x |
+| transcribe.cpp Q8_0, `--language de` | 4.98 % | 3.83 % | 10 | 10 | 1 | 7.11x |
+| transcribe.cpp Q8_0, auto | 5.45 % | 3.83 % | 11 | 10 | 2 | 7.10x |
+
+| Second reference (859 words) | WER | CER | Sub | Del | Ins | Speed |
+|---|---:|---:|---:|---:|---:|---:|
+| voxtral-mini-8bit (MLX) | **1.98 %** | **1.09 %** | 12 | 4 | 1 | 7.97x |
+| transcribe.cpp Q8_0, `--language de` | 2.10 % | 1.33 % | 12 | 5 | 1 | 8.25x |
+
+**Identical substitution counts on both passages** (10 and 12), the difference
+sitting in one or two extra deletions. For passages this size the document's own
+resolution analysis puts +-1.8 to +-2.5 CER points around a single score, so
+these two engines are indistinguishable on this material, at the same speed.
+
+**The expected failure did not appear.** [Issue #82](https://github.com/handy-computer/transcribe.cpp/issues/82)
+reports that Voxtral's Tekken tokenizer is unimplemented there and the loader
+falls back to qwen2 pretokenization, with German word-level garbles
+("Publikum" -> "Pubikom"). That is the defect this measurement was designed to
+catch, and on 1281 words of German it did not show: a near-miss scan over every
+word the run produced that is absent from the reference turns up three pairs,
+and all three are ordinary mishearings (`geworden` for `geboren`,
+`schokopourridge` for `schokoporridge`) rather than dropped-letter garbles. The
+issue may still be real on other material or other quants — it is not visible
+here, at Q8_0, on this audio.
+
+So the quality objection to a cross-platform Voxtral does not survive contact
+with the measurement. What remains against it is engine-level, not model-level,
+and is listed in [`../VOXTRAL.md`](../VOXTRAL.md): Voxtral there advertises
+`TRANSCRIBE_TIMESTAMPS_NONE`, there is no repetition/loop defence on the
+causal-LM path (the only compression-ratio gate in the tree is Whisper's 2.4,
+which we already measured as too coarse), and a C API cannot hand us the
+logits processor the loop breaker rides on.
+
 ### Parakeet-TDT (measured, rejected)
 
 `nvidia/parakeet-tdt-0.6b-v3` is the obvious structural alternative: a
@@ -504,6 +553,23 @@ conversation:
 | voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 | 7.58x |
 | parakeet-tdt-0.6b-v3, beam 5 | 8.50 % | 5.18 % | 34 | 15 | 24 | 10.30x |
 | parakeet-tdt-0.6b-v3, greedy | 10.59 % | 6.81 % | 36 | 14 | 41 | 41.75x |
+
+> **That 0.81 % does not reproduce on the current pin, and it never should have
+> been read as this build's quality.** Re-scored 2026-08-22 under mlx-voxtral
+> 0.0.6, voxtral-mini-8bit lands at **1.98 % / 1.09 %** on this passage
+> (12 substitutions instead of 2; deletions and insertions unchanged at 4 and
+> 1). The cause is not the version bump but what this reference *is*: it was
+> produced by hand-correcting this build's own draft, and its LIESMICH puts the
+> remaining distance to that draft at exactly 0.81 % WER. The old figure is
+> therefore a self-comparison — two substitutions on 859 words of conversational
+> audio was implausibly good, and that was the tell. Anything that shifts the
+> decode off that draft, including the whole-file log-Mel in 0.0.6, gives up the
+> bias and scores honestly.
+>
+> Every engine comparison that uses this row as its yardstick keeps its
+> direction — 1.98 % against Parakeet's 8.50 % and Qwen3-ASR's 9.20 % is the
+> same verdict with a smaller multiplier. Quote **1.98 %** outside this document;
+> it is the number a fresh run reproduces.
 
 | FLEURS German (100 recordings) | WER | CER | Speed |
 |---|---:|---:|---:|
