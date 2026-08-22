@@ -309,8 +309,34 @@ was the surprise:
    DP work** to avoid a split you also cannot avoid.
 2. **`too_dense` is untouched by any of this.** More target tokens than audio frames
    is a CTC constraint; no memory technique makes such a window alignable.
-3. **The 1 GB cap is doing no harm.** The DP already runs in a fraction of a second
-   per piece.
+3. **The DP never gets near 3.4 GB in production, and on a small machine it is
+   tiny.** That number is `MAX_CHUNK_SEC`; auto-sizing never picks it. See below.
+
+**Is the allocation a problem on a small machine?** It is genuinely additional —
+only the decode pass's MLX buffers are released before alignment
+(`vox._mx.clear_cache()`), the Voxtral weights stay resident — so this is not
+memory the model has already paid for. But the exposure is bounded twice over, and
+the second bound is the interesting one:
+
+* **`RAM_RESERVE_GB = 7` explicitly holds the aligner back.** Its comment names "the
+  forced aligner that runs alongside"; `MIN_HEADROOM_GB` budgets it at ~2 GB.
+  Measured: the German wav2vec2 aligner is **0.50 GB resident**, so model plus a
+  full-size DP fits that budget with room.
+* **DP size scales with the *square* of the window, and the window is already sized
+  to the machine's RAM.** Cells are `frames × (2·tokens+1)`, both linear in seconds.
+  So the coupling runs the protective way: less RAM → shorter passes → quadratically
+  smaller DP. For `mini8` at the reference density:
+
+  | machine | pass chosen | DP peak |
+  |---|---:|---:|
+  | 8 GB | 60 s (warns; likely refused) | **5 MB** |
+  | 16 GB | 416 s | **262 MB** |
+  | 24 GB and up | 600 s (clamped by `TRUSTED_CHUNK_SEC`, not RAM) | **546 MB** |
+
+  Above 24 GB the window stops growing, so the DP stops growing too. 3.4 GB needs a
+  1500 s window, which only a config override can pin — and `FORCED_ALIGN_MAX_CELLS`
+  then splits it, holding the peak at 1 GB. The cap is what makes that true, which is
+  the second reason not to drop it.
 
 **Where it would genuinely pay:** as a replacement for the `_spread` hard-failure
 path, so a window that cannot be split far enough gets slow real timestamps instead
