@@ -26,8 +26,8 @@ Feature-Pfade auf denselben Stroemen.
 nur einmal gerechnet und alle Arme gegen dieselbe Basis gepaart -- das ist der
 Sweep, mit dem die Perzentilwahl entschieden wird.
 """
-import io
 import pathlib
+import re
 import sys
 import time
 
@@ -71,16 +71,45 @@ class PercentileFloor:
                 mel.reshape(N_MELS, n, N_FRAMES).transpose(1, 0, 2)}
 
 
-def load_clips(n_rows):
-    """Goldtranskribierte VoxPopuli-de-Zeilen als (Audio, Referenztext)."""
+DIGIT = re.compile(r"\d")
+
+
+def load_clips(n_rows, skip_digits=False):
+    r"""Goldtranskribierte VoxPopuli-de-Zeilen als (Audio, Referenztext).
+
+    `skip_digits=True` verwirft Aeusserungen, deren Referenz Ziffern enthaelt --
+    rund **9 %** des Korpus (gemessen ueber 200 Zeilen). Grund: die Referenz
+    schreibt "60 Jahre" und "21. Februar", der Sprecher sagt "sechzig Jahre" und
+    "einundzwanzigsten Februar", und `wer.py`s `norm()` behaelt Ziffern
+    (`\w` schliesst sie ein). Jede solche Aeusserung zaehlt also Fehler, die
+    richtig gehoert wurden. Das ist die bekannte Schwaeche der VoxPopuli-Gold-
+    Transkripte; eine bereinigte Fassung gibt es nur fuer Englisch
+    (`ArtificialAnalysis/VoxPopuli-Cleaned-AA`, nachgesehen).
+
+    **Verworfen statt umgerechnet**, und das ist Absicht. Kardinalzahlen waeren
+    eindeutig, Ordinalzahlen nicht: "21." wird je nach Satzstellung zu
+    "einundzwanzigsten", "einundzwanzigste" oder "einundzwanzigster", und
+    Jahreszahlen vor 2000 spricht man "neunzehnhundert..." statt
+    "eintausendneunhundert...". Eine Umrechnung wuerde also neue Fehler
+    einfuehren, wo sie alte beseitigt.
+
+    **Der Standardwert bleibt False**, damit diese Funktion nicht rueckwirkend
+    die Vergleichbarkeit aller bisherigen Laeufe verschiebt. Fuer *absolute*
+    Zahlen, die veroeffentlicht werden, gehoert er auf True; **gepaarte
+    Differenzen sind nicht betroffen**, weil beide Arme dieselbe Referenz sehen
+    und der Fehler herausfaellt.
+    """
     from datasets import load_dataset
     ds = load_dataset("facebook/voxpopuli", "de", split="test", streaming=True)
-    clips, refs = [], []
+    clips, refs, dropped = [], [], 0
     for row in ds:
         if not row.get("is_gold_transcript"):
             continue
         text = (row.get("raw_text") or "").strip()
         if len(text.split()) < 4:
+            continue
+        if skip_digits and DIGIT.search(text):
+            dropped += 1
             continue
         a = row["audio"]
         wav = np.asarray(a["array"] if isinstance(a, dict) else a.get_all_samples().data,
@@ -91,6 +120,9 @@ def load_clips(n_rows):
         refs.append(text)
         if len(clips) >= n_rows:
             break
+    if skip_digits:
+        print(f"# {dropped} Aeusserungen mit Ziffern verworfen "
+              f"({dropped/max(1, dropped+len(clips))*100:.1f} %)")
     return clips, refs
 
 

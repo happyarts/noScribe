@@ -89,8 +89,9 @@ setzen würde, am stärksten bei rohem Material — also genau bei dem, was Nutz
 
 ## 3. Was der Perzentil-Boden auf sauberem Material kostet: nichts nachweisbares
 
-Gemessen auf **VoxPopuli de** (spontane Parlamentsrede mit Goldtranskript, 11,4 % WER
-gegen FLEURS' 4,8 % — der härtere externe Korpus, siehe `voxpopuli_floor.py`),
+Gemessen auf **VoxPopuli de** (spontane Parlamentsrede mit Goldtranskript, 10,2 % WER
+gegen FLEURS' 4,8 % — der härtere externe Korpus, siehe `voxpopuli_floor.py`;
+die 10,2 % gelten mit `skip_digits=True`, siehe unten),
 10 Ströme à 300 s, 50,6 min, gepaart auf bitgleichem Audio:
 
 > max 11,39 % / 7,32 % · Perzentil 99,9 11,29 % / 7,20 %
@@ -104,6 +105,16 @@ dort also real um 13 dB gesenkt, ohne Wirkung.
 Rauschdetail, das das Modell ignoriert (VoxPopuli: null). Den Boden zu *heben* zerstört
 leise Sprachdetails (Knalltests: +1,52 auf Strömen). Der Perzentil-Boden liegt **immer** unter
 oder gleich dem Maximum-Boden — er kann also nur verhindern, dass gehoben wird.
+
+**Eine Falle beim Zitieren absoluter VoxPopuli-Zahlen.** Rund **8,7 %** der
+Gold-Referenzen enthalten Ziffern („60 Jahre", „21. Februar"), der Sprecher sagt
+aber Wörter, und `wer.py`s `norm()` behält Ziffern. Gemessen kostet das
+**1,22 WER-Punkte**: derselbe Lauf ergibt 11,39 % mit und **10,17 %** ohne diese
+Äußerungen (`load_clips(..., skip_digits=True)`). Mehr als ein Zehntel der
+gemeldeten Fehlerrate ist also Schreibweise, nicht Erkennung. **Gepaarte
+Differenzen sind davon nicht betroffen** — beide Arme sehen dieselbe Referenz —,
+weshalb keine Entscheidung in diesem Dokument davon abhängt. Wer absolute Zahlen
+veröffentlicht, setzt `skip_digits=True`.
 
 ## 4. Was dagegen spricht — vor dem Einbau lesen
 
@@ -183,14 +194,19 @@ minimal besser. 99,9 nehmen, weil es in den Schadensläufen verwendet wurde.
 
 ## 8. Offene Fäden
 
-* **Der Whisper-Pfad trägt dieselbe Zeile** (`faster_whisper/feature_extractor.py:227`),
-  und noScribe übergibt Whisper die ganze Datei — es beträfe also die Standard-Engine
-  aller Nutzer. Auf acht Strömen (40,6 min, 28,9 dB Bodenanstieg):
-  **+0,60 [−2,85, +3,33]** mit VAD, **+0,95 [−0,44, +2,37]** ohne. Im Vorzeichen
-  einig mit Voxtral, beide Intervalle enthalten aber die Null — Whispers Streuung
-  ist rund viermal so breit. Nicht widerlegt, nur nicht gezeigt.
-  `docs/skripte/whisper_spike_streams.py` ist fertig; es bräuchte deutlich mehr
-  Ströme. Die Tragweite wäre größer als bei Voxtral.
+* **Der Whisper-Pfad ist nicht betroffen — geprüft, nicht angenommen.**
+  `faster_whisper/feature_extractor.py:227` trägt dieselbe Zeile, und noScribe
+  übergibt Whisper die ganze Datei. Auf 24 Strömen (122,3 min, 28,7 dB
+  Bodenanstieg) kostet der Transient dort **−0,20 [−1,85, +1,19]** mit VAD und
+  **−0,51 [−1,98, +0,83]** ohne — beide Intervalle enthalten die Null und
+  schließen Voxtrals +1,52 aus.
+
+  **Das entscheidet, wo der Fix hingehört.** Er bleibt vollständig in
+  `voxtral_engine.py` und geht mit dem Voxtral-Feature hoch. Es braucht **keine**
+  Option im gemeinsamen Teil, die nur für Voxtral aktiv wäre, und **keinen** PR
+  an faster-whisper — dort ist nichts zu reparieren. (Was ohnehin ungünstig
+  gewesen wäre: faster-whisper hatte seinen letzten Push im November 2025,
+  während seine Engine CTranslate2 aktiv weiterentwickelt wird.)
 * **Chunk-Kopplung.** Der Boden wird über das berechnet, was in einem Durchgang übergeben
   wird — bei uns also über die vom Chunker gewählte Länge. Gemessen: dieselben 150 s in
   zwei Chunkungen verschieben den Boden um 1,14 dB und verändern 100 % der Frames. Der

@@ -292,14 +292,19 @@ Kosten. Was vor einem Einbau fehlt: die Dosis-Wirkung auf einer zweiten Passage
 und auf VoxPopuli-Strömen mit eingesetztem Transienten — +5,21 steht bislang auf
 einer Passage.
 
-**Nebenbefund, weiterhin offen:** `faster_whisper/feature_extractor.py:227`
-trägt dieselbe Zeile, und noScribe übergibt Whisper die ganze Datei. Auf acht
-Strömen (40,6 min, 28,9 dB Bodenanstieg) kostet der Transient dort
-**+0,60 [−2,85, +3,33]** mit VAD und **+0,95 [−0,44, +2,37]** ohne — im
-Vorzeichen einig mit Voxtral, aber beide Intervalle enthalten die Null. Whispers
-Streuung ist rund viermal so breit wie Voxtrals, die Stichprobe trägt es also
-nicht. Nicht widerlegt, nur nicht gezeigt; für eine Entscheidung bräuchte es
-deutlich mehr Ströme.
+**Nebenbefund, geklärt: der Whisper-Pfad ist nicht betroffen.**
+`faster_whisper/feature_extractor.py:227` trägt dieselbe Zeile, und noScribe
+übergibt Whisper die ganze Datei — die Wirkung bleibt dort aber aus. Auf 24
+Strömen (122,3 min, 28,7 dB Bodenanstieg) kostet der Transient
+**−0,20 [−1,85, +1,19]** mit VAD und **−0,51 [−1,98, +0,83]** ohne.
+
+Beide Intervalle enthalten die Null **und schließen Voxtrals +1,52 aus**; ein
+Effekt dieser Größe ist dort also nicht bloß ungezeigt, sondern ausgeschlossen.
+Bemerkenswert am Weg dorthin: auf acht Strömen standen dieselben Zahlen noch bei
++0,60 und +0,95, also im Vorzeichen einig mit Voxtral. Der Vorzeichenwechsel bei
+dreifacher Datenmenge ist das Verhalten von Rauschen, nicht von einem Effekt —
+und eine Mahnung, wie wenig ein Punktschätzer ohne tragfähiges Intervall sagt.
+Skript: `whisper_spike_streams.py`.
 
 ## 7. Was die Literatur bestätigt
 
