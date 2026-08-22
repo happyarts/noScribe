@@ -110,7 +110,7 @@ If you do write the DP instead, torchaudio's own "Forced Alignment with Wav2Vec2
 tutorial carries it in a few dozen lines of readable Python — adapt that rather
 than deriving it from the paper.
 
-## Writing it is easy. Making it fast is not.
+## Writing it is easy. Making it fast took four rounds.
 
 Both halves of that were measured, so plan around the numbers rather than the
 intuition that 151 lines of C++ cannot be doing much.
@@ -120,36 +120,127 @@ vectorised, time axis looped, ~30 lines — reproduced `torchaudio.functional.fo
 on **40 of 40 random cases** including tight `T == L + repeats` fits, first try.
 The algorithm is not where the risk is.
 
-**Speed is the problem.** On a real 300 s chunk (T = 14 985 frames, L = 4 886
-tokens, N = 9 773 states, **146 million DP cells**):
+**Speed is where the work is.** On a real 300 s chunk (T = 14 985 frames,
+L = 4 886 tokens, N = 9 773 states, **146 million DP cells**):
 
 | implementation | time | vs C++ |
 |---|---:|---:|
 | `torchaudio.functional.forced_align` (C++) | 264 ms | — |
 | `ctc-forced-aligner` (C++) | 253 ms | 1.0x |
-| vectorised numpy | **3 144 ms** | **11.9x** |
+| naive vectorised numpy | 3 144 ms | 11.9x |
+| **optimised numpy** (below) | **630 ms** | **2.4x** |
 
-All three returned identical paths.
+All four returned identical paths.
 
-The gap is not C++ being clever. It is that the recurrence is sequential in time,
-so numpy runs ~15 000 iterations of six array operations on 9 773-element arrays,
-and pays dispatch and allocation overhead on every one of them; C++ runs one tight
-loop with neither. Vectorising harder does not help, because the axis that is long
-is the one that cannot be vectorised.
+The remaining gap is not C++ being clever. The recurrence is sequential in time, so
+numpy runs ~15 000 iterations of a handful of array operations on 9 773-element
+arrays and pays dispatch overhead on each; C++ runs one tight loop over the same
+cells with none. Vectorising harder cannot help — the long axis is the one that
+cannot be vectorised. What *did* help was cutting the work inside each iteration:
 
-**And 3.1 s is the wrong kind of slow here.** The emission step for that same chunk
-costs about 2.9 s on the GPU, so a numpy DP would roughly double alignment — giving
-back about half of the ~130 s per hour of audio that moving the aligner to the GPU
-just won.
+* **float32 throughout.** numpy defaults to float64, which doubles memory traffic
+  for no precision that matters here.
+* **Every buffer preallocated, every operation given `out=`,** so the loop allocates
+  nothing at all.
+* **The advance-by-two lane written only where a skip is legal** (at most L of N
+  positions). Every other position stays at the floor for the whole run, so it never
+  needs rewriting.
+* **Emissions never gathered into a `[T, N]` array** — that alone is 586 MB on this
+  chunk, and profiling put 170 ms in it. Even states are all blank and share one
+  scalar per frame; odd states are the targets, a gather of L.
 
-**The shape that does work: keep C++ for the normal path and use numpy only where
-the cap would otherwise force a split.** `FORCED_ALIGN_MAX_CELLS` is 2^30 cells;
-the real chunk above uses 146 million, so a ten-minute pass sits around 300 million
-and the cap fires only on unusually dense speech. A numpy DP with 64-bit indexing
-has no such limit, so wiring it in as the fallback removes the recursive
-word/audio split — the actual simplification this task is for — while the
-common path keeps the C++ speed. That is a much smaller and safer change than
-replacing the DP outright.
+Together: 3 144 ms → 630 ms, a factor of 5.
+
+**Two further ideas were measured and lost — do not re-try them.** Replacing the
+strided `nxt[0::2] += …` / `nxt[1::2] += …` pair with one contiguous
+`np.take` into a preallocated row and a single add is **twice as slow** (1 249 ms).
+Touching the advance-by-two lane only at its legal positions via fancy indexing,
+rather than comparing across the full width, is **19 % slower** (748 ms). The
+lesson generalises: in this loop numpy is cheap on bandwidth and expensive on
+indexing, so a full-width pass beats a half-width gather.
+
+**One thing did help and is nearly free**: writing the advance-by-one lane straight
+into the output buffer from overlapping slices (`np.maximum(alpha[1:], alpha[:-1],
+out=nxt[1:])`) instead of shifting into a scratch buffer first — 646 → 630 ms.
+
+**630 ms is affordable, and that settles the design.** Measured on the same chunk
+with the aligner on MPS, the emission step costs **4.06 s** and the DP is the rest:
+
+| | emissions | DP | total |
+|---|---:|---:|---:|
+| C++ | 4.06 s | 0.26 s | 4.32 s |
+| numpy | 4.06 s | 0.65 s | 4.71 s |
+
+**+387 ms per 300 s chunk, about 4.6 s per hour of audio, +9 % on the alignment
+step.** Against the ~130 s per hour that moving the aligner to the GPU won, that is
+noise.
+
+**So build one path, not two.** An earlier version of this brief proposed keeping
+C++ for the common case and using numpy only where `FORCED_ALIGN_MAX_CELLS` would
+otherwise force a split. Reject that: the fallback would run only on unusually dense
+speech, which is precisely the condition under which a defect in it would go
+unnoticed for a long time and then surface on a user's recording. A single path that
+costs 4.6 s per hour is worth more than a fast path plus a rarely-exercised one.
+
+**The reference implementation.** Verified identical to
+`torchaudio.functional.forced_align` on 100 random cases and on the 300 s chunk
+above. It is here because re-deriving the four optimisations from scratch is the
+expensive part, not the algorithm:
+
+```python
+NEG = np.float32(-3.4e38)          # float32 floor, not -inf: no NaN from -inf + -inf
+
+def forced_align_np(log_probs, targets, blank=0):
+    log_probs = np.ascontiguousarray(log_probs, dtype=np.float32)
+    targets = np.asarray(targets, dtype=np.int64)
+    T, L = log_probs.shape[0], len(targets)
+    N = 2 * L + 1
+    # advance-by-two is legal only into a token whose preceding token differs
+    skip_idx = (np.flatnonzero(targets[1:] != targets[:-1]) + 1) * 2 + 1
+    src_idx = skip_idx - 2
+
+    alpha = np.full(N, NEG, dtype=np.float32)
+    nxt = np.empty(N, dtype=np.float32)
+    two = np.full(N, NEG, dtype=np.float32)   # non-skip lanes stay NEG for the whole run
+    c1 = np.zeros(N, dtype=bool)              # c1[0] stays False for the whole run
+    c2 = np.empty(N, dtype=bool)
+    bt = np.zeros((T, N), dtype=np.uint8)
+
+    alpha[0] = log_probs[0, blank]
+    if N > 1:
+        alpha[1] = log_probs[0, targets[0]]
+
+    for t in range(1, T):
+        np.greater(alpha[:-1], alpha[1:], out=c1[1:])      # advance one vs stay
+        np.maximum(alpha[1:], alpha[:-1], out=nxt[1:])
+        nxt[0] = alpha[0]
+        two[skip_idx] = alpha[src_idx]                     # advance two
+        np.greater(two, nxt, out=c2)
+        np.maximum(nxt, two, out=nxt)
+        row = bt[t]
+        np.copyto(row, c1.view(np.uint8))
+        np.copyto(row, 2, where=c2)
+        lp = log_probs[t]
+        nxt[0::2] += lp[blank]                             # blank states, one scalar
+        nxt[1::2] += lp[targets]                           # token states, gather of L
+        alpha, nxt = nxt, alpha
+
+    s = N - 1 if alpha[N - 1] >= alpha[N - 2] else N - 2
+    path = np.empty(T, dtype=np.int64)
+    scores = np.empty(T, dtype=np.float32)
+    ext = np.zeros(N, dtype=np.int64)
+    ext[1::2] = targets
+    for t in range(T - 1, -1, -1):
+        tok = ext[s]
+        path[t] = tok
+        scores[t] = log_probs[t, tok]
+        s -= int(bt[t, s])   # int(): numpy would type the in-place op as uint8
+    return path, scores
+```
+
+The backtrace loop is Python over T, which is fine — it is ~15 000 scalar steps and
+measures under 20 ms. `merge_tokens` still has to be written; see the span-end trap
+below.
 
 ## The task
 
@@ -163,12 +254,12 @@ is legal only when it skips a blank between two *different* labels. Backtrace yi
 one label per frame; `merge_tokens` collapses equal runs into spans carrying a mean
 score.
 
-**Shape of the implementation.** Vectorise over the state axis; loop over time. T is
-around 50 frames per second of audio, so a ten-minute pass is ~30 000 iterations of a
-vector update — fine in numpy, and note that MLX is the *wrong* tool here because the
-recurrence is strictly sequential in time and would mean one kernel launch per frame.
-The backtrace table is `T × (2S+1)` of small integers; allocate it as `uint8` or
-`int8`, not `int64`.
+**Shape of the implementation.** Take the reference above. Vectorise over the state
+axis, loop over time; T is around 50 frames per second of audio, so a ten-minute pass
+is ~30 000 iterations of a vector update. Note that MLX is the *wrong* tool here
+because the recurrence is strictly sequential in time and would mean one kernel launch
+per frame. The backtrace table is `T × (2S+1)` `uint8` — 146 MB on the 300 s chunk,
+which is why it must not be `int64`.
 
 **The oracle already exists.** `tests/test_forced_align_stability.py` pins
 torchaudio's behaviour against a recorded reference in `tests/data/`. That is the
@@ -195,6 +286,12 @@ starting — their docstrings describe defects that were expensive to find.
   has `{"<blank>": 0, "<pad>": 1, …}` and emits blanks on 0, so reading `<pad>`
   picked an index the model never produces, and every word stretched to meet its
   neighbour. Keep that logic exactly.
+* **`uint8` backtrace, Python `int` cursor.** Writing the backtrace walk as
+  `s -= bt[t, s]` passes every small test and then raises `OverflowError` the first
+  time N exceeds 255, because numpy types the in-place operation from the `uint8`
+  right-hand side. It cost nothing to find here only because the real chunk was
+  measured; on 60 random cases it was invisible. Write `s -= int(bt[t, s])`. This is
+  the shape of bug the single-path decision above is meant to keep out of production.
 * **Repeated tokens.** Two identical labels in a row require a blank between them —
   advance-by-two must not skip it. torchaudio enforces this; so must you.
 * **Scores.** `merge_tokens` returns a score per span. Check what the existing code
