@@ -13,7 +13,10 @@ documented, with nothing naming the layer that was left out.
 
 The second test pins that upstream behaviour, because the guard's whole design
 rests on it: if a future mlx_lm raised instead of skipping, the guard could be
-dropped in favour of the exception.
+dropped in favour of the exception. That one needs MLX and skips without it;
+the argument checks do not, because the tool imports the Apple-Silicon stack
+only after them -- which is what lets these run on Linux CI, and what turns a
+missing install into a sentence instead of a ModuleNotFoundError traceback.
 """
 import subprocess
 import sys

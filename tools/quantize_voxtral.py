@@ -67,11 +67,10 @@ loading and quantising stay lazy, only saving evaluates the graph.
 import sys, time, json, shutil
 from pathlib import Path
 
-import mlx.core as mx
-from mlx_voxtral import load_voxtral_model
-from mlx_voxtral.quantization import (
-    quantize_model, save_model, save_config, compute_bits_per_weight,
-)
+# MLX and mlx_voxtral are imported *after* the argument checks below, not here.
+# They exist only on Apple Silicon, so importing them first turned every
+# misspelled argument into a ModuleNotFoundError traceback on Windows and Linux
+# -- and made the argument checks untestable anywhere else (they run in CI).
 
 SUPPORTED_BITS = (4, 5, 6, 8)   # MLX affine quantisation
 SUPPORTED_GROUPS = (32, 64, 128)  # mx.quantize accepts no others
@@ -136,6 +135,19 @@ encoder_bits = _width("--encoder-bits")
 
 if out.exists():
     sys.exit(f"output dir {out} already exists")
+
+# Only now the Apple-Silicon stack, so that every check above works (and is
+# testable) on a machine that does not have it, and reports a missing install
+# as a sentence rather than a traceback.
+try:
+    import mlx.core as mx
+    from mlx_voxtral import load_voxtral_model
+    from mlx_voxtral.quantization import (
+        quantize_model, save_model, save_config, compute_bits_per_weight,
+    )
+except ImportError as exc:
+    sys.exit(f"this tool needs the Apple-Silicon Voxtral stack (pip install -r "
+             f"environments/requirements_voxtral_macOS_arm64.txt): {exc}")
 # Build into a scratch dir and rename at the very end, so an interrupted or
 # failed run can never leave a half-written build that the model picker
 # (which keys on config.json) would offer as usable.
@@ -147,6 +159,7 @@ tmp_out.mkdir(parents=True)
 def rss_gb():
     import resource
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**3
+
 
 t0 = time.time()
 print(f"loading {src} (lazy, bfloat16) ...", flush=True)
