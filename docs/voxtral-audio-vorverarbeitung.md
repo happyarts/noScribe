@@ -231,6 +231,72 @@ Frames weichen um mehr als 1e-4 ab. Gegen die Referenz (transformers'
 30-s-Blöcke) bleiben **0,00017** — Float32-Rauschen. Es ist genau die Differenz,
 die oben gemessen wurde: der Versionssprung ist am Transkript folgenlos.
 
+## 6b. Der Clamp-Boden und ein einzelner lauter Transient (2026-08-22)
+
+Der Boden liegt bei `log_max - 8`, und `log_max` ist seit 0.0.6 das Maximum über
+die **ganze Eingabe**. Damit hebt ein einzelner lauter Ton den Boden für den
+gesamten Durchgang. Gemessen: ein 0,1-s-Knall hebt ihn um **9,6 dB** und
+verändert **100 %** der Frames im unberührten Audio davor.
+
+Das klingt schlimmer als es die ersten Zahlen nahelegten — und die ersten Zahlen
+waren falsch. Ein Einzeltest auf `zoom` mit einer Knallposition ergab, der neue
+Pfad sei robuster. Über beide Referenzen und drei Positionen kehrt sich das um:
+
+| Knall bei | `hart` ganze Datei | `hart` je Block | `zoom` ganze Datei | `zoom` je Block |
+|---|---|---|---|---|
+| 5 % | +1,66 | +0,95 | −0,47 | +0,47 |
+| 45 % | +1,66 | +0,71 | −0,12 | +0,12 |
+| 85 % | +1,66 | **+0,00** | −0,12 | +0,23 |
+
+dWER gegen den sauberen Lauf im selben Schema. Auf `hart` kostet der Knall den
+Ganze-Datei-Pfad an **allen drei Positionen exakt gleich viel** — mechanisch
+genau richtig, der Boden steigt ja positionsunabhängig — und das macht die Zahl
+glaubwürdig, nicht verdächtig. Der Per-Block-Pfad kostet 0 bis 0,95, je nachdem
+ob der Knall in einen ohnehin lauten Block fällt.
+
+**Die Dosis-Wirkung, und sie ist monoton.** `hart` gedämpft, Knall konstant:
+
+| Knall über der Sprachspitze | max-Boden | Perzentil-99,9-Boden |
+|---|---|---|
+| +2,6 dB | +1,66 | +0,00 |
+| +14,7 dB | +2,61 | +0,24 |
+| +27,1 dB | **+5,21** | +0,00 |
+
++5,21 Punkte sind 22 Wörter von 422, bei einer leise ausgesteuerten Aufnahme mit
+einer zugeschlagenen Tür. Kein Laborfall.
+
+**Der Eingriff, der es behebt, sitzt an genau einer Stelle.** Das Maximum wird
+*ausschließlich* für den Boden benutzt — danach folgt eine feste Affinität —,
+also ist eine robuste Statistik dort der richtige Ort, und nicht ein Limiter auf
+dem Audio (§4: drei davon gemessen, neutral bis schädlich). Mit einem Perzentil
+statt des Maximums ist der Text auf `hart` **mit und ohne Knall bitgleich**.
+Kontrolle: mit Perzentil 100 reproduziert die Implementierung den Ist-Zustand
+bitgleich, sie ändert also nachweislich nur den Boden.
+
+**Was er auf sauberem Material kostet: nichts nachweisbares.** Gemessen auf
+**VoxPopuli de** — spontane Parlamentsrede mit Goldtranskript, der Korpus, der
+uns gegenüber dem vorgelesenen FLEURS fehlte, und mit 11,4 % WER deutlich härter
+— 10 Ströme à 300 s, 50,6 min, gepaart auf bitgleichem Audio:
+
+> max 11,39 % / 7,32 % · Perzentil 99,9 11,29 % / 7,20 %
+> dWER **−0,10** [−0,83, +0,47] · dCER **−0,12** [−0,77, +0,38]
+
+Skript: `voxpopuli_floor.py`.
+
+**Stand der Entscheidung: nicht eingebaut, aber der erste Kandidat mit einem
+echten Argument.** Dagegen steht Architekturtreue — alle vier Implementierungen
+(transformers, mlx-audio, transcribe.cpp, mlx-voxtral 0.0.6) nehmen das nackte
+Maximum, und damit wurde das Modell trainiert. Dafür steht ein gemessener,
+monotoner Gewinn in einem realistischen Fehlerfall bei nicht nachweisbaren
+Kosten. Was vor einem Einbau fehlt: die Dosis-Wirkung auf einer zweiten Passage
+und auf VoxPopuli-Strömen mit eingesetztem Transienten — +5,21 steht bislang auf
+einer Passage.
+
+**Nebenbefund, offen:** `faster_whisper/feature_extractor.py:227` trägt dieselbe
+Zeile, und noScribe übergibt Whisper die ganze Datei. Ein Effekt ließ sich dort
+aber **nicht zeigen**: Whispers eigene Streuung auf `hart` (9,00 % mit VAD gegen
+21,09 % ohne) ist größer als der gesuchte Unterschied. Offen, nicht widerlegt.
+
 ## 7. Was die Literatur bestätigt
 
 Zwei Arbeiten, gegen die arXiv-Originale geprüft:
