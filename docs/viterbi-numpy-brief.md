@@ -140,7 +140,7 @@ If you do write the DP instead, torchaudio's own "Forced Alignment with Wav2Vec2
 tutorial carries it in a few dozen lines of readable Python — adapt that rather
 than deriving it from the paper.
 
-## Writing it is easy. Making it fast took four rounds.
+## Writing it is easy. Making it fast took five rounds.
 
 Both halves of that were measured, so plan around the numbers rather than the
 intuition that 151 lines of C++ cannot be doing much.
@@ -158,9 +158,10 @@ L = 4 886 tokens, N = 9 773 states, **146 million DP cells**):
 | `torchaudio.functional.forced_align` (C++) | 264 ms | — |
 | `ctc-forced-aligner` (C++) | 253 ms | 1.0x |
 | naive vectorised numpy | 3 144 ms | 11.9x |
-| **optimised numpy** (below) | **630 ms** | **2.4x** |
+| optimised numpy, round four | 630 ms | 2.4x |
+| **optimised numpy, round five** (below) | **347 ms** | **1.35x** |
 
-All four returned identical paths.
+All of them returned identical paths on the chunk.
 
 The remaining gap is not C++ being clever. The recurrence is sequential in time, so
 numpy runs ~15 000 iterations of a handful of array operations on 9 773-element
@@ -181,29 +182,77 @@ cannot be vectorised. What *did* help was cutting the work inside each iteration
 
 Together: 3 144 ms → 630 ms, a factor of 5.
 
-**Two further ideas were measured and lost — do not re-try them.** Replacing the
-strided `nxt[0::2] += …` / `nxt[1::2] += …` pair with one contiguous
-`np.take` into a preallocated row and a single add is **twice as slow** (1 249 ms).
-Touching the advance-by-two lane only at its legal positions via fancy indexing,
-rather than comparing across the full width, is **19 % slower** (748 ms). The
-lesson generalises: in this loop numpy is cheap on bandwidth and expensive on
-indexing, so a full-width pass beats a half-width gather.
+**Round five (review, 2026-08-23) took 630 → 347 ms with *less* code,** by timing
+every operation of the loop on its own at N = 9 773 and replacing the three that
+were not bandwidth-bound:
+
+* **The advance-by-two lane as one contiguous add.** `two[skip_idx] = alpha[src_idx]`
+  was the single most expensive line, 8.7 µs per frame, because fancy indexing is
+  what numpy is slow at. A penalty vector `pen` that is 0 where a skip is legal and
+  `-inf` everywhere else turns it into `np.add(alpha[:-2], pen[2:], out=two[2:])` —
+  1.3 µs, no index arrays, and the blank-between-repeats rule lives in one line.
+  This supersedes round four's "written only where a skip is legal".
+* **Backpointers by arithmetic, not by mask.** `np.copyto(row, 2, where=c2)` costs
+  in proportion to how many entries of `c2` are set — 0.5 µs on an empty mask, 17 µs
+  at 30 % — and on the chunk the skip wins at 12.6 % of the cells per frame on
+  average. `row = max(c1, c2 + c2)` on the `uint8` views is two cheap byte
+  operations regardless of density.
+* **`-inf` as the floor, as in torchaudio.** Nothing in the loop subtracts, so no
+  NaN can arise; the `-3.4e38` floor and its comment were guarding against an
+  operation that does not occur. It also lets `-inf + -inf` stay `-inf` instead of
+  overflowing with a warning.
+
+Per-frame accounting after that: two `greater` (7.1 µs — comparisons are oddly
+slow, 3x a `maximum` on the same views), two `maximum` (2.6), the penalty add (1.3),
+the two byte ops (1.0), the two strided emission adds (4.7), the gather (3.7), and
+about 10 µs of Python and dispatch for a dozen calls. There is nothing large left to
+remove; the rest is the cost of driving 15 000 iterations from Python.
+
+**Ideas measured and lost — do not re-try them.**
+
+* Replacing the strided `nxt[0::2] += …` / `nxt[1::2] += …` pair with one
+  contiguous `np.take` into a preallocated row and a single add: **twice as slow**
+  (1 249 ms).
+* Touching the advance-by-two lane only at its legal positions via fancy indexing
+  instead of comparing across the full width: **19 % slower** (748 ms).
+* `np.take(lp, targets, out=g)` to avoid the gather's allocation: **20 µs instead of
+  3.7 µs** for plain `lp[targets]`. The `out=` path is the slow one.
+* Any masked write for values — `np.copyto(..., where=)`, `a[m] = b[m]`, `putmask`:
+  all scale with the mask density (10–56 µs at 30 %). A micro-benchmark with an empty
+  mask makes them look free; that is how the first attempt at this round ended up
+  slower than what it replaced.
+* Separate contiguous blank and token lanes (`B[L+1]`, `K[L]`) so that every
+  operation is half-width and unstrided: **slower**, because the number of calls
+  doubles and dispatch eats what the bandwidth saved.
+* `signbit(a - b)` instead of `greater(b, a)`: 7 % faster, but only with a finite
+  floor, since `-inf - -inf` is NaN. Fragile; rejected.
+* **Restricting the work to torchaudio's reachable band** (states `2·(L-(T-t)) ≤ s
+  ≤ 2t+1`), which skips about a third of all cells: **299 ms, 1.16x C++**. Correct
+  and measured, and still rejected: it is eight lines of index arithmetic in the
+  hottest loop, the first attempt at it had a real bug (the first token state in the
+  band lost its advance-by-two source `K[lo-1]`, which lies just outside the band),
+  and what it buys is 0.6 s per hour of audio.
+
+The lesson generalises: in this loop numpy is cheap on bandwidth and expensive on
+indexing, masking and call count, so a full-width pass of plain ufuncs beats every
+cleverer access pattern.
 
 **One thing did help and is nearly free**: writing the advance-by-one lane straight
 into the output buffer from overlapping slices (`np.maximum(alpha[1:], alpha[:-1],
 out=nxt[1:])`) instead of shifting into a scratch buffer first — 646 → 630 ms.
 
-**630 ms is affordable, and that settles the design.** Measured on the same chunk
+**347 ms is affordable, and that settles the design.** Measured on the same chunk
 with the aligner on MPS, the emission step costs **4.06 s** and the DP is the rest:
 
 | | emissions | DP | total |
 |---|---:|---:|---:|
 | C++ | 4.06 s | 0.26 s | 4.32 s |
-| numpy | 4.06 s | 0.65 s | 4.71 s |
+| numpy | 4.06 s | 0.35 s | 4.41 s |
 
-**+387 ms per 300 s chunk, about 4.6 s per hour of audio, +9 % on the alignment
+**+90 ms per 300 s chunk, about 1.1 s per hour of audio, +2 % on the alignment
 step.** Against the ~130 s per hour that moving the aligner to the GPU won, that is
-noise.
+noise. Short windows are dispatch-bound — at T = 1 000, L = 330 numpy takes 7 ms to
+C++'s 1.1 ms — and equally irrelevant in absolute terms.
 
 **So build one path, not two.** An earlier version of this brief proposed keeping
 C++ for the common case and using numpy only where `FORCED_ALIGN_MAX_CELLS` would
@@ -213,49 +262,68 @@ unnoticed for a long time and then surface on a user's recording. A single path 
 costs 4.6 s per hour is worth more than a fast path plus a rarely-exercised one.
 
 **The reference implementation.** Verified identical to
-`torchaudio.functional.forced_align` on 100 random cases and on the 300 s chunk
-above. It is here because re-deriving the four optimisations from scratch is the
-expensive part, not the algorithm:
+`torchaudio.functional.forced_align` on 200 random cases (including tight
+`T == L + repeats` fits), on the 43 recorded cases of
+`tests/test_forced_align_stability.py`, and on the 300 s chunk, all under
+`np.errstate(all="raise")`; on 34 constructed tie cases it follows torchaudio's
+tie order except where torchaudio itself is wrong (see the *Ties* trap).
+`merge_tokens` matches torchaudio's spans on all 43 recorded cases. It is here
+because re-deriving the optimisations from scratch is the expensive part, not the
+algorithm:
 
 ```python
-NEG = np.float32(-3.4e38)          # float32 floor, not -inf: no NaN from -inf + -inf
+import numpy as np
 
-def forced_align_np(log_probs, targets, blank=0):
+NEG = np.float32(-np.inf)           # same floor as torchaudio; nothing here subtracts
+
+
+def forced_align(log_probs, targets, blank=0):
+    """CTC Viterbi forced alignment, `torchaudio.functional.forced_align` semantics
+    (unbatched): returns one label per frame and that label's log-prob per frame."""
     log_probs = np.ascontiguousarray(log_probs, dtype=np.float32)
     targets = np.asarray(targets, dtype=np.int64)
     T, L = log_probs.shape[0], len(targets)
     N = 2 * L + 1
-    # advance-by-two is legal only into a token whose preceding token differs
-    skip_idx = (np.flatnonzero(targets[1:] != targets[:-1]) + 1) * 2 + 1
-    src_idx = skip_idx - 2
+    repeats = int(np.count_nonzero(targets[1:] == targets[:-1]))
+    if L == 0:
+        raise ValueError("targets must not be empty")
+    if T < L + repeats:
+        raise ValueError(f"targets length is too long for CTC: {L} tokens + "
+                         f"{repeats} repeats need {L + repeats} frames, got {T}")
+    # Advance-by-two penalty: 0 on token states whose preceding token differs
+    # (skipping the blank between them is legal), -inf everywhere else.
+    pen = np.full(N, NEG, dtype=np.float32)
+    pen[(np.flatnonzero(targets[1:] != targets[:-1]) + 1) * 2 + 1] = 0.0
 
     alpha = np.full(N, NEG, dtype=np.float32)
-    nxt = np.empty(N, dtype=np.float32)
-    two = np.full(N, NEG, dtype=np.float32)   # non-skip lanes stay NEG for the whole run
+    nxt = np.full(N, NEG, dtype=np.float32)
+    two = np.full(N, NEG, dtype=np.float32)   # two[:2] stays -inf for the whole run
     c1 = np.zeros(N, dtype=bool)              # c1[0] stays False for the whole run
-    c2 = np.empty(N, dtype=bool)
-    bt = np.zeros((T, N), dtype=np.uint8)
+    c2 = np.zeros(N, dtype=bool)
+    c1v, c2v = c1.view(np.uint8), c2.view(np.uint8)
+    bt = np.empty((T, N), dtype=np.uint8)     # every row t >= 1 is fully written below
+    bt[0] = 0
 
     alpha[0] = log_probs[0, blank]
-    if N > 1:
-        alpha[1] = log_probs[0, targets[0]]
+    alpha[1] = log_probs[0, targets[0]]
 
     for t in range(1, T):
-        np.greater(alpha[:-1], alpha[1:], out=c1[1:])      # advance one vs stay
+        np.greater(alpha[:-1], alpha[1:], out=c1[1:])      # advance-one beats stay
         np.maximum(alpha[1:], alpha[:-1], out=nxt[1:])
         nxt[0] = alpha[0]
-        two[skip_idx] = alpha[src_idx]                     # advance two
-        np.greater(two, nxt, out=c2)
+        np.add(alpha[:-2], pen[2:], out=two[2:])           # advance-two, -inf where illegal
+        np.greater(two, nxt, out=c2)                       # ... beats both
         np.maximum(nxt, two, out=nxt)
-        row = bt[t]
-        np.copyto(row, c1.view(np.uint8))
-        np.copyto(row, 2, where=c2)
+        row = bt[t]                                        # 2 where the skip won, else c1
+        np.add(c2v, c2v, out=row)
+        np.maximum(row, c1v, out=row)
         lp = log_probs[t]
         nxt[0::2] += lp[blank]                             # blank states, one scalar
         nxt[1::2] += lp[targets]                           # token states, gather of L
         alpha, nxt = nxt, alpha
 
-    s = N - 1 if alpha[N - 1] >= alpha[N - 2] else N - 2
+    # torchaudio ends on the final blank only if it is strictly better
+    s = N - 1 if alpha[N - 1] > alpha[N - 2] else N - 2
     path = np.empty(T, dtype=np.int64)
     scores = np.empty(T, dtype=np.float32)
     ext = np.zeros(N, dtype=np.int64)
@@ -266,11 +334,24 @@ def forced_align_np(log_probs, targets, blank=0):
         scores[t] = log_probs[t, tok]
         s -= int(bt[t, s])   # int(): numpy would type the in-place op as uint8
     return path, scores
+
+
+def merge_tokens(path, scores, blank=0):
+    """`torchaudio.functional.merge_tokens`: runs of equal non-blank labels as
+    (token, start, end, score) with an exclusive end and the mean frame score."""
+    path = np.asarray(path)
+    cut = np.flatnonzero(path[1:] != path[:-1]) + 1
+    starts = np.concatenate(([0], cut))
+    ends = np.concatenate((cut, [len(path)]))
+    return [(int(path[s]), int(s), int(e), float(scores[s:e].mean()))
+            for s, e in zip(starts, ends) if path[s] != blank]
 ```
 
 The backtrace loop is Python over T, which is fine — it is ~15 000 scalar steps and
-measures under 20 ms. `merge_tokens` still has to be written; see the span-end trap
-below.
+measures under 20 ms. The two `ValueError`s mirror torchaudio's checks: the engine
+pre-checks both conditions, but its `except … warn … _spread` path is only
+meaningful if the DP raises rather than returning garbage when it is ever called
+without them.
 
 ## Memory: the standard fix works, and you still should not use it
 
@@ -379,8 +460,14 @@ starting — their docstrings describe defects that were expensive to find.
 * Word timestamps unchanged end to end — compare against a stored run, do not eyeball.
 * No `torchaudio` left in `noScribe/`: `grep -rn torchaudio noScribe/` empty except
   comments you have updated.
-* The DP cap and the recursive split are removed **only** after a pass that would
-  previously have tripped the cap is shown to work without them.
+* The DP cap and the recursive split **stay** (see *What this task actually buys*);
+  only the cap's comment changes, from segfault to memory. A pass that would
+  previously have tripped the cap must still split and still align.
+* The acceptance chunk is real emissions, not uniform random ones: at chunk scale,
+  random emissions push |alpha| to ~5·10⁴ where float32 sums collide constantly, and
+  the resulting ties make *every* implementation — including torchaudio against
+  itself with a different tie rule — disagree on thousands of frames. Measured: 7 918
+  differing frames on a random chunk, 0 on a peaky one of the same size.
 
 ## Traps
 
@@ -397,6 +484,25 @@ starting — their docstrings describe defects that were expensive to find.
   the shape of bug the single-path decision above is meant to keep out of production.
 * **Repeated tokens.** Two identical labels in a row require a blank between them —
   advance-by-two must not skip it. torchaudio enforces this; so must you.
+* **Ties.** The recorded reference contains none, so a DP with the wrong tie order
+  passes it and then disagrees with torchaudio on real audio. torchaudio's CPU
+  kernel (`forced_align/cpu/compute.cpp`) decides, per cell with predecessors
+  `x0` (stay), `x1` (advance one), `x2` (advance two):
+  `if (x2 > x1 && x2 > x0) → 2; else if (x1 > x0 && x1 > x2) → 1; else → 0`,
+  and ends on the final blank only if `alpha[S-1] > alpha[S-2]`, strictly — a tie
+  goes to the last token. Round four had `>=` there and diverged on 24 of 34
+  constructed tie cases. The reference above reproduces the first clause, the
+  `x1 > x0` half of the second, and the final-state rule exactly.
+  **What it deliberately does not reproduce:** when `x1 == x2 > x0`, torchaudio's
+  chain falls through to `x0` — the strictly *worse* predecessor. That is a defect
+  in torchaudio, not a tie convention: a scalar Python port of the C++ loop matches
+  torchaudio on 234 of 234 cases, the same port without the `x1 > x2` clause matches
+  the reference above on 234 of 234, and on 10 of the 13 cases where the two differ
+  torchaudio's path has a strictly lower total score. Reproducing it would cost two
+  extra full-width operations per frame (~15 %) to copy a bug. It is rare — 2 064 of
+  146 million cells on the peaky chunk, none on the winning path — but it is the one
+  known way the numpy path can differ from torchaudio, so if a word timestamp ever
+  differs, check for an exact tie before suspecting the DP.
 * **Scores.** `merge_tokens` returns a score per span. Check what the existing code
   does with it before changing its meaning; note that what the engine stores as
   `prob` is `exp()` of that score, so it matches `whisper_mp_worker`'s field.
