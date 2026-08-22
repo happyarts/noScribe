@@ -103,6 +103,7 @@ if __name__ == "__main__":
     with np.errstate(all='raise'):
         for name in which:
             vb2.check(name, CANDS[name])
+            vb.check_blanks(name, CANDS[name])
     for peaky in (True, False):
         lp, tg = make_chunk(14985, 38, 4886, peaky)
         p_ref, _ = fa_torch(lp, tg)

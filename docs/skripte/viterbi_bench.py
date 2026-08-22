@@ -344,6 +344,45 @@ def tie_cases():
         yield lp, tg
 
 
+def blank_cases(n=200, rng=None):
+    """Cases with a non-zero blank index.
+
+    Every other generator here leaves blank at 0, and so does the recorded
+    reference, so a DP that hard-codes 0 as the blank label passes all 277 of
+    them and still mislabels every blank frame in production. torchaudio's own
+    test suite uses blank=5; this closes the same gap.
+    """
+    rng = rng or np.random.default_rng(99)
+    C = 6
+    for blank in (0, 3, 5):
+        for _ in range(n // 3):
+            T = int(rng.integers(4, 14))
+            L = int(rng.integers(1, 4))
+            tg = np.array([x for x in rng.integers(0, C, size=L) if x != blank])
+            if len(tg) == 0:
+                continue
+            R = int(np.sum(tg[1:] == tg[:-1]))
+            if T < len(tg) + R:
+                continue
+            logits = rng.standard_normal((T, C)).astype(np.float32)
+            logits[:, blank] += 2.0          # blanks must actually reach the path
+            lp = logits - np.log(np.exp(logits).sum(-1, keepdims=True))
+            yield lp.astype(np.float32), tg, blank
+
+
+def check_blanks(name, fn):
+    """`fn` must match torchaudio for blank indices other than 0."""
+    bad = n = 0
+    for lp, tg, blank in blank_cases():
+        n += 1
+        p_ref, s_ref = fa_torch(lp, tg, blank=blank)
+        p, s = fn(lp, tg, blank=blank)
+        if not (np.array_equal(p, p_ref) and np.allclose(s, s_ref, atol=1e-5)):
+            bad += 1
+    print(f"{name}: {n - bad}/{n} identical with non-zero blanks")
+    return bad == 0
+
+
 def check(name, fn):
     bad = 0
     n = 0

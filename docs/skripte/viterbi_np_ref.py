@@ -9,7 +9,12 @@ NEG = np.float32(-np.inf)           # same floor as torchaudio; nothing here sub
 
 def forced_align(log_probs, targets, blank=0):
     """CTC Viterbi forced alignment, `torchaudio.functional.forced_align` semantics
-    (unbatched): returns one label per frame and that label's log-prob per frame."""
+    (unbatched): returns one label per frame and that label's log-prob per frame.
+
+    The DP runs in float32 whatever the input dtype -- measured, and worth a
+    third of the runtime -- so `scores` is float32 where torchaudio would hand
+    a float64 caller float64 back.
+    """
     log_probs = np.ascontiguousarray(log_probs, dtype=np.float32)
     targets = np.asarray(targets, dtype=np.int64)
     T, L = log_probs.shape[0], len(targets)
@@ -20,6 +25,14 @@ def forced_align(log_probs, targets, blank=0):
     if T < L + repeats:
         raise ValueError(f"targets length is too long for CTC: {L} tokens + "
                          f"{repeats} repeats need {L + repeats} frames, got {T}")
+    # torchaudio rejects this too, and it must stay rejected rather than
+    # tolerated: a target state carrying the blank label collapses away in
+    # merge_tokens, so its word loses its span and every later word slides onto
+    # the wrong token -- a quietly wrong transcript instead of the caller's
+    # log-and-spread fallback.
+    if np.any(targets == blank):
+        raise ValueError("targets should not contain the blank index "
+                         f"({blank}); found {int(np.count_nonzero(targets == blank))}")
     # Advance-by-two penalty: 0 on token states whose preceding token differs
     # (skipping the blank between them is legal), -inf everywhere else.
     pen = np.full(N, NEG, dtype=np.float32)
@@ -56,7 +69,10 @@ def forced_align(log_probs, targets, blank=0):
     s = N - 1 if alpha[N - 1] > alpha[N - 2] else N - 2
     path = np.empty(T, dtype=np.int64)
     scores = np.empty(T, dtype=np.float32)
-    ext = np.zeros(N, dtype=np.int64)
+    # label per state: blank on the even states, the target on the odd ones.
+    # np.zeros here would be a silent bug for any blank index other than 0 --
+    # every blank frame would come back labelled 0 and scored from column 0.
+    ext = np.full(N, blank, dtype=np.int64)
     ext[1::2] = targets
     for t in range(T - 1, -1, -1):
         tok = ext[s]
@@ -70,6 +86,7 @@ def merge_tokens(path, scores, blank=0):
     """`torchaudio.functional.merge_tokens`: runs of equal non-blank labels as
     (token, start, end, score) with an exclusive end and the mean frame score."""
     path = np.asarray(path)
+    scores = np.asarray(scores)
     cut = np.flatnonzero(path[1:] != path[:-1]) + 1
     starts = np.concatenate(([0], cut))
     ends = np.concatenate((cut, [len(path)]))
