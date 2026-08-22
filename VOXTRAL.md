@@ -20,40 +20,14 @@ pip install -r environments/requirements_voxtral_macOS_arm64.txt
 The models `voxtral-mini` and `voxtral-small` then appear in the model dropdown.
 They are downloaded on first use.
 
-### Licence: `mlx-voxtral` is not open source
-
-This needs saying before anything else, because it is not visible from the
-install line. [`mlx-voxtral`](https://github.com/mzbac/mlx.voxtral) ships under a
-**"Personal Use License"** — MIT plus a field-of-use restriction. It permits use,
-modification and redistribution for *personal, educational, research or other
-non-commercial* purposes, and explicitly prohibits "using the Software in
-commercial products or services", "using the Software to provide commercial
-services", and "any revenue-generating activity".
-
-Two consequences follow, and neither is resolved yet:
-
-* **noScribe is GPL-3.0**, and the GPL does not permit further restrictions on
-  the exercise of its rights. The frozen app does not bundle `mlx-voxtral` — the
-  Voxtral stack is an optional install and appears in none of the PyInstaller
-  specs — so no combined work is distributed today. But this engine exists to
-  drive that library, and the combination is the intended configuration.
-* **Transcribing for paid work is commercial use.** Much of noScribe's audience
-  does exactly that. Anyone using this engine professionally should read the
-  licence first.
-
-Nobody here is a lawyer and this is not legal advice; it is a conflict that has
-to be resolved rather than inherited. The two ways out are asking the copyright
-holder to relicense — the licence itself invites that — or moving to
-[`mlx-audio`](https://github.com/Blaizzy/mlx-audio), which is MIT and carries no
-such restriction. The next section describes what that move involves.
-
 ### A note on the pinned dependencies
 
-`mlx`, `mlx-lm` and `mlx-voxtral` are pinned to exact versions. For
-[`mlx-voxtral`](https://github.com/mzbac/mlx.voxtral) that pin is a deliberate
-freeze rather than a normal version constraint: its last release was
-2025-08-19 and it should be treated as unmaintained. `mlx-lm` is pinned because
-decoding drives `generate_step` directly.
+`mlx`, `mlx-lm` and `mlx-voxtral` are pinned to exact versions.
+[`mlx-voxtral`](https://github.com/mzbac/mlx.voxtral) went untouched between
+2025-08 and 2026-08, so the pin started life as a deliberate freeze; the author
+has since relicensed it to plain MIT and merged a fix, so it is a normal
+version constraint again. `mlx-lm` is pinned because decoding drives
+`generate_step` directly.
 
 This is a known liability, so here is the exit route, measured rather than
 assumed. **The coupling is five calls** — `load_voxtral_model`,

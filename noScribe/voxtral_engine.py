@@ -1847,9 +1847,17 @@ class _Voxtral:
                 info["loop_kicks"] = breaker.kicks
                 info["loop_gave_up"] = breaker.gave_up
         else:
+            # Pass the resolved stop ids rather than inheriting the library
+            # default. mlx-voxtral <= 0.0.4 defaults to [2, 4, 32000], and
+            # 32000 is the ordinary text token " Capital" -- so this branch,
+            # the penalty rung of the loop ladder, silently truncated any
+            # retry containing that word while the fast path above did not.
+            # Fixed upstream in 0.0.5, but passing it keeps the two paths
+            # provably identical on any version.
             out = self.model.generate(**mi, max_new_tokens=max_new_tokens,
                                       temperature=temperature,
-                                      repetition_penalty=repetition_penalty)
+                                      repetition_penalty=repetition_penalty,
+                                      stop_tokens=list(self._STOP_TOKENS))
             gen = out[:, inp.input_ids.shape[1]:]  # drop the prompt
         return self.proc.decode(gen[0], skip_special_tokens=True).strip()
 

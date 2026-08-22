@@ -738,20 +738,20 @@ WebGPU demo. Worth re-measuring when Cohere ships a successor.
 with `Unable to parse string as hex hash value`. `HF_HUB_DISABLE_XET=1` in front
 of the download falls back to plain HTTP and works.
 
-### Moving off mlx-voxtral (evaluated 2026-08-21 — and the licence changes the order)
+### Moving off mlx-voxtral (evaluated 2026-08-21 — and then it stopped being necessary)
 
-**The reason to move is no longer maintenance.** `mlx-voxtral` ships under a
-"Personal Use License": MIT plus a prohibition on commercial use, including
-"using the Software to provide commercial services". noScribe is GPL-3.0, which
-does not permit further restrictions, and much of its audience transcribes for
-paid work. `mlx-audio` is MIT. That turns this section from a cleanup into a
-prerequisite — see the licence note in [`../VOXTRAL.md`](../VOXTRAL.md).
+**Resolved 2026-08-22: the reason to move is gone.** `mlx-voxtral` shipped under
+a "Personal Use License" — MIT plus a ban on commercial use — which noScribe's
+GPL-3.0 could not carry, and that made moving to MIT-licensed `mlx-audio` a
+prerequisite rather than a cleanup. Asked the author to relicense; he did, within
+a day, and the repository is plain MIT as of v0.0.5. He also merged the
+stop-token fix and cut a release, after a year of silence.
 
-The cheaper resolution is to ask the copyright holder to relicense; the licence
-text invites exactly that, and the maintainer is active on GitHub even though
-this repository is not. Everything below is what the move costs if that fails.
+So the migration is shelved, not cancelled. Everything below stays on record
+because the *technical* findings are independent of the licence and would apply
+whenever a move is reconsidered — and because they cost real measurement.
 
-`mlx-voxtral` has had no release since 2025-08-19. The maintained alternative is
+`mlx-voxtral` had no release between 2025-08-19 and 2026-08-22. The maintained alternative is
 `mlx-audio`, whose `mlx_audio/stt/models/` holds Voxtral next to cohere_asr,
 qwen3_asr, vibevoice_asr, parakeet and canary — every engine measured above,
 behind one API. The exit route is written up in

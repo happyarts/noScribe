@@ -8,20 +8,19 @@
 # output is requested, word timestamps are recovered with CTC forced alignment
 # (transformers + torchaudio) against a German wav2vec2 model.
 #
-# mlx-voxtral is pinned: upstream is effectively unmaintained (last release
-# 2025-08), so a pin means "frozen == stable" rather than a risk. mlx and mlx-lm
+# mlx-voxtral is pinned because the engine was validated against one version,
+# not because upstream is dead: it went a year without a release, then in
+# 2026-08 relicensed to MIT and merged a fix. mlx and mlx-lm
 # are pinned too because voxtral_engine drives decoding through mlx_lm internals
 # (generate_step + a small model adapter); a newer mlx-lm could change that API
 # or break the frozen mlx-voxtral. These are the versions the engine and its
 # byte-identity tests were validated against -- bump them deliberately, together.
 mlx==0.32.0
 mlx-lm==0.31.3
-# LICENCE WARNING: mlx-voxtral is NOT open source. It ships under a "Personal
-# Use License" -- MIT plus a ban on commercial use, including "using the
-# Software to provide commercial services". noScribe is GPL-3.0, which does not
-# permit further restrictions, and transcribing for paid work is commercial use.
-# See the licence section in VOXTRAL.md. mlx-audio (MIT) is the way out.
-mlx-voxtral==0.0.4
+# 0.0.5 carries the stop-token fix (32000 is the text token " Capital", not a
+# pad token) and is the first release under plain MIT -- 0.0.4 and earlier were
+# "Personal Use Only", which GPL-3.0 could not have carried.
+mlx-voxtral==0.0.5
 # transformers 5 is what the engine was validated against, and mlx-lm 0.31.3
 # already requires it -- a lower floor here only allowed an untested 4.x to
 # satisfy this file while pip installed 5 anyway.

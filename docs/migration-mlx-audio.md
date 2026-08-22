@@ -16,9 +16,18 @@ otherwise block the Voxtral engine from going upstream. Background:
 `VOXTRAL.md` (licence section) and `docs/voxtral-quantisierung.md`
 (*Moving off mlx-voxtral*).
 
-**Trigger:** [mzbac/mlx.voxtral#9](https://github.com/mzbac/mlx.voxtral/issues/9)
-asks the copyright holder to relicense. **If that issue got a yes, stop — this
-migration is unnecessary.** Check it first.
+> **STOP — this migration is on hold as of 2026-08-22.**
+>
+> [mzbac/mlx.voxtral#9](https://github.com/mzbac/mlx.voxtral/issues/9) asked the
+> copyright holder to relicense, and he did: the repository is **plain MIT** from
+> v0.0.5, he merged our stop-token fix, and he cut the first release in a year.
+> The licence conflict that made this migration necessary no longer exists.
+>
+> Do not work through this file unless something *else* makes the move
+> worthwhile — mlx-voxtral going quiet again, an MLX bump breaking it, or a
+> decision to ship a second engine, where mlx-audio's model collection pays for
+> the work in one go. The findings below were measured and remain valid; only
+> the reason to act on them is gone.
 
 ## Scope
 
