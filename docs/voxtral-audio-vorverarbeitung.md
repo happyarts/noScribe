@@ -283,14 +283,74 @@ uns gegenüber dem vorgelesenen FLEURS fehlte, und mit 11,4 % WER deutlich härt
 
 Skript: `voxpopuli_floor.py`.
 
-**Stand der Entscheidung: nicht eingebaut, aber der erste Kandidat mit einem
-echten Argument.** Dagegen steht Architekturtreue — alle vier Implementierungen
-(transformers, mlx-audio, transcribe.cpp, mlx-voxtral 0.0.6) nehmen das nackte
-Maximum, und damit wurde das Modell trainiert. Dafür steht ein gemessener,
-monotoner Gewinn in einem realistischen Fehlerfall bei nicht nachweisbaren
-Kosten. Was vor einem Einbau fehlt: die Dosis-Wirkung auf einer zweiten Passage
-und auf VoxPopuli-Strömen mit eingesetztem Transienten — +5,21 steht bislang auf
-einer Passage.
+**Auf Strömen bestätigt, und kleiner als die Passagen glauben machten.** Zehn
+VoxPopuli-Ströme à 300 s, jeder einmal sauber und einmal mit Transient, gepaart
+je Boden (`voxpopuli_spike.py`):
+
+| Bodenanstieg (Median) | max-Boden | Perzentil 99,9 |
+|---|---|---|
+| 5,2 dB | −0,07 [−0,29, +0,15] | +0,04 [+0,00, +0,09] |
+| 16,2 dB | **+0,35 [+0,03, +0,66]** \* | +0,03 [+0,00, +0,07] |
+| 28,2 dB | **+1,52 [+0,78, +2,26]** \* | +0,04 [+0,00, +0,10] |
+
+\* = Intervall schließt die Null aus. Monoton, bei den beiden oberen Dosen
+nachweisbar, der Perzentil-Boden bei allen dreien flach.
+
+**Die Passagenzahlen (+5,21 und +11,99) überschätzen um das Vier- bis
+Achtfache.** Unter Greedy-Decoding kippt auf einer einzelnen Passage ein Token
+und der Rest zieht nach; die Strommessung mittelt das heraus. **+1,52 bei 28 dB
+ist die belastbare Zahl.** Aus demselben Grund war die Beobachtung, der Schaden
+sei an drei Knallpositionen „exakt gleich groß", kein Beleg für Allgemeinheit,
+sondern nur für Determinismus.
+
+**Welche Perzentile in Frage kommen** — Sweep auf denselben Strömen, alle gegen
+dieselbe Max-Basis: 99 → −0,12 [−0,85, +0,49], 99,9 → −0,10 [−0,83, +0,47],
+99,99 → −0,25 [−0,99, +0,31]. Alle drei ununterscheidbar vom Maximum und
+voneinander; die Wahl ist keine kritische Größe.
+
+**Welche echten Geräusche welche Dosis erzeugen** (gleiche Spitzenamplitude,
+leise Aufnahme): Klatschen 10,3 dB, Rauschburst 17,3 dB, **tieffrequenter
+Türknall 27,1 dB**, Rechteckblock 31,5 dB. Der teuerste Fall ist der
+alltäglichste.
+
+**Der Ausreißer ist kein Laborartefakt.** Abstand zwischen der lautesten
+Mel-Zelle und dem 99,9-Perzentil desselben Spektrogramms, ohne Modell gemessen
+(`mel_outlier_gap.py`): Interview roh 9,4 und 9,1 dB, Podcast roh 13,2 dB,
+Podcast gemastert 9,3 dB, unbearbeitete Rohspur **21,9 dB**, `zoom` 14,4 dB,
+VoxPopuli-Ströme im Median 13,0 dB. In **jeder** Aufnahme wird der Boden
+7–22 dB höher gesetzt, als ein robustes Maß ihn setzen würde, am stärksten bei
+rohem Material — also genau bei dem, was Nutzer bringen. Das ordnet auch den
+Nullbefund oben ein: die Ströme tragen denselben Abstand, der Boden wurde dort
+real um 13 dB gesenkt, ohne Wirkung.
+
+**Die Asymmetrie, die beide Befunde zusammenbringt:** den Boden zu *senken*
+zeigt mehr Rauschdetail, das das Modell ignoriert; ihn zu *heben* zerstört leise
+Sprachdetails. Der Perzentil-Boden liegt **immer** unter oder gleich dem
+Maximum-Boden — er kann also nur verhindern, dass gehoben wird.
+
+**Was dagegen spricht, beziffert.** Der Ist-Zustand liefert per Konstruktion
+**exakt 2,000** Einheiten Spannweite. Mit Perzentil-Boden: 2,182 (`hart`), 2,235
+(Interview), 2,360 (`zoom`), 2,547 (Rohspur) — bis **27 % breiter**, nach unten.
+In [openai/whisper#269](https://github.com/openai/whisper/discussions/269) warnt
+der Whisper-Autor genau davor: ohne diese Normalisierung liege die Eingabe
+*out-of-distribution*. Bei den Breiten, die echtes Material erzeugt, ist es
+gemessen folgenlos — aber es ist der Grund, warum das nicht ungemessen eingebaut
+werden darf.
+
+**Eine Falle beim Zitieren absoluter VoxPopuli-Zahlen.** Rund **8,7 %** der
+Gold-Referenzen schreiben Ziffern („60 Jahre", „21. Februar"), der Sprecher sagt
+aber Wörter, und `wer.py`s `norm()` behält Ziffern. Das kostet **1,22
+WER-Punkte**: derselbe Lauf ergibt 11,39 % mit und **10,17 %** ohne diese
+Äußerungen (`load_clips(..., skip_digits=True)`). Gepaarte Differenzen sind
+nicht betroffen, weil beide Arme dieselbe Referenz sehen.
+
+**Stand der Entscheidung: der Einbau ist begründet, aber nicht erfolgt.** Dafür
+steht ein gemessener, dosisabhängiger Schaden mit Intervallen, die die Null
+ausschließen, und eine Abhilfe, die ihn vollständig beseitigt und auf sauberem
+Material nichts kostet. Dagegen steht Architekturtreue — alle vier
+Implementierungen (transformers, mlx-audio, transcribe.cpp, mlx-voxtral 0.0.6)
+nehmen das nackte Maximum, und damit wurde das Modell trainiert. Der
+Arbeitsauftrag für den Einbau liegt in `auftrag-perzentil-boden.md`.
 
 **Nebenbefund, geklärt: der Whisper-Pfad ist nicht betroffen.**
 `faster_whisper/feature_extractor.py:227` trägt dieselbe Zeile, und noScribe
