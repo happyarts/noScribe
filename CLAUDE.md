@@ -165,8 +165,8 @@ this was its boundary, which is what a rebuild has to re-establish:
 
 Since then Voxtral has also grown `noScribe/ctc_align.py`, `tests/test_mel_floor.py`,
 `tests/test_ctc_align.py`, `docs/skripte/engines/`, `docs/diarisierung.md`,
-`docs/viterbi-numpy-brief.md`, `docs/migration-mlx-audio.md` and
-`docs/voxtral-audio-vorverarbeitung.md`. Everything on `local/main` outside that set belongs to
+`docs/viterbi-numpy-brief.md`, `docs/migration-mlx-audio.md`,
+`docs/voxtral-audio-vorverarbeitung.md` and `docs/andere-asr-engines.md`. Everything on `local/main` outside that set belongs to
 one of the smaller PRs and must stay out; `tools/check_local_current.py` says which branch owns
 which line.
 

@@ -4,18 +4,25 @@ Everything here was measured on an M1 Max (32 GB) with `mlx-voxtral` 0.0.4.
 The scripts are in `docs/skripte/`, the builds are made with
 `tools/quantize_voxtral.py`.
 
-(The pin has since moved to 0.0.6; its log-Mel change leaves build-vs-build
-comparisons untouched — see `voxtral-audio-vorverarbeitung.md`, section 6.)
+(Two things have changed under these numbers since, neither of which reorders a
+build against another build. The pin moved to 0.0.6, whose log-Mel change was
+measured at the transcript and found neutral; and the engine now clamps the
+log-Mel at a percentile of the spectrogram rather than its maximum, which helps
+only where a transient would otherwise raise the floor. Both in
+`voxtral-audio-vorverarbeitung.md`, sections 6 and 6b.)
 
 ## The short answer
 
 Ship **`voxtral-mini-8bit`**: the 3B weights at 8 bit with the **audio encoder
 left in bf16**. On hard German interview audio it reproduces the unquantised
-transcript word for word at 4.5x the speed, in 7.7 GB.
+transcript word for word at 4.5x the speed, in about 7 GB for a two-minute pass
+(`MEM_MODEL` meters the rest; see *Decode path and memory*).
 
 That recommendation rests on speed and on readable output, **not** on
-recognition accuracy. Measured by character error the 24B model hears better,
-and at 4 bit it does fit on a 32 GB machine. Both are worked out below.
+recognition accuracy. Measured by character error the 24B model hears better —
+and a 4-bit 24B build does fit on a 32 GB machine, though it is one you have to
+convert yourself: the two builds this app offers are `voxtral-mini-8bit` and
+`voxtral-small-8bit`, and the latter needs ~34 GB. Both are worked out below.
 
 ## How the measurements are made
 
@@ -205,18 +212,14 @@ open question and costs 0.5 GB. Do not re-propose it.
 
 ## Clean audio and hard audio rank the models differently
 
-| | hard podcast passage | FLEURS (clean, read) |
-|---|---:|---:|
-| voxtral-mini-8bit | **4.27 %** | 4.81 % |
-| voxtral-mini-8bit uniform | 4.74 % | **4.81 %** |
-| voxtral-small-4bit | 7.82 %* | **2.82 %** |
+Read by word error rate the ranking inverts between the two sets — the 24B model
+wins decisively on clean audio (2.82 % against 4.81 % on FLEURS), the 3B model
+on the hard passage (4.27 % against 7.82 %, that 24B figure being the best 24B
+configuration found: encoder bf16, `lm_head` 4 bit). Both tables are below,
+under *Against Whisper*; this is the one place they have to be read together.
 
-*best 24B configuration found (encoder bf16, `lm_head` 4 bit)
-
-Read by word error rate the ranking inverts between the two sets: the 24B model
-wins decisively on clean audio, the 3B model on the hard passage. That inversion
-is an artefact of the word metric — it is a statement about spelling read as one
-about hearing. The next chapter separates the two.
+That inversion is an artefact of the word metric — a statement about spelling
+read as one about hearing. The next chapter separates the two.
 
 **Weight of evidence:** the FLEURS numbers rest on 25 minutes and 100
 recordings; the podcast numbers on a single two-minute passage of 422 words and
@@ -245,7 +248,8 @@ the 24B model is the better half:
 | 15–17 | small, encoder < 8 bit | 4.03–4.87 % | 9.48–10.19 % | 82–99 | 40–43 |
 
 **Every 24B build with an 8-bit-or-better encoder beats every 3B build**, with a
-gap of 0.88 CER points between the groups — far outside the noise floor. The
+gap of 0.88 CER points between the two groups as ranked here — far outside the
+noise floor. The
 24B model also has the lowest CER of anything measured here, Whisper included.
 
 The clearest single statistic is **characters per word error**: 3.8 for the 3B
@@ -268,7 +272,7 @@ the 6→8 step is 37 characters, the 8→bf16 step is one. Every other column in
 sweep is noise. None of this carries over to the 3B model, which shows no such
 threshold.
 
-The 8-bit 24B build needs 26.4 GB and runs at 0.80x realtime — slower than the
+The 8-bit 24B build needs ~27 GB of weights and runs at 0.80x realtime — slower than the
 recording. Not usable on 32 GB. The 4-bit build is a different matter: see
 "Running the 24B model on 32 GB" below.
 
@@ -329,12 +333,9 @@ falls when the audio gets hard**. By word error the 3B model appears to get
 metric is measuring something other than recognition. By character error the
 picture is ordinary:
 
-| | clean CER | hard CER | change | (clean WER | hard WER) |
-|---|---:|---:|---|---:|---:|
-| voxtral-mini-8bit | 1.44 % | 3.39 % | 2.4x worse | 4.81 % | 4.27 % |
-| voxtral-small-4bit | 0.76 % | 2.11 % | 2.8x worse | 2.82 % | 7.82 % |
-| whisper-fast | 1.40 % | 3.34 % | 2.4x worse | 4.05 % | 8.06 % |
-| whisper-precise | 1.40 % | 8.75 % | **6.3x worse** | 4.05 % | 14.22 % |
+Divide the hard-passage CER by the clean one, model by model: 2.4x for
+`voxtral-mini-8bit`, 2.8x for `voxtral-small-4bit`, 2.4x for `whisper-fast` —
+and **6.3x for `whisper-precise`**.
 
 Hard audio costs every sane model roughly 2.5x in character error, and the
 ranking from the clean set survives into the hard one. The outlier is
@@ -375,42 +376,11 @@ python docs/skripte/bootstrap_cer.py Audiotest2/referenz/hart_780-900_REFERENZ.t
 # compare two builds over hours of audio, no reference needed
 python docs/skripte/encoder_diff.py models/voxtral-mini-8bit \
     models/voxtral-mini-8bit-enc6 --audio <file> [file ...]
-
-# the Parakeet comparison (needs `pip install parakeet-mlx`, which is NOT in
-# the requirements -- it pulls only dacite on top of what is already installed,
-# and mlx 0.32.1 satisfies its floor, so it can be added and removed without
-# disturbing the pinned Voxtral stack)
-python docs/skripte/engines/parakeet_wer.py ref \
-    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
-    Audiotest2/referenz/hart_780-900.wav 5      # trailing 5 = beam width
-python docs/skripte/engines/parakeet_wer.py fleurs 100
-
-# the Qwen3-ASR comparison (no extra dependency -- transformers 5.13+ has it)
-python docs/skripte/engines/qwen_asr_wer.py ref \
-    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
-    Audiotest2/referenz/hart_780-900.wav chunk60
-python docs/skripte/engines/qwen_asr_wer.py ref \
-    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
-    Audiotest2/referenz/hart_780-900.wav "vocab:Xtend, BalanceOil"
-python docs/skripte/engines/qwen_asr_wer.py fleurs 100
-
-# VibeVoice-ASR: same yardsticks, plus its own diarization
-python docs/skripte/engines/vibevoice_wer.py ref \
-    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
-    Audiotest2/referenz/hart_780-900.wav
-python docs/skripte/engines/vibevoice_wer.py fleurs 100
-
-# Cohere Transcribe (gated repo -- accept on the model page first; its Xet
-# transfer is broken, so HF_HUB_DISABLE_XET=1 for the download)
-python docs/skripte/engines/cohere_asr_wer.py tokens
-python docs/skripte/engines/cohere_asr_wer.py ref \
-    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
-    Audiotest2/referenz/hart_780-900.wav plain
-python docs/skripte/engines/cohere_asr_wer.py fleurs 100
 ```
 
-The four scripts under `docs/skripte/engines/` share a README and the same three
-yardsticks; see [`docs/skripte/engines/README.md`](skripte/engines/README.md).
+Scoring a rival engine is a different exercise with its own harness; the
+commands are in [andere-asr-engines.md](andere-asr-engines.md), the scripts
+under [`docs/skripte/engines/`](skripte/engines/README.md).
 
 Each build is ~20 seconds to make and 5–21 GB on disk. On macOS, remember that
 hourly Time Machine snapshots keep deleted builds alive: reclaim with
@@ -443,10 +413,10 @@ passes. Four memory levers were then measured and mostly rejected:
   there is ~0 GB left for the cache on 32 GB. The weights are the wall. What
   *does* fit is small-4bit — see the next chapter.
 
-Net: `MEM_MODEL` for `mini8` is recalibrated to the generate_step path
-(`peak ~= 6.5 + 0.0060*s`, from a 180-1200 s fresh-process sweep with margin),
-which lets 16-24 GB machines run longer single passes; 32 GB is unchanged
-(already capped by the context limit).
+Net: `MEM_MODEL["mini8"]` was recalibrated to the generate_step path. The
+entry, the 180–1200 s sweep behind it and the reason for its safety margin are
+in the comment above `MEM_MODEL` in `noScribe/voxtral_engine.py` — the one place
+that has to stay right, since the auto-chunker reads it.
 
 ## Running the 24B model on 32 GB
 
@@ -473,10 +443,9 @@ So the 24B model does run, in ten-minute passes, at ~1.8x realtime — a four-ho
 recording in something over two hours. Two caveats worth knowing before choosing
 it:
 
-- The `small` entry in `MEM_MODEL` still carries **one-shot-prefill** numbers.
-  Switching to `generate_step` cut the 3B model's slope by ~2.5x; nobody has
-  re-measured the 24B build since. The real pass length is likely well above
-  576 s, so this table is conservative in the safe direction.
+- This table is conservative in the safe direction: the 24B `MEM_MODEL` entries
+  are still pre-`generate_step`, so the real pass length is likely well above
+  576 s. Tracked under *What is still open*.
 - It is the more verbatim of the two models. That is a style choice, not an
   accuracy one — see the chapter above.
 
@@ -489,372 +458,19 @@ python tools/quantize_voxtral.py mistralai/Voxtral-Small-24B-2507 \
 
 ## Other options considered
 
-### Voxtral-Mini-4B-Realtime
+Six rival ASR engines have been measured against the shipped build — Parakeet,
+Qwen3-ASR, VibeVoice, Cohere Transcribe, transcribe.cpp's own Voxtral and the
+streaming Realtime model — and none replaced it. That is a different question
+from which Voxtral build to ship, with a different harness and a different
+cadence, so it has its own file:
+[andere-asr-engines.md](andere-asr-engines.md). The short version, because it
+bears on everything above: on FLEURS the field is separated by tenths of a point
+and this build is mid-table; on hand-corrected German conversation the same
+field spreads over an order of magnitude and the order reverses.
 
-The streaming **Voxtral-Mini-4B-Realtime** model (Awni Hannun's
-[voxmlx](https://github.com/awni/voxmlx) runs it with a bounded rotating KV cache)
-was considered as a low-memory option, then ruled out on Mistral's own published
-numbers: on German FLEURS it scores 6.19% WER at its 480ms setting and 4.15% even
-at 2.4s delay — worse than the offline Voxtral Mini 3B (3.54%), a smaller model.
-The causal/streaming architecture trades look-ahead for latency, and on hard
-conversational audio the gap would only widen. Its advantages (sub-500ms latency,
-bounded memory) are irrelevant to offline file transcription. Not adopted.
+Two moves that are about *this* build rather than another model stay here.
 
-### transcribe.cpp's Voxtral (measured 2026-08-22: on par, and that is the finding)
-
-[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) is a GGML
-speech-to-text library (MIT) that carries Voxtral alongside fifteen other
-families, with Metal, CUDA, Vulkan and HIP backends. It is therefore the only
-route we know to *this* model on hardware MLX cannot reach — which is the whole
-reason to measure it, since the engine is otherwise Apple-Silicon-only.
-
-Built from source (Metal backend), `Voxtral-Mini-3B-2507-Q8_0.gguf` from the
-project's own GGUF repo — the closest analogue to `voxtral-mini-8bit`. Scored
-with `docs/skripte/engines/transcribe_cpp_wer.py`, which reuses `norm`/`wer`
-from `wer.py` verbatim, and against our own build re-run the same day so both
-columns come from the same machine and the same pin:
-
-| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Speed |
-|---|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit (MLX) | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 7.17x |
-| transcribe.cpp Q8_0, `--language de` | 4.98 % | 3.83 % | 10 | 10 | 1 | 7.11x |
-| transcribe.cpp Q8_0, auto | 5.45 % | 3.83 % | 11 | 10 | 2 | 7.10x |
-
-| Second reference (859 words) | WER | CER | Sub | Del | Ins | Speed |
-|---|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit (MLX) | **1.98 %** | **1.09 %** | 12 | 4 | 1 | 7.97x |
-| transcribe.cpp Q8_0, `--language de` | 2.10 % | 1.33 % | 12 | 5 | 1 | 8.25x |
-
-**Identical substitution counts on both passages** (10 and 12), the difference
-sitting in one or two extra deletions. For passages this size the document's own
-resolution analysis puts +-1.8 to +-2.5 CER points around a single score, so
-these two engines are indistinguishable on this material, at the same speed.
-
-**The expected failure did not appear.** [Issue #82](https://github.com/handy-computer/transcribe.cpp/issues/82)
-reports that Voxtral's Tekken tokenizer is unimplemented there and the loader
-falls back to qwen2 pretokenization, with German word-level garbles
-("Publikum" -> "Pubikom"). That is the defect this measurement was designed to
-catch, and on 1281 words of German it did not show: a near-miss scan over every
-word the run produced that is absent from the reference turns up three pairs,
-and all three are ordinary mishearings (`geworden` for `geboren`,
-`schokopourridge` for `schokoporridge`) rather than dropped-letter garbles. The
-issue may still be real on other material or other quants — it is not visible
-here, at Q8_0, on this audio.
-
-So the quality objection to a cross-platform Voxtral does not survive contact
-with the measurement. What remains against it is engine-level, not model-level,
-and is listed in [`../VOXTRAL.md`](../VOXTRAL.md): Voxtral there advertises
-`TRANSCRIBE_TIMESTAMPS_NONE`, there is no repetition/loop defence on the
-causal-LM path (the only compression-ratio gate in the tree is Whisper's 2.4,
-which we already measured as too coarse), and a C API cannot hand us the
-logits processor the loop breaker rides on.
-
-### Parakeet-TDT (measured, rejected)
-
-`nvidia/parakeet-tdt-0.6b-v3` is the obvious structural alternative: a
-FastConformer encoder with a Token-and-Duration Transducer decoder, 0.6B
-parameters, CC-BY-4.0, 25 European languages including German, and — unlike
-anything else here — distributed as MLX, ONNX, CoreML and GGUF, so it would run
-on Windows and Linux CPUs as well. A transducer also cannot do several things
-this engine has to defend against: it emits tokens bound to audio frames, so
-repetition loops, whole-chunk language drift and a dropped head are structurally
-impossible, and word timestamps fall out of the predicted durations instead of
-needing a CTC forced aligner.
-
-Measured with `docs/skripte/engines/parakeet_wer.py` (which reuses `norm` and `wer` from
-`wer.py` unchanged, so the metric is identical), via `parakeet-mlx` 0.5.2 at its
-default bf16:
-
-| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Speed |
-|---|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 6.79x |
-| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 | 2.43x |
-| parakeet-tdt-0.6b-v3, beam 5 | 14.69 % | 6.49 % | 49 | 6 | 7 | 9.13x |
-| parakeet-tdt-0.6b-v3, greedy | 18.01 % | 9.88 % | 49 | 20 | 7 | 26.47x |
-
-The second hand-corrected reference was scored alongside it — 859 words, five
-minutes, a video-call recording, cleaner than the hard passage but still real
-conversation:
-
-| Second reference (859 words) | WER | CER | Sub | Del | Ins | Speed |
-|---|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 | 7.58x |
-| parakeet-tdt-0.6b-v3, beam 5 | 8.50 % | 5.18 % | 34 | 15 | 24 | 10.30x |
-| parakeet-tdt-0.6b-v3, greedy | 10.59 % | 6.81 % | 36 | 14 | 41 | 41.75x |
-
-> **That 0.81 % does not reproduce on the current pin, and it never should have
-> been read as this build's quality.** Re-scored 2026-08-22 under mlx-voxtral
-> 0.0.6, voxtral-mini-8bit lands at **1.98 % / 1.09 %** on this passage
-> (12 substitutions instead of 2; deletions and insertions unchanged at 4 and
-> 1). The cause is not the version bump but what this reference *is*: it was
-> produced by hand-correcting this build's own draft, and its LIESMICH puts the
-> remaining distance to that draft at exactly 0.81 % WER. The old figure is
-> therefore a self-comparison — two substitutions on 859 words of conversational
-> audio was implausibly good, and that was the tell. Anything that shifts the
-> decode off that draft, including the whole-file log-Mel in 0.0.6, gives up the
-> bias and scores honestly.
->
-> Every engine comparison that uses this row as its yardstick keeps its
-> direction — 1.98 % against Parakeet's 8.50 % and Qwen3-ASR's 9.20 % is the
-> same verdict with a smaller multiplier. Quote **1.98 %** outside this document;
-> it is the number a fresh run reproduces.
-
-| FLEURS German (100 recordings) | WER | CER | Speed |
-|---|---:|---:|---:|
-| whisper-precise | **4.05 %** | **1.40 %** | 4.11x |
-| voxtral-mini-8bit | 4.81 % | 1.44 % | 7.64x |
-| parakeet-tdt-0.6b-v3, greedy | 4.81 % | 2.15 % | **44.45x** |
-
-**The benchmark is worthless here, and that is the finding.** On FLEURS the two
-models tie to the second decimal. On real conversation Parakeet is an order of
-magnitude behind — 0.81 % against 8.50 % on 859 words, far outside any noise
-floor this document works with.
-
-**The failure has a name: uncontrolled code-switching.** Parakeet v3 is
-multilingual with no language conditioning — the model has no language token, so
-`transcribe()` has no `language` argument to pass. When the acoustics get
-ambiguous it writes German function words as their English homophones: *und* as
-"and", *wenn* as "when", *es ist* as "it is", *gut* as "good", *ja* as "yeah".
-Counted: **14 English function-word tokens in 407 words** on the hard passage,
-**0 in 882 words** on the cleaner second reference. It is triggered by audio
-quality, and there is no input that suppresses it.
-
-The error *profile* is the second problem. 49 substitutions against Voxtral's 10
-on the same passage: Parakeet replaces where Voxtral omits, and a wrong word
-survives proof-reading in a way a missing one does not — the same argument that
-decided this engine against `whisper-precise`.
-
-Beam search (width 5) is worth having if the model is ever revisited: it cuts
-deletions from 20 to 6 and roughly 3 WER points, for two thirds of the
-throughput. It does not touch the code-switching.
-
-Not adopted. The result says nothing about Parakeet in English or in the other
-24 languages, and nothing about the ONNX build's speed on a CPU — only that it
-is the wrong engine for German conversational audio.
-
-### Qwen3-ASR-1.7B (measured, not adopted)
-
-`Qwen/Qwen3-ASR-1.7B-hf` is the Voxtral principle at half the size: an audio
-encoder in front of a Qwen3-Omni language model, Apache-2.0, 30 languages. Two
-things make it easier to try than anything else here — **transformers supports it
-natively** (`AutoModelForMultimodalLM`, no new dependency at all in this venv),
-and it takes an explicit language as well as a free-form context prompt.
-
-Measured with `docs/skripte/engines/qwen_asr_wer.py`, bf16 on MPS, same metric:
-
-| Hard passage (422 words) | WER | CER | Sub | Del | Ins |
-|---|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 |
-| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 |
-| qwen3-asr-1.7b, 60 s chunks | 10.90 % | 4.33 % | 29 | 5 | 12 |
-| qwen3-asr-1.7b, one pass | 11.14 % | 4.08 % | 31 | 4 | 12 |
-| qwen3-asr-1.7b, auto language | 11.85 % | 4.33 % | 32 | 5 | 13 |
-
-| Second reference (859 words) | WER | CER | Sub | Del | Ins |
-|---|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 |
-| qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | 36 | 16 | 41 |
-| qwen3-asr-1.7b, one pass | 12.11 % | 7.01 % | 43 | 17 | 44 |
-
-| FLEURS German (100 recordings) | WER | CER |
-|---|---:|---:|
-| **qwen3-asr-1.7b** | **3.96 %** | **1.23 %** |
-| whisper-precise | 4.05 % | 1.40 % |
-| voxtral-mini-8bit | 4.81 % | 1.44 % |
-| parakeet-tdt-0.6b-v3 | 4.81 % | 2.15 % |
-
-**It wins the benchmark outright and still loses the job.** On FLEURS German it
-is the best model this document has measured — ahead of Whisper and of the
-shipped Voxtral build, in words and in characters. On the two hand-corrected
-conversational references it is two to thirteen times behind Voxtral. That is
-the same lesson the Parakeet section teaches, and it is worth stating once more
-in the strongest form available: **a model can top the read-aloud benchmark and
-be unusable for interview work.**
-
-Unlike Parakeet the cause is not code-switching — there is none, and forcing the
-language buys only 0.7 WER points over auto-detect. It simply hears this
-material less well.
-
-Three findings from the run that outlive the verdict:
-
-**Punctuation collapses on long input, and chunking fixes it.** Fed the whole
-120 s or 300 s clip, the model returns text with *zero* commas and *zero* full
-stops. Cut into ~60 s windows it punctuates normally — 8.73 and 10.33 commas per
-100 words, against Whisper's 10.62 and Voxtral's 10.87. A length sweep on the
-same audio puts the usable band at roughly 30–90 s. The card advertises long
-audio; for German prose output it does not hold, and any engine built on this
-model would have to chunk far more aggressively than Voxtral does.
-
-**The context prompt is a real hotword mechanism — the thing Voxtral lacks.**
-With `Vocabulary: …` in the system message, "Extent" becomes "Xtend", "Balance
-Oil" becomes "BalanceOil" and a mangled compound comes back correct, on a
-controlled 30 s clip with no other change to the text. Over the full passage it
-costs nothing in word error (10.90 % either way) and 0.05 points of character
-error. This is exactly what `voxtral_corrections.yml` exists to work around, and
-it is the one capability that would argue for the model.
-
-**But it is paid for in punctuation:** the same vocabulary hint halves comma
-density, 8.73 to 4.28 per 100 words. A term list behaves as a decode
-perturbation here too, just a cheaper one than in Voxtral — same phenomenon as
-the `repetition_penalty` default, and a reminder to measure punctuation
-whenever a decode-level knob is turned.
-
-Two implementation notes for anyone who picks this up. The `prompt=` argument
-documented on `apply_transcription_request` **does not exist** in transformers
-5.15.0.dev0 — it lands in `**kwargs` and is dropped with a warning; the context
-has to go into a system message next to the language, which is what the chat
-template concatenates anyway. And the speed figures on MPS are not worth quoting:
-the same 120 s clip measured 2.04x cold and 4.45x warm in the same session. An
-MLX port would be the honest place to measure throughput.
-
-### VibeVoice-ASR (measured — the architecture works, the recognition does not)
-
-`microsoft/VibeVoice-ASR-HF` is not another engine behind the same seam. It does
-ASR, diarization and timestamping in **one pass** and emits speaker-attributed
-segments directly — noScribe's whole pipeline collapsed into one model. MIT
-licence, 16.7 GB in bf16, natively supported by transformers (again no new
-dependency), 4-bit and 8-bit MLX ports published by mlx-community. Measured with
-`docs/skripte/engines/vibevoice_wer.py`, bf16 on MPS.
-
-| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Commas/100w |
-|---|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 10.87 |
-| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 | 10.62 |
-| qwen3-asr-1.7b, 60 s chunks | 10.90 % | 4.33 % | 29 | 5 | 12 | 8.73 |
-| vibevoice-asr | 13.03 % | 6.98 % | 34 | 2 | 19 | **11.34** |
-
-| Second reference (859 words) | WER | CER | Sub | Del | Ins | Commas/100w |
-|---|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 2 | 4 | 1 | — |
-| qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | 36 | 16 | 41 | 10.33 |
-| vibevoice-asr | 12.34 % | 7.58 % | 35 | 10 | 61 | **12.57** |
-
-| FLEURS German (100 recordings) | WER | CER |
-|---|---:|---:|
-| qwen3-asr-1.7b | **3.96 %** | **1.23 %** |
-| whisper-precise | 4.05 % | 1.40 % |
-| voxtral-mini-8bit | 4.81 % | 1.44 % |
-| vibevoice-asr | 8.26 % | 5.84 % |
-
-FLEURS is arguably the wrong test for this model — its design point is an hour
-of multi-speaker audio, not a 15-second single-utterance clip, and one of the
-100 clips came back as nothing but a `[Silence]` tag. Take the 8.26 % as a lower
-bound on what it can do there rather than a verdict.
-
-**The diarization, however, is the real thing.** Compared frame by frame against
-noScribe's own pyannote pipeline on the same two clips, 10 ms resolution, best
-speaker permutation:
-
-| | speakers | segments | timeline labelled | agreement with pyannote |
-|---|---:|---:|---:|---:|
-| hard passage | 2 vs 2 | 16 vs 22 | 100 % vs 96.4 % | **98.2 %** |
-| second reference | 2 vs 2 | 19 vs 52 | 97.1 % vs 93.3 % | **97.5 %** |
-
-Same speaker count, and near-total agreement on who is speaking — from a model
-that produced the transcript in the same forward pass. The segmentation is much
-coarser (16 and 19 turns against 22 and 52), which would be a problem for
-subtitle cues but not for speaker attribution.
-
-It also punctuates better than anything else measured here — 11.34 and 12.57
-commas per 100 words, above Whisper's 10.62 and Voxtral's 10.87 — and it labels
-non-speech explicitly (`[Silence]`, `[Human Sounds]`); those tags are stripped
-before scoring, and leaving them in costs 3.3 WER points on FLEURS.
-
-**Not adopted, and the reason is only recognition.** Three times Voxtral's word
-error on the hard passage, fifteen times on the second reference, and 0.66–0.87x
-realtime on MPS — slower than the two-stage pipeline it would replace, in which
-pyannote is cheap and Voxtral runs at 6.6x. But the architecture is validated,
-which is worth writing down: **a single model really can deliver speaker, time
-and text at pyannote-grade diarization quality.** The thing to watch is a model
-of this shape that hears German conversation as well as Voxtral does. Nothing
-here suggests that is far off.
-
-### Cohere Transcribe (measured — the best challenger so far, and still not close enough)
-
-`CohereLabs/cohere-transcribe-03-2026` came out of the leaderboard below: ~2B
-parameters, Apache-2.0, 3.9 GB, transformers-native, and the best open-weight
-model on the leaderboard's English long-form tab. Measured with
-`docs/skripte/engines/cohere_asr_wer.py`, bf16 on MPS, language forced to `de`.
-
-| Hard passage (422 words) | WER | CER | Sub | Del | Ins | Speed | Commas/100w |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| voxtral-mini-8bit | **4.27 %** | **3.39 %** | 10 | 8 | 0 | 6.79x | 10.87 |
-| whisper-fast | 8.06 % | 3.34 % | 22 | 4 | 8 | 2.43x | 10.62 |
-| **cohere-transcribe** | 10.43 % | 3.69 % | 25 | 4 | 15 | **16.58x** | 11.74 |
-| qwen3-asr-1.7b, 60 s chunks | 10.90 % | 4.33 % | 29 | 5 | 12 | — | 8.73 |
-| vibevoice-asr | 13.03 % | 6.98 % | 34 | 2 | 19 | 0.66x | 11.34 |
-| parakeet-tdt-0.6b-v3, beam 5 | 14.69 % | 6.49 % | 49 | 6 | 7 | 9.13x | — |
-
-| Second reference (859 words) | WER | CER | Speed |
-|---|---:|---:|---:|
-| voxtral-mini-8bit | **0.81 %** | **0.64 %** | 7.58x |
-| **cohere-transcribe** | 9.20 % | 6.12 % | **27.93x** |
-| qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | — |
-| vibevoice-asr | 12.34 % | 7.58 % | 0.87x |
-
-| FLEURS German (100 recordings) | WER | CER | Speed |
-|---|---:|---:|---:|
-| qwen3-asr-1.7b | **3.96 %** | **1.23 %** | — |
-| whisper-precise | 4.05 % | 1.40 % | 4.11x |
-| **cohere-transcribe** | 4.55 % | 1.85 % | 13.51x |
-| voxtral-mini-8bit | 4.81 % | 1.44 % | 7.64x |
-
-**On the hard passage its character error is within noise of Voxtral's** — 3.69
-against 3.39, where this document's own noise floor is ~0.15 points and a single
-build's word-error interval is ±3. By the measure that tracks what was *heard*
-rather than how it was spelled, a 2B model at 16x realtime is level with the 3B
-Voxtral build at 6.8x, on the hardest audio here. That is the best result any
-challenger has produced.
-
-**The second reference kills it anyway.** 9.20 % against 0.81 %, character error
-6.12 against 0.64 — an order of magnitude, far outside anything the error bars
-cover, on the larger of the two references. Whatever the hard passage suggests,
-this model does not transcribe ordinary German conversation to the standard the
-shipped engine does.
-
-Three limitations from its own model card, all of which matter for an engine:
-
-* **No timestamps, no diarization.** The tokenizer knows `<|timestamp|>` and
-  `<|diarize|>` and the decoder prompt accepts them — they are leftovers of the
-  training format. Setting them changes nothing useful (the diarize arm just
-  truncates, 307 words against 426), and the card says plainly that the model
-  does not feature either. Word timestamps would still need the CTC aligner.
-* **No language detection**, and explicitly inconsistent on code-switched audio.
-  noScribe's "Auto" would have to be resolved before the engine is called.
-* **It hallucinates on silence** and wants a VAD or noise gate in front. Visible
-  here: the first window opens with a header of its own, `Input transcript
-  corrected:`, once per file, regardless of what is put in the context slot.
-  That is stripped before scoring; leaving it in costs 0.7 WER points.
-
-Not adopted. But it is the first challenger where the gap is about a specific
-weakness rather than the whole model, and its ecosystem is the broadest of
-anything here — transformers, vLLM, mlx-audio, ONNX, GGUF, a Rust port and a
-WebGPU demo. Worth re-measuring when Cohere ships a successor.
-
-*Practical note:* the repo is gated (click-through) and its Xet transfer fails
-with `Unable to parse string as hex hash value`. `HF_HUB_DISABLE_XET=1` in front
-of the download falls back to plain HTTP and works.
-
-### Moving off mlx-voxtral (evaluated 2026-08-21 — and then it stopped being necessary)
-
-**Resolved 2026-08-22: the reason to move is gone.** `mlx-voxtral` shipped under
-a "Personal Use License" — MIT plus a ban on commercial use — which noScribe's
-GPL-3.0 could not carry, and that made moving to MIT-licensed `mlx-audio` a
-prerequisite rather than a cleanup. Asked the author to relicense; he did, within
-a day, and the repository is plain MIT as of v0.0.5. He also merged every fix we
-had reported — stop token, log-Mel, embedding merge, in-place mutation — and cut
-two releases seven hours apart, after a year of silence. The pin is now `0.0.6`.
-
-So the migration is shelved, not cancelled. Everything below stays on record
-because the *technical* findings are independent of the licence and would apply
-whenever a move is reconsidered — and because they cost real measurement.
-
-`mlx-voxtral` had no release between 2025-08-19 and 2026-08-22. The maintained alternative is
-`mlx-audio`, whose `mlx_audio/stt/models/` holds Voxtral next to cohere_asr,
-qwen3_asr, vibevoice_asr, parakeet and canary — every engine measured above,
-behind one API. The exit route is written up in
-[`../VOXTRAL.md`](../VOXTRAL.md); what belongs here is what it would do to the
-builds and the numbers.
+### Re-quantising with another tool changes nothing
 
 **Re-quantising changes the file format and nothing else.** MLX's affine
 quantisation is data-free — scale and bias come from each group's own min and
@@ -868,281 +484,18 @@ same parameters, therefore the same tensors out. Only the keys change, from
 
 So a re-quantised build would be *the same build*, and the tables above would
 still describe it. **Quality and speed would not move because of the
-re-quantisation** — quantised matmuls are the same kernels either way.
+re-quantisation** — quantised matmuls are the same kernels either way. What
+could move them is everything around it, and that is the migration's problem,
+not this document's: `docs/migration-mlx-audio.md` carries the risks, the steps
+and the acceptance criteria.
 
-What could move them is everything around it, and each is a separate check:
+### The aligner and the Viterbi moved, and neither is a build question
 
-* mlx-audio's `_merge_input_embeddings` scatters without promoting dtype first,
-  where `_merged_embeddings` promotes deliberately. Measured, this is currently
-  moot: on the shipped 8-bit build `get_audio_embeds` and `embed_tokens` both
-  return bfloat16, so there is nothing to round away. It stays worth re-checking
-  because the failure would be invisible in the text and show up only as
-  different logits.
-* Its stop-token default includes 32000, an ordinary text token. Left as it is,
-  that silently truncates any pass containing the word.
-* It vendors its own `generate_step` rather than using `mlx_lm`'s. Same chunked
-  prefill (`prefill_step_size=2048`), so the ~18 % peak saving survives — but
-  `MEM_MODEL` is calibrated against the current path and would need
-  re-measuring before the numbers in *Long audio & memory* could be trusted.
-
-Two things that are *not* concerns, checked rather than assumed. mlx-audio does
-not compute the log-Mel at all — it takes `input_features` straight from
-transformers' `VoxtralProcessor`, i.e. the reference — so the per-30-s-block
-normalisation defect once reported against mlx-voxtral cannot occur there. And
-its audio path mirrors the reference line for line: `audio_tower(x).reshape(-1,
-intermediate_size)` then the projector, exactly as `VoxtralModel.get_audio_features`
-does, with the embedding merge already vectorised rather than the quadratic walk.
-Both of those were an advantage over mlx-voxtral 0.0.4; since 0.0.6 they are
-merely a draw — that library computes the log-Mel over the whole audio and
-vectorises the merge as well.
-
-None of that argues against the move; it argues that the move is a measurement
-exercise, not a port. The trigger to start it is `mlx-voxtral` breaking against
-a newer MLX, or a decision to ship a second engine — at which point mlx-audio's
-model collection pays for the work in one go rather than one engine at a time.
-
-### What the Open ASR Leaderboard says (German tab, checked 2026-08-20)
-
-The leaderboard has a German tab of its own, fed by `hf-audio/multilingual_evals`
-(`multilingual_de.csv`), and it is worth quoting because it is an independent
-check on everything above. Ranked by FLEURS German WER, with Common Voice
-alongside:
-
-| Model | FLEURS | MCV | RTFx |
-|---|---:|---:|---:|
-| microsoft/azure-speech-06-2026 *(API)* | 1.93 | 1.88 | — |
-| elevenlabs/scribe_v2 *(API)* | 2.30 | 2.19 | — |
-| assemblyai/universal-3-pro *(API)* | 2.42 | 2.76 | — |
-| reson8/resonant-1 *(API)* | 2.56 | 3.01 | — |
-| **mistralai/Voxtral-Small-24B-2507** | **2.61** | 3.19 | 83 |
-| openai/whisper-large-v3 | 3.20 | 4.79 | 328 |
-| CohereLabs/cohere-transcribe-03-2026 | 3.33 | **2.87** | 607 |
-| Qwen/Qwen3-ASR-1.7B-hf | 3.35 | 4.60 | 369 |
-| nvidia/canary-1b-v2 | 3.43 | 4.69 | 1308 |
-| **mistralai/Voxtral-Mini-3B-2507** | **3.64** | 5.29 | 150 |
-| microsoft/Phi-4-multimodal-instruct | 3.99 | 4.25 | 123 |
-| nvidia/parakeet-tdt-0.6b-v3 | 4.16 | 4.07 | 3363 |
-| microsoft/VibeVoice-ASR-HF | 7.44 | 20.97 | 114 |
-
-**Voxtral-Small is the best open-weight model on German here.** Everything above
-it reports no RTFx, which on this leaderboard marks a proprietary API. That is
-worth knowing: the engine this document settled on is not a compromise pick, it
-is the top of the open field for this language.
-
-It also cross-checks the harness. The ordering on FLEURS matches ours for every
-model we measured ourselves — Qwen3-ASR ahead of Voxtral-Mini, Parakeet behind
-it, VibeVoice far behind — and the absolute values sit within a few tenths, the
-difference being normalisation. Our 4-bit Voxtral-Small scores 2.82 against the
-leaderboard's 2.61 for the unquantised model, so the quantisation costs about
-0.2 points on clean audio, which is the same story the sweeps above tell.
-
-Two things the table adds that we had not seen. **`CohereLabs/cohere-transcribe-03-2026`** was the one candidate the table added
-that we had not seen — best Common Voice German of any open model in the list at
-2.87, ahead of Voxtral-Small's 3.19, and best open model outright on the English
-long-form tab. It has since been measured; see the section above. Note how little
-that predicted: two Common Voice points ahead of Voxtral-Small, and an order of
-magnitude behind Voxtral-Mini on a real conversation. The long-form tab is
-**English only**,
-so it says nothing about German conversation — the gap this document keeps
-running into has no public benchmark at all.
-
-### The aligner moved to the GPU (2026-08-22)
-
-Forced alignment ran on the **CPU**: `_Aligner.__init__` never moved its model
-anywhere, in a module that only runs on Apple Silicon, while `pyannote_mp_worker.py`
-selected MPS for the diarizer a few files away. A review recorded this on 2026-07-27
-as the largest single open win and it had been sitting since.
-
-Measured on the 300 s reference, 20 s windows, identical `(14985, 38)` output:
-
-| | time | realtime | argmax vs CPU |
-|---|---:|---:|---:|
-| CPU fp32 — before | 14.76 s | 20.3x | — |
-| **MPS fp32 — now** | **4.24 s** | **70.8x** | **100.0000 %** |
-| MPS fp16 — declined | 3.52 s | 85.1x | 99.933 % |
-
-End to end on both hand-corrected references, 1268 words: **every timestamp
-bit-identical**, at 3.14x and 3.25x. Alignment is ~13 % of a job's runtime, so this
-is roughly **130 seconds per hour of audio**, ten minutes on a four-hour file.
-
-fp16 was measured and declined: faster again, but 0.067 % of frames pick a different
-argmax and the worst log-prob deviation is 1.68 — enough to move a word boundary. A
-change that is free of effect should stay that way.
-
-Shipped with two things worth knowing. The device choice mirrors
-`pyannote_mp_worker`'s, macOS floor included, and falls back to the CPU once and for
-good if the forward raises — an unsupported op on a backend must not cost the whole
-job its transcript. And `clear_cache()` now runs **before** the alignment rather than
-after: the decode pass's MLX buffers are dead by then, and with the aligner on the
-same GPU, leaving them resident is the co-residency `MIN_HEADROOM_GB` exists to
-prevent.
-
-### The Viterbi moved to numpy (2026-08-23)
-
-The other half of the aligner — the DP that turns emissions into word boundaries —
-came from `torchaudio.functional.forced_align`. It now comes from
-`noScribe/ctc_align.py`, a numpy implementation with the same semantics. The record
-of how that decision was made, the five rounds of making it fast, and everything
-that was measured and rejected is `docs/viterbi-numpy-brief.md`; this is the summary.
-
-| DP on the 300 s reference chunk (146 M cells) | time | vs C++ |
-|---|---:|---:|
-| torchaudio (C++) | 258 ms | — |
-| naive vectorised numpy | 3 144 ms | 11.9x |
-| **`ctc_align`** | **347 ms** | **1.35x** |
-
-About one second per hour of audio, against ~50 s of emissions — the emissions are
-97 % of the aligner, and they stayed on the GPU where the section above put them.
-
-**Why, then.** Two things the C++ kernel does that this one does not. torchaudio
-2.9–2.11 index the DP buffer in 32 bits and segfault past ~2³¹ cells (pytorch/audio#4208,
-observed in a real run here on 2026-07-22; the fix, #4209, is approved and unmerged).
-And when the advance-one and advance-two candidates of a cell tie exactly, that
-kernel takes the *worse* value — a one-clause defect found while writing ours,
-reported as pytorch/audio#4221 with PR #4222. On real audio it is latent (737 s,
-740 M cells, 55 921 tie cells, none on the winning path, all 2 253 timestamps
-identical), so it argues for correctness, not for a visible difference.
-
-**What stayed.** `FORCED_ALIGN_MAX_CELLS` and the window splitting: the backtrace
-table is one byte per cell in both implementations, so the cap is a memory budget,
-and halving a window halves both axes of that table (four pieces cost a third of the
-whole). And `torchaudio==2.11` stays pinned — `pyannote.audio` requires it; what went
-is our own call into its kernel.
-
-**Verified** the only way that counts for a change meant to be free of effect: the
-real aligner, before and after, on the 737 s interview and both hand-corrected
-references — 3 524 words, every timestamp identical, every probability equal to the
-last bit.
-
-### What mlx-audio holds beyond ASR (surveyed 2026-08-21, deliberately not pursued)
-
-Reviewing mlx-audio's model list for engines we had missed turned up something more
-interesting than another ASR model: it carries the *other two thirds* of this
-pipeline. `mlx_audio/` has `vad/` and `lid/` directories next to `stt/`.
-
-Three candidates, all of which would replace a piece of the torch stack that word
-timestamps and language handling currently depend on:
-
-* **`qwen3_forced_aligner`** — word-level alignment on MLX. Today's word timestamps
-  come from torchaudio's CTC forced alignment against a German wav2vec2 model. That
-  is the stack pinning `torchaudio`, requiring the recorded reference in
-  `tests/data/`, and resting on two unmerged upstream pytorch/audio fixes. German
-  works structurally — its tokenizer routes German into the space-separated branch
-  alongside English — but its own model card caps it at five minutes of speech,
-  against the ten-minute passes chosen here. `mlx_audio/stt/models/wav2vec/` also
-  exists and may be the shorter path: the same aligner model, on MLX rather than
-  torch.
-* **`mlx_audio/lid/`** (ecapa_tdnn, wav2vec2) — spoken language identification.
-  This answers an open item recorded in the engine's own notes: under "Auto" every
-  pass detects language independently and can in principle flip mid-file, and
-  pinning one language across passes was said to need "a detector — a Whisper load
-  or a text-LID dependency". Here it would need neither.
-* **`vad/sortformer`** — NVIDIA's end-to-end diarization, natively on MLX, where
-  noScribe runs pyannote through torch on MPS and the embedding stage was measured
-  to dominate with no cheap lever. **Hard cap of four speakers**, so it is not a
-  replacement for pyannote, which has none — at best a fast path for the two- and
-  three-speaker recordings that make up most of this material. `vad/silero_vad` is
-  there too; this pipeline has no VAD at all, and one would bear on the leading
-  speech the model drops.
-
-Both aligner candidates have since been measured on the hard passage
-(418 words, 120 s) against the shipped torch aligner.
-
-**`qwen3_forced_aligner` — fast, close enough in the middle, and it collapses at
-the cap.** 32x realtime against 13.9x, word sequence identical, and agreement with
-the current aligner of 32 ms median on both boundaries, 86.5 % of words within
-100 ms and 96.1 % within 200 ms. Its grid is 80 ms where wav2vec2's is 20 ms, which
-accounts for most of that median. Two things rule it out as it stands: 3 % of spans
-come back with zero duration on the 2-minute clip, where the current aligner
-produces none, and a length sweep on the 5-minute reference shows a cliff exactly
-at the documented cap —
-
-| length | zero-duration spans | last word ends at |
-|---:|---:|---:|
-| 120 s | 6 % | 119.8 s |
-| 180 s | 5 % | 179.9 s |
-| 240 s | 9 % | 239.8 s |
-| 270 s | 10 % | 269.5 s |
-| **300 s** | **20 %** | **271.0 s** (29 s unaccounted) |
-
-In the last 30-second window, 78 of 80 words collapse onto a single timestamp. The
-torch aligner on the same file: no zero-duration spans, last word ending at 300.0 s.
-
-**`wav2vec` — the German aligner already runs there today, unchanged.**
-
-The `wav2vec` module itself is the base encoder only: its `sanitize()` drops
-`lm_head.*` on purpose, so it cannot emit the CTC matrix alignment needs. But
-`mms/mms.py` wraps that same encoder and adds the head —
-
-```python
-self.wav2vec2 = Wav2Vec2Model(config)
-self.lm_head  = nn.Linear(config.hidden_size, config.vocab_size)
-```
-
-— which is exactly the structure of a `Wav2Vec2ForCTC` checkpoint. Loading
-`jonatasgrosman/wav2vec2-large-xlsr-53-german` through the MMS path needs **no code
-change at all**, only `model_type: "mms"` in the converted config. The result is
-numerically the torch emission matrix: **identical argmax on 100 % of frames and a
-maximum absolute difference of 0.00068.**
-
-Throughput, same 300 s clip, same 20 s windows, same `(14985, 38)` output:
-
-| | time | realtime factor |
-|---|---:|---:|
-| torch `_emission` | 15.64 s | 19.2x |
-| mlx-audio via MMS | **2.89 s** | **103.8x** |
-
-Emissions are 97 % of the aligner's runtime — the full aligner takes 16.1 s on that
-clip, of which the Viterbi pass and everything around it is about half a second. So
-the swap moves alignment from ~19x to roughly ~88x, which is **about 150 seconds
-saved per hour of audio**.
-
-What remained at the time was one thing only: `torchaudio.functional.forced_align`
-and `merge_tokens`, the Viterbi pass. mlx-audio has no equivalent — a search for
-`forced_align` or `viterbi` across that repository returns nothing, and MMS's own
-`_ctc_decode` is greedy argmax, which is transcription rather than alignment. It is
-sequential in time, so MLX is the wrong tool for it — numpy is the natural home, and
-that is where it went two days later (*The Viterbi moved to numpy*, above).
-
-Two practical notes. The German model ships as `pytorch_model.bin` with no
-safetensors, so a conversion step is needed either way. And nothing here requires an
-upstream change: the config key is ours to write and the DP would live in this
-repository. The only thing worth offering upstream is a `MODEL_REMAPPING` entry so a
-plain `wav2vec2` checkpoint routes without the hand-edit.
-
-**None of this belongs in the migration.** `docs/migration-mlx-audio.md` says to
-leave alignment alone, and that stands: swap the engine first, prove the transcript
-is unchanged, and only then open any of these. They are recorded here so they are
-not rediscovered from scratch.
-
-The ASR side of the same review was thin. With German support and unmeasured:
-`canary` (FLEURS de 4.40), `granite_speech` (EN/FR/DE/ES/PT/JA; the leaderboard puts
-`granite-speech-4.1-2b-nar` at 4.87 FLEURS but 3.78 Common Voice at RTFx 1402), and
-`nemotron_asr` (8.46 FLEURS, not worth it). The rest — FireRedASR2, SenseVoice,
-Fun-ASR-Nano, Moonshine, Distil-Whisper, Qwen2-Audio, Higgs-Audio v3, MOSS-Music —
-carry no German. `mega_asr` looks new but is a router over the Qwen3-ASR backbone
-measured above.
-
-After four of these comparisons the pattern is stable enough to plan around: models
-in this band tie or beat the shipped build on FLEURS and lose badly on real
-conversation. Canary and Granite sit in exactly that band.
-
-### Larger models in the same families (surveyed, not measured)
-
-Scaling up within Parakeet's own family does not help: `parakeet-tdt-1.1b` and
-`canary-qwen-2.5b` are English-only. `nvidia/canary-1b-v2` is the real step up —
-25 languages, CC-BY-4.0, and 4.40 % against Parakeet's 5.04 % on NVIDIA's own
-FLEURS German figure — but it is an attention encoder-decoder rather than a
-transducer, so it gives back the structural guarantees that made the family
-interesting, and a 0.6 FLEURS point says nothing about conversational audio.
-
-`Qwen/Qwen3-ASR-1.7B` was the obvious next candidate and has now been measured;
-see the section above. Its word timestamps, had it worked out, would have come
-from a separate `Qwen3-ForcedAligner-0.6B` capped at five minutes of speech.
-
-`microsoft/VibeVoice-ASR` has now been measured too; see the section above. Its
-nearest relative, `OpenMOSS-Team/MOSS-Transcribe-Diarize`, does the same joint
-trick and is more popular, but supports only Chinese and English.
+The forced aligner now runs its emissions on the GPU and its Viterbi DP in numpy
+(`noScribe/ctc_align.py`). Both changed timings this document once quoted, and
+both are written up where they belong, with one set of numbers each:
+[viterbi-numpy-brief.md](viterbi-numpy-brief.md). Nothing about either changes
+which build to ship.
 
 ## What is still open
 
@@ -1167,9 +520,14 @@ trick and is more popular, but supports only Chinese and English.
   2034-character passage. That is a deliberate decision, not an oversight — but
   it is why differences under ~0.15 CER points are treated as noise throughout.
   A second hand-corrected reference (859 words, five minutes, a video call)
-  exists and is used for engine comparisons — the Voxtral build scores 0.81 %
-  WER / 0.64 % CER on it. The build sweeps above have not been repeated against
-  it, and are not going to be.
-- Voxtral drops parentheticals. Whether that is steerable is untested.
+  exists and is used for engine comparisons — the Voxtral build scores **1.98 %
+  WER / 1.09 % CER** on it. That reference was made by correcting this build's
+  own draft, so it flatters Voxtral by construction; an earlier 0.81 % from it
+  was a self-comparison and should not be quoted (see
+  `andere-asr-engines.md`). The build sweeps above have not been repeated
+  against it, and are not going to be.
+- Voxtral drops parentheticals. The *audio* side of that is measured and closed —
+  `docs/voxtral-audio-vorverarbeitung.md` finds no leveller that helps on real
+  material; whether it is steerable at the decode is untested.
 - The measurements are tied to this MLX version and macOS release; re-run the
   scripts after an upgrade before trusting the memory model.

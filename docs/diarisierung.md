@@ -63,6 +63,19 @@ Rejected for the same reason but documented in the code, because the numbers
 belong next to the decision: **relabelling the spurious cluster in noScribe**
 (see the comment above `GHOST_SPEAKER_MAX_SHARE` in `noScribe/main.py`).
 
+## Two MLX candidates, surveyed and not pursued
+
+mlx-audio carries `vad/sortformer` — NVIDIA's end-to-end diarization, natively on
+MLX, where noScribe runs pyannote through torch on MPS and the embedding stage was
+measured to dominate with no cheap lever. It has a **hard cap of four speakers**,
+so it is not a replacement for pyannote, which has none; at best a fast path for
+the two- and three-speaker recordings that make up most of this material. Against
+the counts above — automatic counting already guesses too few three to four times
+more often than too many — a hard cap is the wrong failure direction again.
+
+`vad/silero_vad` is there too. This pipeline has no VAD at all, and one would bear
+on the leading speech Voxtral sometimes drops rather than on diarization.
+
 ## Open
 
 Surface `min_speakers` / `max_speakers` — pyannote accepts both, noScribe offers

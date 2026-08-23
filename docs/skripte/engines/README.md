@@ -1,6 +1,6 @@
 # Scoring other people's ASR engines
 
-Four throwaway-shaped scripts that turned out to be worth keeping, because the
+Five throwaway-shaped scripts that turned out to be worth keeping, because the
 question "is there something better than Voxtral for German interviews yet?"
 keeps coming back and rebuilding the harness each time is the expensive part.
 
@@ -22,8 +22,8 @@ dropping its Voxtral import, so a comparison never silently changes the metric:
 The audio lives outside the repository (`Audiotest2/` is gitignored).
 
 The results and what they mean are in
-[`../../voxtral-quantisierung.md`](../../voxtral-quantisierung.md), under
-*Other options considered*. The short version, twice confirmed: **FLEURS ranks
+[`../../andere-asr-engines.md`](../../andere-asr-engines.md). The short version,
+confirmed six times over now: **FLEURS ranks
 these models in an order that real German conversation does not.** Use these
 scripts to find candidates, never to decide.
 
@@ -35,6 +35,7 @@ scripts to find candidates, never to decide.
 | `qwen_asr_wer.py` | `Qwen/Qwen3-ASR-1.7B-hf` | nothing |
 | `vibevoice_wer.py` | `microsoft/VibeVoice-ASR-HF` | nothing |
 | `cohere_asr_wer.py` | `CohereLabs/cohere-transcribe-03-2026` | nothing (gated repo — accept on the model page first) |
+| `transcribe_cpp_wer.py` | Voxtral Q8_0 GGUF via transcribe.cpp | the `transcribe` CLI, built from source |
 
 "nothing" means transformers already supports the architecture natively, so the
 venv does not have to be touched at all. `parakeet-mlx` is the one exception: it
@@ -61,7 +62,7 @@ Cohere takes its decoder-prompt toggles (`plain`, `nopnc`, `itn`, `timestamp`,
 `diarize`) and has a `tokens` mode that reports which of them the tokenizer
 actually knows. VibeVoice needs no arm; it emits speaker, time and text anyway.
 
-## Adding a fifth
+## Adding a sixth
 
 Copy the closest script and keep three things:
 

@@ -1,4 +1,4 @@
-# Brief: replace torchaudio's forced_align with a numpy Viterbi
+# The forced aligner: emissions on the GPU, the Viterbi in numpy
 
 ## Outcome (2026-08-23)
 
@@ -55,6 +55,88 @@ migration, so that digest crossed it bit-for-bit. (`align_sec` also dropped
 4.8–6.8 s → 1.0 s on the 60 s file between those baselines and now; cause not
 attributed, noted here only so nobody credits or blames the DP for it —
 the DP itself is the measured 1.35x of the C++ kernel.)
+
+## The other 97 %: emissions on the GPU (2026-08-22)
+
+The DP is 3 % of alignment; the wav2vec2 forward that produces the emissions is
+the rest, and it had been running on the **CPU**. `_Aligner.__init__` never moved
+its model anywhere, in a module that only runs on Apple Silicon, while
+`pyannote_mp_worker.py` selected MPS for the diarizer a few files away. A review
+recorded this on 2026-07-27 as the largest single open win and it had been sitting
+since. Measured on the 300 s reference, 20 s windows, identical `(14985, 38)`
+output:
+
+| | time | realtime | argmax vs CPU |
+|---|---:|---:|---:|
+| CPU fp32 — before | 14.76 s | 20.3x | — |
+| **MPS fp32 — now** | **4.24 s** | **70.8x** | **100.0000 %** |
+| MPS fp16 — declined | 3.52 s | 85.1x | 99.933 % |
+
+End to end on both hand-corrected references, 1268 words: **every timestamp
+bit-identical**, at 3.14x and 3.25x. Alignment is ~13 % of a job's runtime, so this
+is roughly **130 seconds per hour of audio**, ten minutes on a four-hour file.
+
+fp16 was measured and declined: faster again, but 0.067 % of frames pick a different
+argmax and the worst log-prob deviation is 1.68 — enough to move a word boundary. A
+change that should be free of effect ought to stay that way.
+
+These are the numbers for this measurement. It has been quoted elsewhere with
+slightly different figures (14.85 → 4.60 s in a code comment, 20.2x → 65.2x
+earlier in this file); those are earlier runs of the same experiment, and this
+table is the one to use.
+
+The device choice mirrors `pyannote_mp_worker`'s, macOS floor included, and falls
+back to the CPU once and for good if the forward raises — an unsupported op on a
+backend must not cost the whole job its transcript. `clear_cache()` now runs
+*before* alignment rather than after, so Voxtral's buffers are gone by the time the
+aligner loads next to them; the reasoning is in the comment at that call site.
+
+## Faster aligners that exist, and what they measure (surveyed 2026-08-21)
+
+mlx-audio carries two candidates that would take the aligner off torch entirely.
+Both were measured on the hard passage (418 words, 120 s) against the shipped
+torch aligner.
+
+**`qwen3_forced_aligner` — fast, close enough in the middle, and it collapses at
+length.** 32x against the torch aligner's 13.9x, median agreement 32 ms, 86.5 %
+of words within 100 ms and 96.1 % within 200 ms. But it emits on an 80 ms grid,
+3 % of its spans have zero duration, and it degrades with input length:
+
+| length | zero-duration spans | last word ends at |
+|---|---:|---|
+| 120 s | 6 % | 119.8 s |
+| 180 s | 5 % | 179.9 s |
+| 240 s | 9 % | 239.8 s |
+| 270 s | 10 % | 269.5 s |
+| **300 s** | **20 %** | **271.0 s** (29 s unaccounted) |
+
+Its own model card caps it at five minutes; against the ten-minute passes chosen
+here that is disqualifying on its own.
+
+**`wav2vec` — the German aligner already runs there today, unchanged.**
+mlx-audio's MMS wrapper is the same encoder plus `lm_head`, and the German
+aligner model loads with no code change beyond `model_type: "mms"`: identical
+argmax, maximum absolute difference 0.00068. Throughput on the same clip:
+
+| | time | realtime factor |
+|---|---:|---:|
+| torch `_emission` (CPU, 2026-08-21) | 15.64 s | 19.2x |
+| mlx-audio via MMS | **2.89 s** | **103.8x** |
+
+That 15.64 s is the **CPU** baseline, measured the day before the aligner moved
+to MPS. Against the 4.24 s the GPU path now takes, the real saving is about
+1.3 s per 300 s — roughly **15 seconds per hour of audio, not 150**, which is
+what the same paragraph used to claim. Two practical notes if it is ever picked
+up: the checkpoint needs converting from `pytorch_model.bin`, and the only thing
+worth offering upstream is a `MODEL_REMAPPING` entry.
+
+What mlx-audio does **not** have is a Viterbi: there is no `forced_align` in the
+tree, and MMS's `_ctc_decode` is greedy argmax. The DP would still be ours.
+
+**None of this belongs in a migration.** `docs/migration-mlx-audio.md` says to
+leave alignment alone, and that stands: swap the engine first, prove the
+transcript is unchanged, and only then open any of this. It is recorded so it is
+not rediscovered from scratch.
 
 ---
 

@@ -9,7 +9,10 @@ Facts re-verified 2026-08-22 against `mlx-voxtral` 0.0.6, `mlx-audio` 0.5.0 and
 ## When this becomes relevant
 
 Not now. `mlx-voxtral` is MIT, actively maintained again, and carries every fix
-this project reported. Do the migration only if one of these happens:
+this project reported — which is the point: it shipped under a "Personal Use
+License" (MIT plus a ban on commercial use) that noScribe's GPL-3.0 could not
+carry, and that licence, not the code, was what once made this migration urgent.
+The author relicensed within a day of being asked. Do the migration only if one of these happens:
 
 * **mlx-voxtral goes quiet again** and a defect turns up that nobody upstream will
   fix.
@@ -18,8 +21,9 @@ this project reported. Do the migration only if one of these happens:
   path, so a removal takes the decode loop with it.
 * **A second engine is worth shipping.** `mlx-audio` carries Voxtral alongside a
   dozen other ASR models behind one API, so the move pays for itself in one go
-  rather than one engine at a time. See *What mlx-audio holds beyond ASR* in
-  `docs/voxtral-quantisierung.md`.
+  rather than one engine at a time. What those models are worth is measured in
+  `docs/andere-asr-engines.md`; what its aligner models are worth, in
+  `docs/viterbi-numpy-brief.md`.
 
 If none of those is true, close the task.
 
@@ -163,9 +167,10 @@ back to re-quantising.
    `docs/skripte/wer.py` and `docs/skripte/fleurs.py`. Expect the numbers to match
    the tables. **If they do not, something in fact 3 is biting — find it, do not
    update the tables.**
-8. Update the dependency notes in `VOXTRAL.md`,
-   `environments/requirements_voxtral_macOS_arm64.txt` and the *Moving off
-   mlx-voxtral* section of the measurement doc.
+8. Update the dependency notes in `VOXTRAL.md` and
+   `environments/requirements_voxtral_macOS_arm64.txt`, and the *Re-quantising
+   with another tool changes nothing* section of `docs/voxtral-quantisierung.md`
+   if the build tables move.
 
 ## Acceptance
 
