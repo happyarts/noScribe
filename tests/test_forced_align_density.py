@@ -8,6 +8,8 @@ Texte haben aber 4-30% solcher Paare -- die Fenster dazwischen kamen durch,
 forced_align warf, und der `except` machte daraus still gleichverteilte
 Zeitstempel für das ganze Fenster.
 """
+import logging
+
 import numpy as np
 import pytest
 
@@ -15,7 +17,6 @@ torch = pytest.importorskip("torch")
 
 from noScribe import ctc_align  # noqa: E402
 from noScribe.voxtral_engine import (  # noqa: E402
-    FORCED_ALIGN_MAX_CELLS,
     SAMPLE_RATE,
     _Aligner,
 )
@@ -65,12 +66,13 @@ def test_repeat_count_matches_what_the_dp_demands(tokens):
     assert smallest == need
 
 
-def test_a_window_in_the_repeat_band_does_not_degrade_silently():
+def test_a_window_in_the_repeat_band_does_not_degrade_silently(caplog):
     """Genau der Fall, den die alte 0.95-Schranke durchliess: knapp genug Frames
     für die Tokens, aber nicht für die Wiederholungen. Es darf keine Ausnahme
     nach aussen dringen -- und wenn nur noch Gleichverteilung bleibt, muss das
     im Log stehen, sonst ist ein kaputtes Fenster von einem guten nicht zu
-    unterscheiden."""
+    unterscheiden. Bis 2026-08 stand das nur in diesem Docstring: die
+    Blattprüfung spreizte still, nur der `except`-Pfad daneben warnte."""
     al = _stub_aligner()
     words = ["aabb"] * 40                      # jedes Wort bringt zwei Paare mit
     audio = np.zeros(int(3.5 * SAMPLE_RATE), dtype=np.float32)
@@ -80,9 +82,16 @@ def test_a_window_in_the_repeat_band_does_not_degrade_silently():
     assert len(tokens) + al._adjacent_repeats(tokens) > frames, \
         "Testaufbau: erst die Wiederholungen dürfen es sprengen"
 
-    out = al.align_words(words, audio)          # darf nicht werfen
+    with caplog.at_level(logging.WARNING, logger="noScribe.voxtral_engine"):
+        out = al.align_words(words, audio)      # darf nicht werfen
     assert len(out) == len(words)
     assert all(w["end"] >= w["start"] for w in out)
+    # Nach dem Teilen gelingt einigen Hälften die echte Ausrichtung; mindestens
+    # ein Blatt bleibt zu dicht und wird gespreizt -- und muss das sagen.
+    assert any(w["prob"] == 0.0 for w in out), "Testaufbau: kein Blatt wurde gespreizt"
+    spread_lines = [r for r in caplog.records if "evenly spread" in r.getMessage()]
+    assert spread_lines, "gespreizt, aber nichts im Log"
+    assert "repeats need more frames" in spread_lines[0].getMessage()
 
 
 def test_prediction_matches_the_emission_it_replaces():

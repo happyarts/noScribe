@@ -2064,6 +2064,21 @@ class _Aligner:
             total += max(0, out)
         return total
 
+    def _spread_loudly(self, why, words, audio, t_offset, tokens, frames,
+                       exc_info=False):
+        """_spread with the log line that makes it visible. Never silent: a
+        spread window has plausible-looking times that are wrong by up to
+        minutes, and without this line it is indistinguishable in the log
+        from a good alignment. The two silent callers of _spread are the
+        benign ones -- a window under 0.1 s, or one with no alignable
+        characters at all."""
+        logger.warning(
+            "Forced alignment %s for a %.0fs window (%d words, %d tokens, "
+            "%d frames); falling back to evenly spread timestamps.",
+            why, len(audio) / SAMPLE_RATE, len(words), len(tokens), frames,
+            exc_info=exc_info)
+        return self._spread(words, audio, t_offset)
+
     def _spread(self, words, audio, t_offset):
         """Fallback: distribute words evenly (by length) over the audio when
         real alignment isn't possible (empty/too-dense text)."""
@@ -2212,39 +2227,41 @@ class _Aligner:
             splittable = False          # halving does not reduce density
         if too_big and not splittable:
             # Cannot split further -- do not run a DP that size.
-            return self._spread(words, audio, t_offset)
+            return self._spread_loudly("skipped, window too big to split further",
+                                       words, audio, t_offset, tokens, n_frames)
         if not too_big and (not too_dense or not splittable):
             emission = self._emission(audio)
             if emission is None:
-                return self._spread(words, audio, t_offset)
+                return self._spread_loudly("produced no emission", words, audio,
+                                           t_offset, tokens, 0)
             n_real = emission.shape[0]
             fps = n_real / (len(audio) / SAMPLE_RATE)
             # The prediction only routed us here; the real frame count decides
             # whether the DP can run at all, and within budget. Spreading
             # beats a raise.
-            if (len(tokens) + repeats > n_real
-                    or self._dp_cells(len(tokens), n_real) > FORCED_ALIGN_MAX_CELLS):
-                return self._spread(words, audio, t_offset)
+            if len(tokens) + repeats > n_real:
+                return self._spread_loudly(
+                    f"skipped, {len(tokens)} tokens + {repeats} repeats need "
+                    f"more frames than the window has",
+                    words, audio, t_offset, tokens, n_real)
+            if self._dp_cells(len(tokens), n_real) > FORCED_ALIGN_MAX_CELLS:
+                return self._spread_loudly(
+                    "skipped, over the DP cell budget at the real frame count",
+                    words, audio, t_offset, tokens, n_real)
             try:
                 aligned, scores = ctc_align.forced_align(
                     emission, tokens, blank=self.blank)
                 spans = ctc_align.merge_tokens(aligned, scores, blank=self.blank)
             except Exception:
-                # Never silent: a spread window has plausible-looking times that
-                # are wrong by up to minutes, and without this line it is
-                # indistinguishable in the log from a good alignment.
-                logger.warning(
-                    "Forced alignment failed for a %.0fs window (%d words, "
-                    "%d tokens, %d frames); falling back to evenly spread "
-                    "timestamps.", len(audio) / SAMPLE_RATE, len(words),
-                    len(tokens), n_real, exc_info=True)
-                return self._spread(words, audio, t_offset)
+                return self._spread_loudly("failed", words, audio, t_offset,
+                                           tokens, n_real, exc_info=True)
 
             stamps = self._stamps_from_spans(spans, words, tok_word, fps,
                                              t_offset,
                                              t_offset + len(audio) / SAMPLE_RATE)
             if stamps is None:
-                return self._spread(words, audio, t_offset)
+                return self._spread_loudly("placed no word", words, audio,
+                                           t_offset, tokens, n_real)
             return stamps
 
         # Too dense or too big: split words in half and audio at their
