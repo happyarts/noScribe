@@ -267,8 +267,17 @@ einer zugeschlagenen Tür. Kein Laborfall.
 
 **Der Eingriff, der es behebt, sitzt an genau einer Stelle.** Das Maximum wird
 *ausschließlich* für den Boden benutzt — danach folgt eine feste Affinität —,
-also ist eine robuste Statistik dort der richtige Ort, und nicht ein Limiter auf
-dem Audio (§4: drei davon gemessen, neutral bis schädlich). Mit einem Perzentil
+also ist eine robuste Statistik dort der richtige Ort. Die Alternativen, alle
+verworfen: ein **Limiter auf dem Audio** greift dieselbe Physik an, bezahlt
+aber im Signal und ist irreversibel (§4: drei davon gemessen, neutral bis
+schädlich). **Lautheitsnormalisierung** hilft gar nicht: sie multipliziert die
+Wellenform mit einer Konstanten, im Log-Raum ein konstanter Summand auf jede
+Zelle, den Ausreißer eingeschlossen — der Abstand Knall-zu-Sprache bleibt, der
+Boden hängt weiter am Knall. Ein **fester Boden** (Voxtral Realtime macht das,
+`global_log_mel_max` in transcribe.cpp) wäre chunk-unabhängig, erzwingt aber
+genau die eben verworfene Lautheitsnormalisierung. Und die **8.0 bleibt
+unangetastet**: sie entspricht librosas `top_db=80` und ist der Bereich, auf
+dem das Modell trainiert wurde. Mit einem Perzentil
 statt des Maximums ist der Text auf `hart` **mit und ohne Knall bitgleich**.
 Kontrolle: mit Perzentil 100 reproduziert die Implementierung den Ist-Zustand
 bitgleich, sie ändert also nachweislich nur den Boden.
@@ -351,7 +360,8 @@ Läufe — `_PercentileFloorFeatures` und `clamp_log_mel` in
 mit Intervallen, die die Null ausschließen, und eine Abhilfe, die ihn beseitigt
 und auf sauberem Material nichts kostet; dagegen die Architekturtreue — alle
 vier Implementierungen nehmen das nackte Maximum. Drei Dinge kamen beim Einbau
-anders, als der Auftrag (`auftrag-perzentil-boden.md`) sie gedacht hatte.
+anders als geplant (der Arbeitsauftrag hieß `auftrag-perzentil-boden.md`
+und ist mit dem Einbau gelöscht; was von ihm trägt, steht hier).
 
 **Der `global_max`-Hebel taugt nicht für die Bitgleichheits-Kontrolle.** Er
 liefert nur das *affine* Spektrogramm `(x + 4) / 4`, und diese Summe verliert
@@ -541,7 +551,7 @@ Signalmaß sagt nichts darüber, was das Modell hört.
 
 ## 8. Was beim Messen zu beachten ist
 
-Vier Fallen, in alle einmal hineingetappt:
+Sechs Fallen, in alle einmal hineingetappt:
 
 1. **Am Transkript messen, nicht am Spektrum.** Der Produktionspfad hat den
    größten Mel-Formfehler aller geprüften Varianten — und ändert am Transkript
@@ -557,7 +567,17 @@ Vier Fallen, in alle einmal hineingetappt:
    Streitstellen listet `adjudicate.py` mit Zeitmarke zum Nachhören.
 4. **Reproduzierbarkeit ersetzt keine Stichprobe.** Die Messung, die den
    Chunker-Umbau rechtfertigte, war vollständig reproduzierbar und trotzdem
-   falsch.
+   falsch. Dasselbe in §6b: dass der Knall-Schaden an drei Positionen „exakt
+   gleich groß" war, belegte Determinismus, nicht Allgemeinheit.
+5. **Ein über die Sprachspitze skalierter Impuls wird gekappt.** Echtes
+   Material ist bereits bis 1,0 ausgesteuert; verlangte +12 dB kamen als
+   5,2 dB Bodenanstieg an, und das Ergebnis sah aus wie ein sauberer
+   Nulleffekt. Richtig: Audio dämpfen, Impuls auf Vollausschlag.
+   `voxpopuli_spike.py` bricht seither ab, wenn die Dosis nicht ankommt.
+6. **Ein Punktschätzer ohne tragfähiges Intervall zeigt in die falsche
+   Richtung.** Whisper stand unterm Transienten auf 8 Strömen bei
+   +0,60/+0,95, auf 24 bei −0,20/−0,51 — der Vorzeichenwechsel bei dreifacher
+   Datenmenge ist das Verhalten von Rauschen, nicht von einem Effekt.
 
 ## 9. Werkzeuge
 
@@ -576,3 +596,8 @@ stehen in `Audiotest2/MATERIAL.md`.
 | `wer.py` · `bootstrap_cer.py` · `encoder_diff.py` | Bewertung, Intervalle, referenzfreier Vergleich |
 | `fleurs_*.py` | die Einzelfragen auf FLEURS: Pegel, Resampler, leise Passagen, Rauschen, Fensterposition, lange Ströme |
 | `mel_stream.py` | Per-Block- gegen Ganzdatei-Normalisierung des log-Mel, gepaart über lange Ströme |
+| `voxpopuli_floor.py` | Clamp-Böden auf sauberem Material, gepaart (§6b); `load_clips` (VoxPopuli, `VOXPOPULI_PARQUET` für die lokale Datei) und die Arm-Kurzform `floor_arm` (`max`, `99`, `99c20`) |
+| `voxpopuli_spike.py` | Transientenschaden über viele Ströme; `pair()` garantiert die Dosis |
+| `voxpopuli_sparse.py` | dasselbe auf überwiegend stillen Strömen (Sprachanteil wählbar) |
+| `mel_outlier_gap.py` | Abstand Maximum zu Perzentil in echtem Material, ohne Modell |
+| `whisper_spike_streams.py` | der Transienten-Test auf der Whisper-Standardengine |
