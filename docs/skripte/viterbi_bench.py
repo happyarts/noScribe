@@ -398,10 +398,10 @@ def check(name, fn):
     # recorded reference
     sys.path.insert(0, _TESTS)
     import test_forced_align_stability as st
-    ref = np.load(st.REF_PATH)
-    for idx, (T, C, tg) in enumerate(st._cases()):
+    ref = np.load(st.REF_PATH)                    # inputs are stored in the file
+    for idx in range(st.N_CASES):
         n += 1
-        lp = st._emission(T, C, tg)[0].numpy()
+        lp, tg = ref[f"lp_{idx}"], ref[f"targets_{idx}"]
         p, s = fn(lp, tg)
         if not np.array_equal(ref[f"paths_{idx}"][0], p):
             bad += 1

@@ -1,9 +1,15 @@
-"""Round 3: v6 = v4 with -inf floor and arithmetic backtrace row; v6s = +signbit; v7 = v6 + band."""
+"""Round 3: v6 = v4 with -inf floor and arithmetic backtrace row; v6s = +signbit; v7 = v6 + band.
+
+`final` is the product module, noScribe/ctc_align.py -- v6 plus validation -- so the
+bench keeps checking what actually ships against torchaudio and the recorded reference.
+"""
 import sys, time
 import numpy as np
 import os as _os
 sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', '..'))
 import viterbi_bench as vb, viterbi_bench2 as vb2
+from noScribe import ctc_align
 from viterbi_bench import fa_v0, fa_torch, random_cases, tie_cases
 from viterbi_bench2 import fa_v4, make_chunk, bench
 
@@ -95,7 +101,8 @@ def fa_v6s(lp, tg, blank=0): return forced_align_np(lp, tg, blank, signbit=True)
 def fa_v7(lp, tg, blank=0): return forced_align_np(lp, tg, blank, band=True)
 def fa_v7s(lp, tg, blank=0): return forced_align_np(lp, tg, blank, band=True, signbit=True)
 
-CANDS = {"v0": fa_v0, "v4": fa_v4, "v6": fa_v6, "v6s": fa_v6s, "v7": fa_v7, "v7s": fa_v7s}
+CANDS = {"v0": fa_v0, "v4": fa_v4, "v6": fa_v6, "v6s": fa_v6s, "v7": fa_v7, "v7s": fa_v7s,
+         "final": ctc_align.forced_align}
 
 if __name__ == "__main__":
     vb.NEG = NEG; vb2.NEG = NEG

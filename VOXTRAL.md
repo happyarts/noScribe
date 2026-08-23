@@ -80,8 +80,12 @@ keys change.
 
 ## Language & word-timestamp quality
 
-Word timestamps come from a CTC forced aligner. Its model is chosen **per
-chunk from the transcribed text itself**: when one language dominates the
+Word timestamps come from a CTC forced aligner: a wav2vec2 model produces
+per-frame emissions (transformers, on the GPU), and a numpy Viterbi in
+`noScribe/ctc_align.py` turns them into word boundaries — torchaudio's
+`forced_align` kernel is no longer used, see
+[docs/viterbi-numpy-brief.md](docs/viterbi-numpy-brief.md) for why. The
+aligner model is chosen **per chunk from the transcribed text itself**: when one language dominates the
 chunk (function-word analysis; non-Latin scripts are recognised directly),
 the char-native model for that language is used -- so "Auto" gets the same
 alignment quality as an explicit language choice. Mixed speech with a clear

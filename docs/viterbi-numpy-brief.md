@@ -1,13 +1,55 @@
 # Brief: replace torchaudio's forced_align with a numpy Viterbi
 
-**Status: done, 2026-08-23.** The DP lives in `noScribe/ctc_align.py`, both call
-sites in `voxtral_engine.py` use it, the cap and the split stayed with rewritten
-comments, and `tests/test_ctc_align.py` adds the two oracles the recorded reference
-lacks (non-zero blank, exact ties). One claim below did not survive contact:
-`torchaudio==2.11` is **still pinned**, because `pyannote.audio` and
-`torch-audiomentations` require torchaudio -- what went is our own call into its
-kernel, not the package. The rest of this file is kept as the record of how the
-decision was made.
+## Outcome (2026-08-23)
+
+**Done.** The DP lives in `noScribe/ctc_align.py`; `_Aligner._emission` returns a
+float32 numpy array and is the torch→numpy boundary; `align_words` and `align_prefix`
+no longer touch torch. Five commits on `local/main`, in order:
+
+| commit | what |
+|---|---|
+| `ca1469d4` | this brief's round five (630 → 347 ms, torchaudio's tie order) and the benches in `docs/skripte/viterbi_bench*.py` |
+| `a70aefec` | the blank-label bug: every verification case used `blank=0`, so `ext = np.zeros` passed 277 of 277 and mislabelled every blank frame for any other index |
+| `74a47ea0` | the migration itself, after a simplify and a code-review round (12 agents, 7 findings applied) |
+| `0fa1374f` | the 43 reference emissions stored in the npz, so the acceptance test needs no torch |
+| `5d9711e4` | every degrading `_spread` in `align_words` now logs why (`_spread_loudly`) |
+
+**What it bought.** The crash class from pytorch/audio#4208 cannot occur in noScribe
+any more (64-bit indexing: the worst case is slow, not dead). And on an exact tie
+between the advance-one and advance-two candidates the path is now the optimum —
+torchaudio takes the worse value, which became upstream issue
+[#4221](https://github.com/pytorch/audio/issues/4221) and PR
+[#4222](https://github.com/pytorch/audio/pull/4222) (one-clause fix, CPU and CUDA,
+CLA green). On real audio that tie is latent: 737 s of interview, 740 M cells,
+55 921 tie cells, **none on the winning path**, all 2 253 timestamps identical.
+
+**What it cost.** ~1.35x the C++ kernel on a 300 s chunk (347 vs 258 ms), about one
+second per hour of audio against ~50 s of emissions. Memory unchanged (one byte per
+DP cell), so `FORCED_ALIGN_MAX_CELLS` and the splitting stayed — their comments now
+give the memory and latency reasons that were always there beside the crash.
+
+**What did not survive contact.** `torchaudio==2.11` is **still pinned**:
+`pyannote.audio` and `torch-audiomentations` require torchaudio, so the package
+stays installed; what went is our own call into its kernel. Claim 2 below was wrong
+about that.
+
+**What was learned, and is pinned in tests now.** The recorded reference had two
+blind spots — every case used `blank=0`, and random emissions never tie exactly —
+so `tests/test_ctc_align.py` adds two torch-free oracles: brute force over every
+path with blanks 0/2/4 and integer log-probs, and a scalar Viterbi past the uint8
+range of the backtrace cursor. Three regression guards (cap, density, prefix
+salvage) carried a stale `importorskip("transformers")` and had never run on the
+Linux CI; they do now. And the density test had promised "not silently" in its
+docstring for a month without asserting it.
+
+**Verified.** 381 tests; the 43 recorded torchaudio alignments bit-for-bit; end to
+end with the real aligner on three recordings (the 737 s interview and the two
+hand-corrected references in `Audiotest2/referenz/`, 3 524 words) — every word
+timestamp identical, every probability equal to the last bit, three times over as
+the code changed underneath; PyInstaller's own module graph follows the engine's
+static `from noScribe import ctc_align`.
+
+---
 
 The rest of this file is the work order as it stood before the work was done.
 Everything in it was verified on 2026-08-22; the verification method is stated so
@@ -273,98 +315,21 @@ speech, which is precisely the condition under which a defect in it would go
 unnoticed for a long time and then surface on a user's recording. A single path that
 costs 4.6 s per hour is worth more than a fast path plus a rarely-exercised one.
 
-**The reference implementation.** Verified identical to
-`torchaudio.functional.forced_align` on 200 random cases (including tight
-`T == L + repeats` fits), on the 43 recorded cases of
-`tests/test_forced_align_stability.py`, and on the 300 s chunk, all under
-`np.errstate(all="raise")`; on 34 constructed tie cases it follows torchaudio's
-tie order except where torchaudio itself is wrong (see the *Ties* trap).
-`merge_tokens` matches torchaudio's spans on all 43 recorded cases. It is here
-because re-deriving the optimisations from scratch is the expensive part, not the
-algorithm:
-
-```python
-import numpy as np
-
-NEG = np.float32(-np.inf)           # same floor as torchaudio; nothing here subtracts
-
-
-def forced_align(log_probs, targets, blank=0):
-    """CTC Viterbi forced alignment, `torchaudio.functional.forced_align` semantics
-    (unbatched): returns one label per frame and that label's log-prob per frame."""
-    log_probs = np.ascontiguousarray(log_probs, dtype=np.float32)
-    targets = np.asarray(targets, dtype=np.int64)
-    T, L = log_probs.shape[0], len(targets)
-    N = 2 * L + 1
-    repeats = int(np.count_nonzero(targets[1:] == targets[:-1]))
-    if L == 0:
-        raise ValueError("targets must not be empty")
-    if T < L + repeats:
-        raise ValueError(f"targets length is too long for CTC: {L} tokens + "
-                         f"{repeats} repeats need {L + repeats} frames, got {T}")
-    # Advance-by-two penalty: 0 on token states whose preceding token differs
-    # (skipping the blank between them is legal), -inf everywhere else.
-    pen = np.full(N, NEG, dtype=np.float32)
-    pen[(np.flatnonzero(targets[1:] != targets[:-1]) + 1) * 2 + 1] = 0.0
-
-    alpha = np.full(N, NEG, dtype=np.float32)
-    nxt = np.full(N, NEG, dtype=np.float32)
-    two = np.full(N, NEG, dtype=np.float32)   # two[:2] stays -inf for the whole run
-    c1 = np.zeros(N, dtype=bool)              # c1[0] stays False for the whole run
-    c2 = np.zeros(N, dtype=bool)
-    c1v, c2v = c1.view(np.uint8), c2.view(np.uint8)
-    bt = np.empty((T, N), dtype=np.uint8)     # every row t >= 1 is fully written below
-    bt[0] = 0
-
-    alpha[0] = log_probs[0, blank]
-    alpha[1] = log_probs[0, targets[0]]
-
-    for t in range(1, T):
-        np.greater(alpha[:-1], alpha[1:], out=c1[1:])      # advance-one beats stay
-        np.maximum(alpha[1:], alpha[:-1], out=nxt[1:])
-        nxt[0] = alpha[0]
-        np.add(alpha[:-2], pen[2:], out=two[2:])           # advance-two, -inf where illegal
-        np.greater(two, nxt, out=c2)                       # ... beats both
-        np.maximum(nxt, two, out=nxt)
-        row = bt[t]                                        # 2 where the skip won, else c1
-        np.add(c2v, c2v, out=row)
-        np.maximum(row, c1v, out=row)
-        lp = log_probs[t]
-        nxt[0::2] += lp[blank]                             # blank states, one scalar
-        nxt[1::2] += lp[targets]                           # token states, gather of L
-        alpha, nxt = nxt, alpha
-
-    # torchaudio ends on the final blank only if it is strictly better
-    s = N - 1 if alpha[N - 1] > alpha[N - 2] else N - 2
-    path = np.empty(T, dtype=np.int64)
-    scores = np.empty(T, dtype=np.float32)
-    # label per state: blank on the even states, the target on the odd ones.
-    # np.zeros here would be a silent bug for any blank index other than 0 --
-    # every blank frame would come back labelled 0 and scored from column 0.
-    ext = np.full(N, blank, dtype=np.int64)
-    ext[1::2] = targets
-    for t in range(T - 1, -1, -1):
-        tok = ext[s]
-        path[t] = tok
-        scores[t] = log_probs[t, tok]
-        s -= int(bt[t, s])   # int(): numpy would type the in-place op as uint8
-    return path, scores
-
-
-def merge_tokens(path, scores, blank=0):
-    """`torchaudio.functional.merge_tokens`: runs of equal non-blank labels as
-    (token, start, end, score) with an exclusive end and the mean frame score."""
-    path = np.asarray(path)
-    cut = np.flatnonzero(path[1:] != path[:-1]) + 1
-    starts = np.concatenate(([0], cut))
-    ends = np.concatenate((cut, [len(path)]))
-    return [(int(path[s]), int(s), int(e), float(scores[s:e].mean()))
-            for s, e in zip(starts, ends) if path[s] != blank]
-```
+**The reference implementation is `noScribe/ctc_align.py`** — this file carried a
+listing of the round-five DP until it went into the product, and a second copy would
+only drift. What the module adds over that listing is validation (blank inside the
+vocabulary and outside the targets, an `adjacent_repeats` helper the engine shares,
+an empty-path `merge_tokens`) and the `TokenSpan` named tuple the engine reads. It
+was verified identical to `torchaudio.functional.forced_align` on 200 random cases
+(including tight `T == L + repeats` fits), on the 43 recorded cases, and on the 300 s
+chunk, all under `np.errstate(all="raise")`; on 34 constructed tie cases it follows
+torchaudio's tie order except where torchaudio itself is wrong (see the *Ties* trap).
+Re-deriving the optimisations from scratch is the expensive part, not the algorithm —
+the benches that reproduce every number here are `docs/skripte/viterbi_bench*.py`.
 
 The backtrace loop is Python over T, which is fine — it is ~15 000 scalar steps and
-measures under 20 ms. The two `ValueError`s mirror torchaudio's checks: the engine
-pre-checks both conditions, but its `except … warn … _spread` path is only
+measures under 20 ms. The `ValueError`s mirror torchaudio's checks: the engine
+pre-checks the frame budget, but its `except … warn … _spread` path is only
 meaningful if the DP raises rather than returning garbage when it is ever called
 without them.
 
@@ -466,18 +431,20 @@ acceptance test: the new implementation must reproduce it. Read that test and
 `tests/test_forced_align_cap.py` and `tests/test_forced_align_density.py` before
 starting — their docstrings describe defects that were expensive to find.
 
-## Acceptance
+## Acceptance (all met, see *Outcome*)
 
-* Frame-for-frame identical output to `torchaudio.functional.forced_align` on the
+* ✔ Frame-for-frame identical output to `torchaudio.functional.forced_align` on the
   recorded reference, and on the two hand-corrected references in
   `Audiotest2/referenz/` (gitignored; ask if absent).
-* `venv/bin/python3 -m pytest tests/ -q` green.
-* Word timestamps unchanged end to end — compare against a stored run, do not eyeball.
-* No `torchaudio` left in `noScribe/`: `grep -rn torchaudio noScribe/` empty except
-  comments you have updated.
-* The DP cap and the recursive split **stay** (see *What this task actually buys*);
+* ✔ `venv/bin/python3 -m pytest tests/ -q` green — 381.
+* ✔ Word timestamps unchanged end to end — compared against stored runs of the real
+  aligner, 3 524 words, not eyeballed.
+* ✔ No `torchaudio` left in `noScribe/`: `grep -rn torchaudio noScribe/` empty except
+  comments that record the history.
+* ✔ The DP cap and the recursive split **stay** (see *What this task actually buys*);
   only the cap's comment changes, from segfault to memory. A pass that would
-  previously have tripped the cap must still split and still align.
+  previously have tripped the cap still splits and still aligns
+  (`tests/test_forced_align_cap.py`, now also on CI).
 * The acceptance chunk is real emissions, not uniform random ones: at chunk scale,
   random emissions push |alpha| to ~5·10⁴ where float32 sums collide constantly, and
   the resulting ties make *every* implementation — including torchaudio against

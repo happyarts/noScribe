@@ -949,6 +949,43 @@ after: the decode pass's MLX buffers are dead by then, and with the aligner on t
 same GPU, leaving them resident is the co-residency `MIN_HEADROOM_GB` exists to
 prevent.
 
+### The Viterbi moved to numpy (2026-08-23)
+
+The other half of the aligner — the DP that turns emissions into word boundaries —
+came from `torchaudio.functional.forced_align`. It now comes from
+`noScribe/ctc_align.py`, a numpy implementation with the same semantics. The record
+of how that decision was made, the five rounds of making it fast, and everything
+that was measured and rejected is `docs/viterbi-numpy-brief.md`; this is the summary.
+
+| DP on the 300 s reference chunk (146 M cells) | time | vs C++ |
+|---|---:|---:|
+| torchaudio (C++) | 258 ms | — |
+| naive vectorised numpy | 3 144 ms | 11.9x |
+| **`ctc_align`** | **347 ms** | **1.35x** |
+
+About one second per hour of audio, against ~50 s of emissions — the emissions are
+97 % of the aligner, and they stayed on the GPU where the section above put them.
+
+**Why, then.** Two things the C++ kernel does that this one does not. torchaudio
+2.9–2.11 index the DP buffer in 32 bits and segfault past ~2³¹ cells (pytorch/audio#4208,
+observed in a real run here on 2026-07-22; the fix, #4209, is approved and unmerged).
+And when the advance-one and advance-two candidates of a cell tie exactly, that
+kernel takes the *worse* value — a one-clause defect found while writing ours,
+reported as pytorch/audio#4221 with PR #4222. On real audio it is latent (737 s,
+740 M cells, 55 921 tie cells, none on the winning path, all 2 253 timestamps
+identical), so it argues for correctness, not for a visible difference.
+
+**What stayed.** `FORCED_ALIGN_MAX_CELLS` and the window splitting: the backtrace
+table is one byte per cell in both implementations, so the cap is a memory budget,
+and halving a window halves both axes of that table (four pieces cost a third of the
+whole). And `torchaudio==2.11` stays pinned — `pyannote.audio` requires it; what went
+is our own call into its kernel.
+
+**Verified** the only way that counts for a change meant to be free of effect: the
+real aligner, before and after, on the 737 s interview and both hand-corrected
+references — 3 524 words, every timestamp identical, every probability equal to the
+last bit.
+
 ### What mlx-audio holds beyond ASR (surveyed 2026-08-21, deliberately not pursued)
 
 Reviewing mlx-audio's model list for engines we had missed turned up something more
@@ -1032,15 +1069,12 @@ clip, of which the Viterbi pass and everything around it is about half a second.
 the swap moves alignment from ~19x to roughly ~88x, which is **about 150 seconds
 saved per hour of audio**.
 
-What remains is one thing only: `torchaudio.functional.forced_align` and
-`merge_tokens`, the Viterbi pass. mlx-audio has no equivalent — a search for
+What remained at the time was one thing only: `torchaudio.functional.forced_align`
+and `merge_tokens`, the Viterbi pass. mlx-audio has no equivalent — a search for
 `forced_align` or `viterbi` across that repository returns nothing, and MMS's own
-`_ctc_decode` is greedy argmax, which is transcription rather than alignment. The DP
-is standard (blank-interleaved targets of length 2S+1, three transitions, backtrace)
-and vectorises over the state axis; `tests/test_forced_align_stability.py` already
-pins torchaudio's behaviour against a recorded reference, so the oracle for a
-reimplementation exists. It is sequential in time, so MLX is the wrong tool for it —
-numpy is the natural home.
+`_ctc_decode` is greedy argmax, which is transcription rather than alignment. It is
+sequential in time, so MLX is the wrong tool for it — numpy is the natural home, and
+that is where it went two days later (*The Viterbi moved to numpy*, above).
 
 Two practical notes. The German model ships as `pytorch_model.bin` with no
 safetensors, so a conversion step is needed either way. And nothing here requires an

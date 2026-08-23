@@ -122,10 +122,10 @@ and it reproduces the torch emissions exactly — identical argmax on every fram
 max |Δ| 0.00068.
 
 That is not a reason to bundle it in. It is independent of which package loads
-Voxtral, it still needs a replacement for `torchaudio.functional.forced_align`
-which mlx-audio does not have, and the aligner already runs on the GPU where the
-speed was. A migration that also rewrites alignment cannot be shown to have changed
-nothing.
+Voxtral, the Viterbi half is numpy since 2026-08-23 (`noScribe/ctc_align.py`, which
+mlx-audio neither has nor needs to provide), and the aligner already runs on the GPU
+where the speed was. A migration that also rewrites alignment cannot be shown to have
+changed nothing.
 
 ## Do this first: try to avoid re-publishing at all
 
