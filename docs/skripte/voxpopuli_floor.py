@@ -25,7 +25,11 @@ Feature-Pfade auf denselben Stroemen.
 `perzentile` darf eine Liste sein (`99.0,99.9,99.99`). Die Max-Basis wird dann
 nur einmal gerechnet und alle Arme gegen dieselbe Basis gepaart -- das ist der
 Sweep, mit dem die Perzentilwahl entschieden wird.
+
+`VOXPOPULI_PARQUET=/pfad/zu/test-00000-of-00001.parquet` liest die lokal
+heruntergeladene Hub-Datei statt zu streamen (siehe `load_clips`).
 """
+import os
 import pathlib
 import re
 import sys
@@ -40,35 +44,8 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "docs" / "skripte"))
 from wer import norm, wer                                    # noqa: E402
 from fleurs_stream import streams, paired, SR                # noqa: E402
-from noScribe.voxtral_engine import _Voxtral                 # noqa: E402
-from mlx_voxtral.audio_processing import (                   # noqa: E402
-    log_mel_spectrogram, N_MELS, N_FRAMES)
-
-
-class PercentileFloor:
-    """Wie der eingebaute Pfad, aber der Boden kommt aus einem Perzentil statt
-    aus dem Maximum. Das Maximum wird ausschliesslich fuer den Boden benutzt
-    (danach eine feste Affinitaet), also ist das die einzige Aenderung.
-
-    Der `global_max`-Parameter der Bibliothek ist der Hebel: ein sehr negativer
-    Wert klemmt nichts, liefert also das rohe log-Mel (die Affinitaet ist
-    invertierbar), daraus das Perzentil, dann der regulaere Aufruf. Kontrolle:
-    mit Perzentil 100 ist die Ausgabe bitgleich zum eingebauten Pfad.
-    """
-
-    def __init__(self, pct):
-        self.pct = pct
-
-    def __call__(self, a, sampling_rate=SR, return_tensors="mlx", **kw):
-        a = np.asarray(a, dtype=np.float32)
-        cs = 30 * SR
-        n = int(np.ceil(len(a) / cs))
-        a = np.pad(a, (0, n * cs - len(a)))
-        arr = mx.array(a)
-        raw = np.array(log_mel_spectrogram(arr, global_max=-1e6)) * 4.0 - 4.0
-        mel = log_mel_spectrogram(arr, global_max=float(np.percentile(raw, self.pct)))
-        return {"input_features":
-                mel.reshape(N_MELS, n, N_FRAMES).transpose(1, 0, 2)}
+from mlx_voxtral.audio_processing import VoxtralFeatureExtractor  # noqa: E402
+from noScribe.voxtral_engine import _Voxtral, _PercentileFloorFeatures  # noqa: E402
 
 
 DIGIT = re.compile(r"\d")
@@ -99,8 +76,16 @@ def load_clips(n_rows, skip_digits=False):
     Differenzen sind nicht betroffen**, weil beide Arme dieselbe Referenz sehen
     und der Fehler herausfaellt.
     """
-    from datasets import load_dataset
-    ds = load_dataset("facebook/voxpopuli", "de", split="test", streaming=True)
+    from datasets import Audio, load_dataset
+    local = os.environ.get("VOXPOPULI_PARQUET")
+    if local:
+        # Dieselbe Datei wie auf dem Hub (`de/test-00000-of-00001.parquet`,
+        # 936 MB), einmal mit curl geholt: das Streaming vom Hub bricht bei
+        # schlechter Verbindung nach fuenf Timeouts ab, der Download nicht.
+        ds = load_dataset("parquet", data_files=local, split="train", streaming=True)
+        ds = ds.cast_column("audio", Audio(sampling_rate=SR))
+    else:
+        ds = load_dataset("facebook/voxpopuli", "de", split="test", streaming=True)
     clips, refs, dropped = [], [], 0
     for row in ds:
         if not row.get("is_gold_transcript"):
@@ -139,8 +124,10 @@ def main():
           f"{total/60:.1f} min gesamt")
 
     vox = _Voxtral(str(REPO / "models" / "voxtral-mini-8bit"))
-    stock = vox.proc.feature_extractor
-    arms = [(f"Perzentil {p:g}", PercentileFloor(p)) for p in pcts]
+    # Der Perzentil-Boden ist seit dem Einbau der Produktionspfad, also kommt
+    # der max-Arm explizit aus der Bibliothek, nicht von vox.proc.
+    stock = VoxtralFeatureExtractor()
+    arms = [(f"Perzentil {p:g}", _PercentileFloorFeatures(p)) for p in pcts]
 
     # Greift der Tausch? Sonst misst der Lauf zweimal dasselbe.
     probe = st[0][0]
@@ -156,7 +143,7 @@ def main():
 
     print(f"\n{'Boden':16s} {'WER':>7s} {'CER':>7s} {'Speed':>7s}")
     store = {}
-    for name, ex in [("max (ist)", stock)] + arms:
+    for name, ex in [("max (Bibliothek)", stock)] + arms:
         vox.proc.feature_extractor = ex
         rows, t0 = [], time.time()
         for x, words in st:
@@ -172,7 +159,7 @@ def main():
         store[name] = rows
         mx.clear_cache()
 
-    a = store["max (ist)"]
+    a = store["max (Bibliothek)"]
     star = lambda lo, hi: " *" if (lo > 0) == (hi > 0) else ""
     print("\nGepaart gegen max (95%; enthaelt es 0, nicht nachweisbar):")
     for name, _ in arms:

@@ -42,7 +42,8 @@ from wer import norm, wer
 from fleurs_stream import streams, paired, SR
 import fleurs_gain
 from noScribe.voxtral_engine import _Voxtral
-from mlx_voxtral.audio_processing import log_mel_spectrogram, N_SAMPLES, N_MELS, N_FRAMES
+from mlx_voxtral.audio_processing import (  # noqa: E402
+    log_mel_spectrogram, VoxtralFeatureExtractor, N_SAMPLES, N_MELS, N_FRAMES)
 
 SEC = 300.0
 
@@ -71,7 +72,9 @@ def main():
     print(f"# Build: {pathlib.Path(build).name}, Sprache 'de' gepinnt, greedy\n", flush=True)
 
     vox = _Voxtral(build)
-    stock, ref_ex = vox.proc.feature_extractor, RefExtractor()
+    # Der Bibliothekspfad explizit: vox.proc traegt seit dem Einbau des
+    # Perzentil-Bodens nicht mehr den Stock-Extractor.
+    stock, ref_ex = VoxtralFeatureExtractor(), RefExtractor()
 
     # Greift der Tausch überhaupt? Sonst misst der Lauf zweimal dasselbe -- eine
     # Stunde lang, und das Ergebnis sähe aus wie ein sauberer Nulleffekt.

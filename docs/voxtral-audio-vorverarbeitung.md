@@ -344,13 +344,123 @@ WER-Punkte**: derselbe Lauf ergibt 11,39 % mit und **10,17 %** ohne diese
 Äußerungen (`load_clips(..., skip_digits=True)`). Gepaarte Differenzen sind
 nicht betroffen, weil beide Arme dieselbe Referenz sehen.
 
-**Stand der Entscheidung: der Einbau ist begründet, aber nicht erfolgt.** Dafür
-steht ein gemessener, dosisabhängiger Schaden mit Intervallen, die die Null
-ausschließen, und eine Abhilfe, die ihn vollständig beseitigt und auf sauberem
-Material nichts kostet. Dagegen steht Architekturtreue — alle vier
-Implementierungen (transformers, mlx-audio, transcribe.cpp, mlx-voxtral 0.0.6)
-nehmen das nackte Maximum, und damit wurde das Modell trainiert. Der
-Arbeitsauftrag für den Einbau liegt in `auftrag-perzentil-boden.md`.
+**Eingebaut am 2026-08-23**, mit **Perzentil 99** statt der 99,9 der ersten
+Läufe — `_PercentileFloorFeatures` und `clamp_log_mel` in
+`noScribe/voxtral_engine.py`, Konstante `MEL_FLOOR_PERCENTILE`, Tests in
+`tests/test_mel_floor.py`. Dafür stand ein gemessener, dosisabhängiger Schaden
+mit Intervallen, die die Null ausschließen, und eine Abhilfe, die ihn beseitigt
+und auf sauberem Material nichts kostet; dagegen die Architekturtreue — alle
+vier Implementierungen nehmen das nackte Maximum. Drei Dinge kamen beim Einbau
+anders, als der Auftrag (`auftrag-perzentil-boden.md`) sie gedacht hatte.
+
+**Der `global_max`-Hebel taugt nicht für die Bitgleichheits-Kontrolle.** Er
+liefert nur das *affine* Spektrogramm `(x + 4) / 4`, und diese Summe verliert
+für `x > −2` Mantissenbits; aus dem zurückgerechneten Wert lässt sich der
+Referenzboden `log_max − 8` nicht mehr exakt bilden. Auf lautem Material
+(`log_max` in [0, 4)) fällt das wegen gleicher Rundungsraster nie auf, auf
+leisem (`log_max` in [−2, 0)) bekommt **jede achte Eingabe** einen um ein Bit
+verschobenen Boden und damit jede geklemmte Zelle — gemessen auf 300
+synthetischen Signalen: 12 %. Der Einbau rechnet das ungeklemmte Spektrogramm
+deshalb aus den Primitiven der Bibliothek (`stft_mlx`, `hanning`,
+`get_mel_filters`, dieselben Aufrufe wie `log_mel_spectrogram`) und klemmt in
+float32. Mit Perzentil 100 ist das **bitgleich** zur Bibliothek — auf Vollpegel,
+−40 dB, −60 dB, Stille, Rauschen und 300 leisen Signalen —, und genau dieser
+Vergleich steht als Test im Repo; er fängt auch, wenn die Bibliothek ihren
+Mel-Pfad ändert und unsere Kopie nicht mitzieht.
+
+**Der Perzentil-Boden steht unter einem Transienten nicht exakt still.** Die
+Zellen des Knalls sitzen alle an der Spitze der Verteilung und verdrängen die
+Ordnungsstatistik um ihre Anzahl nach oben — um so mehr, je kürzer der Pass
+und je breitbandiger der Knall. Bodenverschiebung in dB auf dem mitgelieferten
+`tests/data/interview.mp3` (−20 dB ausgesteuert, Transient auf Vollausschlag,
+ohne Modell):
+
+| Pass | Transient | max | 99 | 99,9 | 99,99 |
+|---|---|---|---|---|---|
+| 60 s | Rechteckblock 100 ms | 29,6 | 0,15 | 0,50 | 4,38 |
+| 60 s | Türknall 60 Hz 100 ms | 25,5 | 0,05 | 0,22 | 1,81 |
+| 60 s | **Rauschburst 100 ms** | 9,7 | **0,75** | **7,10** | 9,20 |
+| 60 s | Klatschen 5 ms | 4,2 | 0,13 | 0,45 | 2,03 |
+| 120 s | Rechteckblock 100 ms | 29,6 | 0,07 | 0,27 | 1,45 |
+| 120 s | Rauschburst 100 ms | 9,9 | 0,33 | 2,90 | 8,33 |
+| 300 s | Rechteckblock 100 ms | 30,5 | 0,03 | 0,12 | 0,54 |
+| 300 s | Rauschburst 100 ms | 10,0 | 0,14 | 0,93 | 7,57 |
+
+Der Rauschburst belegt rund 1300 Zellen über der Schwelle; das oberste
+Promille eines 60-s-Passes sind 768 Zellen, das oberste Prozent 7680. Der
+Sweep oben hatte nur die *Kosten auf sauberem Material* als unkritisch
+ausgewiesen — für die Robustheit ist das Perzentil sehr wohl eine Wahl, und
+99,99 scheidet ganz aus. Die Spannweite der Eingabe wird mit 99 etwas breiter
+als mit 99,9 (Interview: 2,39–2,45 gegen 2,22–2,27), bleibt aber unter den
+2,547, die die Rohspur oben mit 99,9 folgenlos erreicht.
+
+**Das Perzentil läuft nur über die echten Frames.** Der Block wird auf ein
+Vielfaches von 30 s mit Nullen aufgefüllt, und Polsterzellen liegen auf dem
+Minimum −10. Über den ganzen Block gerechnet rutscht das Perzentil mit dem
+Polsteranteil nach unten: ein 5-s-Clip im 30-s-Block bekäme einen um 18 dB
+tieferen Boden als derselbe Clip ungepolstert — ein Regime, das keine der
+Messungen oben abdeckt (alle Ströme sind exakt 300 s) und das die Bibliothek
+nicht kennt, weil ihr Maximum nie in einem Polsterframe liegt. Die Statistik
+nimmt deshalb nur die Frames, die Eingabe enthalten; der Clamp trifft alle.
+Bei 100 ändert das nichts, die Bitgleichheits-Kontrolle bleibt. (Gefunden im
+Review, nicht im Entwurf.)
+
+**Was in überwiegend stillen Pässen passiert: kein Nachweis, aber dünner
+Rand.** Alle Ströme oben sind dichte Rede, dort liegt das 99. Perzentil
+15–18 dB unter dem Maximum. In einem Pass, der vor allem aus Pausen besteht
+(die 60-s-Kopfprobe auf einer Aufnahme, die mit Stille beginnt), rutscht das
+Perzentil innerhalb der Sprachzellen nach unten und der Boden liegt tiefer als
+je gemessen. `voxpopuli_sparse.py`: dieselben Clips, dazwischen weißes
+Rauschen bei −60 dBFS als Raumton, bis der Sprachanteil stimmt; 10 Ströme à
+300 s, beide Böden gepaart:
+
+| Sprachanteil | Abstand max → p99 | max | Perzentil 99 | gepaart |
+|---|---|---|---|---|
+| ~100 % (oben) | 15–18 dB | 11,39 % / 7,32 % | 11,27 % / 7,14 % | −0,12 [−0,85, +0,49] · CER −0,18 [−0,79, +0,28] |
+| 50 % | 23,6 dB (20,7–28,9) | 10,14 % / 6,35 % | 10,38 % / 6,67 % | **+0,24 [−0,03, +0,55]** · CER +0,32 [−0,01, +0,77] |
+| 20 % | 28,5 dB (26,1–30,0) | 12,30 % / 8,25 % | 12,36 % / 8,54 % | +0,07 [−0,72, +1,10] · CER +0,28 [−0,25, +1,02] |
+
+Kein Intervall schließt die Null aus, aber bei 50 % fehlt dazu ein
+Hundertstel, und beide CER-Intervalle stehen knapp darunter. Der tiefere
+Boden zeigt in den Pausen Rauschstruktur, die die dichten Ströme nie hatten —
+das ist die Asymmetrie von oben an ihrer Grenze. Der Raumton ist hier
+synthetisch und weiß, echter wäre tieffrequenter; und der 20 %-Lauf trägt nur
+10 min Sprache. **Offen, nicht eingebaut:** den Boden nach unten zu begrenzen
+(`max(p99, log_max − 20 dB) − 8`) hielte stille Pässe im Bereich der dichten
+Messung, würde aber den Schutz vor einem 28-dB-Knall auf 20 dB kappen — die
+Restdosis von 8 dB liegt nach der Tabelle oben zwischen „nichts" (5,2 dB) und
++0,35 (16,2 dB). Beides ist ungemessen; die Entscheidung braucht einen Lauf
+mit der Kappe auf den stillen *und* den Knall-Strömen.
+
+**Auf dem Interview ist der Text mit und ohne Knall nicht bitgleich.** 120 s,
+−20 dB, 60-Hz-Knall bei 45 %: unter dem Max-Boden ändert der Knall 15 Stellen
+über die ganze Passage, unter dem Perzentil-Boden 3, mindestens zwei davon
+weit weg vom Knall: die Restverschiebung von 0,1 dB bewegt jede geklemmte Zelle
+um ein Bit, und Greedy-Decoding lässt irgendwo ein knappes Token kippen. Die
+Bitgleichheit auf `hart` war ein Passagenbefund, kein Verhalten. Der Test im
+Repo verlangt darum *deutlich weniger* Änderungen als unter dem Max-Boden und
+höchstens zwei Prozent der Wörter, nicht denselben Text.
+
+**Reproduktion durch den Produktionscode** (`voxpopuli_spike.py 10 300 24
+99.9,99`, dieselben zehn Ströme, Bodenanstieg median 28,2 dB):
+
+| Boden | sauber | mit Knall | Kosten des Knalls, gepaart |
+|---|---|---|---|
+| max (Bibliothek) | 11,36 % / 7,36 % | 12,88 % / 7,90 % | **+1,52 [+0,78, +2,26]** \* |
+| Perzentil 99,9 | 10,82 % / 6,93 % | 10,86 % / 6,88 % | +0,04 [+0,00, +0,10] |
+| Perzentil 99 | 10,76 % / 6,88 % | 10,77 % / 6,88 % | +0,01 [−0,03, +0,06] |
+
+Max und 99,9 reproduzieren die Zahlen oben auf die zweite Stelle; 99 ist die
+einzige Variante, deren Intervall die Null *enthält*. Auf sauberem,
+ungedämpftem Material (`voxpopuli_floor.py 10 300 99.9,99`, dieselben Ströme)
+ebenso auf die zweite Stelle: max 11,39 % / 7,32 %, Perzentil 99,9 11,29 % /
+7,20 % (dWER −0,10 [−0,83, +0,47]), Perzentil 99 11,27 % / 7,14 % (dWER
+**−0,12 [−0,85, +0,49]**, dCER −0,18 [−0,79, +0,28]); Geschwindigkeit 7,8×
+Echtzeit bei allen dreien. Dass die Perzentil-Böden im Knall-Lauf auch auf dem
+sauberen Arm um ein halbes Prozent besser stehen, ist dort und nicht hier zu
+sehen — `pair()` dämpft beide Arme um 24 dB; die naheliegende Erklärung ist,
+dass auf so leise ausgesteuertem Material schon die Sprachspitze den Boden zu
+hoch setzt. Gemessen ist das nicht.
 
 **Nebenbefund, geklärt: der Whisper-Pfad ist nicht betroffen.**
 `faster_whisper/feature_extractor.py:227` trägt dieselbe Zeile, und noScribe

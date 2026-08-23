@@ -103,7 +103,9 @@ The fork's own ~2700-line module. Beyond decoding it owns: chunking with pause-a
 repetition-loop detection and a temperature ladder, per-chunk aligner-language selection, word
 timestamps via CTC forced alignment (emissions from transformers, the Viterbi DP in
 `noScribe/ctc_align.py` — numpy, torchaudio's kernel is not used; `docs/viterbi-numpy-brief.md`
-records why), and prefix salvage when a pass has to be redone. Its tuning
+records why), the log-Mel clamp floor (a percentile of the spectrogram instead of its
+maximum, `_PercentileFloorFeatures`, swapped onto the processor so the library stays
+unpatched), and prefix salvage when a pass has to be redone. Its tuning
 constants carry comments explaining the measurement behind each value — read those before
 changing a number, and check whether a test in `tests/` pins it.
 

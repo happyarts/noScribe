@@ -1619,6 +1619,112 @@ def _log(cb, level, msg):
 
 
 # --------------------------------------------------------------------------- #
+# The log-Mel clamp floor: a percentile instead of the maximum
+# --------------------------------------------------------------------------- #
+# Every reference log-Mel path (transformers, mlx-audio, transcribe.cpp and
+# mlx-voxtral alike) clamps the spectrogram at `log_max - 8`, with log_max the
+# maximum over the *whole* input, so one loud cell sets the floor for the
+# entire pass: a 0.1 s transient 28 dB over the speech peak costs a measured
+# +1.52 WER points [+0.78, +2.26] over 50 min of VoxPopuli streams. A
+# percentile in place of the maximum removes that (+0.01 [-0.03, +0.06]) and
+# costs nothing on clean material (-0.12 [-0.85, +0.49], same streams,
+# paired); it can only lower the floor, never raise it. The case against --
+# the model was trained on the maximum-clamped input -- and the measurements
+# are in docs/voxtral-audio-vorverarbeitung.md, section 6b.
+#
+# On clean material the percentile is not a critical value: 99, 99.9 and
+# 99.99 are indistinguishable from the maximum and from each other. Under a
+# transient it is, because the transient's own cells sit at the top of the
+# distribution and displace the statistic by their count: the floor follows a
+# 100 ms full-scale noise burst (~1300 cells) by 7 dB at 99.9 on a 60 s pass,
+# whose top 0.1 % is only 768 cells, and by 0.75 dB at 99. 99.99 is unusable
+# for the same reason. The defence is count-limited either way: broadband
+# noise that fills more than the top percent of a pass (roughly 0.6 s on a
+# 60 s pass) is treated as signal and raises the floor like it always did.
+# The one regime with a thin margin is a pass that is mostly silence: the
+# percentile then sits deeper in the speech cells (24-29 dB below the maximum
+# instead of 15-18), and 50 % room tone between the utterances measured
+# +0.24 [-0.03, +0.55] -- not demonstrable, but close (section 6b, last
+# table). The 8.0 is librosa's `top_db=80` and is the range the model was
+# trained on -- it stays.
+MEL_FLOOR_PERCENTILE = 99.0
+MEL_FLOOR_RANGE = 8.0
+
+
+def clamp_log_mel(log_spec, pct=MEL_FLOOR_PERCENTILE, real_frames=None):
+    """Clamp an unclamped [frames, mels] log-Mel spectrogram at
+    `percentile(pct) - 8` and apply the reference affinity `(x + 4) / 4`.
+
+    The percentile is taken over the first `real_frames` frames only (all of
+    them by default): the block is zero-padded to a 30 s multiple, and padding
+    cells sit at the -10 minimum, so a percentile over the whole block would
+    drift downwards with the amount of padding -- 18 dB lower on a 5 s clip
+    than on the same clip unpadded. The clamp itself covers every frame. The
+    maximum of a padded block is never in a padding-only frame, so this
+    changes nothing at pct=100.
+
+    float32 throughout, with numpy scalars so the dtype holds under both the
+    legacy and the NEP 50 promotion rules: with pct=100 the result must be
+    bit-identical to mlx-voxtral's own `maximum(x, max(x) - 8)`, which is how
+    tests/test_mel_floor.py proves that only the source of the floor changed.
+    """
+    import numpy as np
+    x = np.asarray(log_spec, dtype=np.float32)
+    top = np.percentile(x if real_frames is None else x[:real_frames], pct)
+    floor = np.float32(top) - np.float32(MEL_FLOOR_RANGE)
+    return (np.maximum(x, floor) + np.float32(4.0)) / np.float32(4.0)
+
+
+class _PercentileFloorFeatures:
+    """Drop-in for mlx-voxtral's VoxtralFeatureExtractor on the one input the
+    engine hands it -- a 16 kHz mono float32 array -- with the clamp floor from
+    `clamp_log_mel` instead of the maximum. Installed on the processor by
+    _Voxtral.__init__; the library itself is not patched.
+
+    The unclamped spectrogram is built from the library's own primitives (the
+    same window, STFT, filter bank and log as its `log_mel_spectrogram`), not
+    from that function's `global_max` lever. The lever only hands out the
+    affine spectrogram `(x + 4) / 4`, which loses mantissa bits wherever
+    x > -2, and from those the reference floor cannot be reproduced exactly on
+    quiet material: with log_max in [-2, 0) one input in eight gets a floor
+    one bit off, and with it every clamped cell (measured on 300 synthetic
+    signals: 12 %). Bit-identity at pct=100 is the proof that only the floor
+    changed, so the spectrogram has to be exact.
+    """
+
+    def __init__(self, pct=MEL_FLOOR_PERCENTILE):
+        self.pct = pct
+
+    def __call__(self, raw_speech, sampling_rate=SAMPLE_RATE, **kwargs):
+        import numpy as np
+        import mlx.core as mx
+        from mlx_voxtral.audio_processing import (
+            N_FFT, N_FRAMES, N_MELS, N_SAMPLES, HOP_LENGTH,
+            get_mel_filters, hanning, pad_to_multiple, stft_mlx)
+        # The library would resample or downmix here; the engine never hands
+        # it anything but 16 kHz mono (None means "already 16 kHz" there too).
+        if sampling_rate not in (None, SAMPLE_RATE):
+            raise ValueError(f"expected {SAMPLE_RATE} Hz audio, got {sampling_rate}")
+        audio = np.asarray(raw_speech, dtype=np.float32)
+        if audio.ndim != 1:
+            raise ValueError(f"expected mono audio, got shape {audio.shape}")
+        # One spectrogram over the whole (30 s-padded) input, split afterwards,
+        # as the reference specifies (arXiv:2507.13264 section 2.1).
+        padded = pad_to_multiple(mx.array(audio), N_SAMPLES)
+        n_chunks = padded.shape[0] // N_SAMPLES
+        freqs = stft_mlx(padded, hanning(N_FFT), nperseg=N_FFT,
+                         noverlap=N_FFT - HOP_LENGTH)[:-1]
+        mel = (mx.abs(freqs) ** 2) @ get_mel_filters(N_MELS).T
+        log_spec = np.array(mx.log10(mx.maximum(mel, 1e-10)))  # [frames, mels]
+        # Frames that contain any input sample (the STFT is centred, so the
+        # window reaches N_FFT // 2 samples past the last one).
+        real_frames = -(-(len(audio) + N_FFT // 2) // HOP_LENGTH)
+        feats = clamp_log_mel(log_spec, self.pct, real_frames).T
+        feats = feats.reshape(N_MELS, n_chunks, N_FRAMES).transpose(1, 0, 2)
+        return {"input_features": mx.array(feats)}
+
+
+# --------------------------------------------------------------------------- #
 # Voxtral transcription
 # --------------------------------------------------------------------------- #
 def _cap_mlx_memory():
@@ -1645,6 +1751,7 @@ class _Voxtral:
         _cap_mlx_memory()
         self.model, _ = load_voxtral_model(repo, dtype=mx.bfloat16)
         self.proc = VoxtralProcessor.from_pretrained(repo)
+        self.proc.feature_extractor = _PercentileFloorFeatures()
         self._STOP_TOKENS = self._resolve_stop_tokens()
 
         # Adapter so mlx_lm.generate_step can drive our LM: generate_step calls

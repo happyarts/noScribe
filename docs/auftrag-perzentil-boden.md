@@ -5,8 +5,10 @@ in `voxtral-audio-vorverarbeitung.md` **§6b** — dort ist die Messlage vollst�
 mit Intervallen und Skripten. Diese Datei sagt nur, was zu tun ist, was dagegen
 spricht und woran der Einbau scheitert.
 
-**Stand: begründet, nicht erfolgt.** Der Perzentil-Boden steckt in keiner
-Codezeile von `noScribe/`; er existiert bisher nur in den Messskripten.
+**Stand: umgesetzt am 2026-08-23** — `_PercentileFloorFeatures` und
+`clamp_log_mel` in `noScribe/voxtral_engine.py`, Konstante `MEL_FLOOR_PERCENTILE`,
+Tests in `tests/test_mel_floor.py`. Was beim Einbau anders kam als hier gedacht,
+steht am Ende unter „Ergebnis des Einbaus"; die Messlage dazu in §6b.
 
 ## Worum es geht, in fünf Zeilen
 
@@ -89,12 +91,16 @@ Maximum und voneinander (§6b).
 
 | Skript | Wofür |
 |---|---|
-| `docs/skripte/voxpopuli_floor.py` | Böden auf sauberem Material, gepaart; enthält `PercentileFloor` und `load_clips` |
-| `docs/skripte/voxpopuli_spike.py` | Transientenschaden über viele Ströme; `pair()` garantiert die Dosis |
+| `docs/skripte/voxpopuli_floor.py` | Böden auf sauberem Material, gepaart; enthält `load_clips` (mit `VOXPOPULI_PARQUET` aus der lokalen Datei) |
+| `docs/skripte/voxpopuli_spike.py` | Transientenschaden über viele Ströme; `pair()` garantiert die Dosis; Perzentil-Liste als viertes Argument |
+| `docs/skripte/voxpopuli_sparse.py` | dasselbe auf Strömen, die überwiegend still sind (Sprachanteil wählbar) |
 | `docs/skripte/mel_outlier_gap.py` | Abstand Maximum zu Perzentil in echtem Material, ohne Modell |
 | `docs/skripte/whisper_spike_streams.py` | derselbe Test auf der Whisper-Standardengine |
 
-Alle mit `venv/bin/python3` starten (es gibt kein `python`).
+Alle mit `venv/bin/python3` starten (es gibt kein `python`). Die Perzentil-Arme
+kommen seit dem Einbau aus `_PercentileFloorFeatures`, der Max-Arm explizit aus
+`VoxtralFeatureExtractor()` — `vox.proc.feature_extractor` ist jetzt der
+Perzentil-Pfad und taugt nicht mehr als Stock-Arm.
 
 ## Zwei Messfallen, beide selbst hineingetappt
 
@@ -107,3 +113,35 @@ Alle mit `venv/bin/python3` starten (es gibt kein `python`).
   Whisper stand auf 8 Strömen bei +0,60/+0,95, auf 24 bei −0,20/−0,51. Und dass der
   Schaden auf einer Passage an drei Knallpositionen „exakt gleich groß" war, belegte
   Determinismus, nicht Allgemeinheit.
+
+## Ergebnis des Einbaus (2026-08-23)
+
+Die Belege mit Zahlen stehen wieder in §6b; hier nur, was vom Plan oben abwich.
+
+* **Nicht über den `global_max`-Hebel.** Die Einpass-Variante ist nicht per
+  Konstruktion bitgleich: die Affinität `(x+4)/4` verliert für `x > −2`
+  Mantissenbits, und auf leisem Material (`log_max` in [−2, 0)) bekommt jede
+  achte Eingabe daraus einen um ein Bit falschen Boden. Die float64-Fassung des
+  Snippets oben (`np.percentile` hebt unter NumPy 2 das ganze Array auf float64)
+  trifft noch öfter daneben. Der Einbau rechnet das ungeklemmte Spektrogramm
+  aus den Primitiven der Bibliothek und klemmt in float32; Abnahmekriterium 1
+  gilt damit auf jedem Pegel, auch dem gedämpften `hart`-Fall.
+* **Perzentil 99, nicht 99,9.** Die Wahl ist nur auf sauberem Material
+  unkritisch. Unter einem Transienten verdrängen dessen Zellen die Statistik um
+  ihre Anzahl; ein breitbandiger 100-ms-Rauschburst (~1300 Zellen) lässt bei
+  99,9 auf einem 60-s-Pass 7 dB Bodenanstieg stehen, bei 99 noch 0,75 dB. Auf
+  den Strömen: +0,04 [+0,00, +0,10] gegen +0,01 [−0,03, +0,06].
+* **Abnahmekriterium 2 hält nicht wörtlich.** Der Text ist mit und ohne Knall
+  nicht derselbe, sondern fast derselbe (3 statt 15 geänderte Stellen auf 120 s
+  Interview), weil der Boden um einen Bruchteil eines dB wandert und nicht um
+  null. Der Test verlangt deshalb eine kleine Differenz, deutlich unter der des
+  Max-Bodens, statt Gleichheit.
+* **Polsterfrei.** Das Perzentil über den nullgepolsterten 30-s-Block hätte
+  bei kurzen Eingaben einen bis 18 dB tieferen Boden ergeben; die Statistik
+  nimmt nur die echten Frames (Review-Fund).
+* **Stille Pässe gemessen, nicht abgesichert.** Bei 50 % Raumton zwischen
+  den Äußerungen kostet der Perzentil-Boden +0,24 [−0,03, +0,55], bei 20 %
+  +0,07 [−0,72, +1,10] — kein Nachweis, aber ein dünner Rand. Eine Kappe nach
+  unten ist als Option in §6b beschrieben und ungemessen.
+* **Kriterium 4 erfüllt:** +1,52 [+0,78, +2,26] und +0,04 [+0,00, +0,10] auf
+  die zweite Stelle reproduziert, durch den Produktionscode.

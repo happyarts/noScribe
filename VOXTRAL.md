@@ -37,13 +37,27 @@ audio to cost nothing at the transcript (dWER +0.02 [−0.19, +0.24]); see
 [docs/voxtral-audio-vorverarbeitung.md](docs/voxtral-audio-vorverarbeitung.md),
 section 6.
 
+The engine also swaps the processor's feature extractor for its own
+(`_PercentileFloorFeatures`): the library clamps the log-Mel at `log_max − 8`
+with the maximum taken over the whole input, so one loud transient — a door
+slam — raises the floor for the entire pass and costs a measured +1.52 WER
+points at 28 dB; the engine takes the floor from a percentile of the
+spectrogram instead, which removes that and costs nothing on clean material.
+The spectrogram itself is the library's (built from its own window, STFT and
+filter bank), and `tests/test_mel_floor.py` pins it bit for bit to the
+library's path at percentile 100. Section 6b of the same document has the
+measurements.
+
 The pinning is a known liability, so here is the exit route, measured rather
 than assumed. **The coupling is five calls** (plus a handful of attribute reaches —
 `embed_tokens`, `get_audio_embeds`, `config.audio_token_id`, `language_model`,
 `lm_head`) — `load_voxtral_model`,
 `VoxtralProcessor`, `apply_transcrition_request`, `model.generate` (the
-non-greedy fallback only) and `proc.decode`, plus `mlx_voxtral.quantization`
-and `download_model` in `tools/quantize_voxtral.py`. Everything else in
+non-greedy fallback only) and `proc.decode`, plus the four audio primitives
+`stft_mlx`, `hanning`, `get_mel_filters` and `pad_to_multiple` with their
+frame constants behind the feature extractor above,
+and `mlx_voxtral.quantization` and `download_model` in
+`tools/quantize_voxtral.py`. Everything else in
 `voxtral_engine.py` is this project's own: chunking, loop detection, the
 temperature ladder, forced alignment, prefix salvage. None of it depends on
 which package loads the weights.

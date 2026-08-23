@@ -14,7 +14,12 @@ Verzerrung eines Referenztranskripts herausfallen lässt.
 Der Knall wird relativ zur Sprachspitze des Stroms gesetzt, nicht absolut,
 damit alle Ströme dieselbe Dosis sehen.
 
-    python docs/skripte/voxpopuli_spike.py [n_stroeme] [sekunden] [dB_ueber_Sprache]
+    python docs/skripte/voxpopuli_spike.py [n_stroeme] [sekunden] [dB_ueber_Sprache] [perzentile]
+
+`perzentile` darf eine Liste sein (`99.9,99`); jeder Wert wird als eigener
+Boden gefahren. Der max-Boden kommt explizit aus der Bibliothek, die
+Perzentil-Böden aus dem Produktionscode (`_PercentileFloorFeatures`), denn
+seit dem Einbau ist der Extractor auf `vox.proc` bereits der Perzentil-Pfad.
 """
 import pathlib
 import sys
@@ -28,8 +33,9 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "docs" / "skripte"))
 from wer import norm, wer                                    # noqa: E402
 from fleurs_stream import streams, paired, SR                # noqa: E402
-from noScribe.voxtral_engine import _Voxtral                 # noqa: E402
-from voxpopuli_floor import PercentileFloor, load_clips      # noqa: E402
+from mlx_voxtral.audio_processing import VoxtralFeatureExtractor  # noqa: E402
+from noScribe.voxtral_engine import _Voxtral, _PercentileFloorFeatures  # noqa: E402
+from voxpopuli_floor import load_clips                       # noqa: E402
 
 
 def pair(x, db_over, at=0.45, ms=100):
@@ -65,6 +71,8 @@ def main():
     n_streams = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     sec = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
     db_over = float(sys.argv[3]) if len(sys.argv) > 3 else 12.0
+    pcts = ([float(x) for x in sys.argv[4].split(",")]
+            if len(sys.argv) > 4 else [99.9])
 
     clips, refs = load_clips(int(n_streams * sec / 9) + 60)
     st = streams(clips, refs, n_streams, sec)
@@ -74,7 +82,8 @@ def main():
     print(f"# Transient: {db_over:+.0f} dB über der Sprachspitze, 100 ms, bei 45 %")
 
     vox = _Voxtral(str(REPO / "models" / "voxtral-mini-8bit"))
-    stock, pctx = vox.proc.feature_extractor, PercentileFloor(99.9)
+    arms = [("max", VoxtralFeatureExtractor())]
+    arms += [(f"Perzentil {p:g}", _PercentileFloorFeatures(p)) for p in pcts]
 
     def rate(rows, num, den):
         return sum(r[num] for r in rows) / max(1, sum(r[den] for r in rows)) * 100
@@ -101,7 +110,7 @@ def main():
 
     print(f"\n{'Boden':16s} {'Audio':10s} {'WER':>7s} {'CER':>7s}")
     store = {}
-    for name, ex in (("max (ist)", stock), ("Perzentil 99,9", pctx)):
+    for name, ex in arms:
         for au, spike in (("sauber", False), ("mit Knall", True)):
             rows, el = score(ex, spike)
             store[(name, au)] = rows
@@ -110,7 +119,7 @@ def main():
 
     print("\nKosten des Transienten, gepaart je Boden "
           "(95 %; enthält es 0, nicht nachweisbar):")
-    for name in ("max (ist)", "Perzentil 99,9"):
+    for name, _ in arms:
         a, b = store[(name, "sauber")], store[(name, "mit Knall")]
         lo_w, hi_w = paired(a, b, "w", "ref_w")
         lo_c, hi_c = paired(a, b, "c", "ref_c")
