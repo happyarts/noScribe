@@ -7,9 +7,11 @@ On German / Swiss-German interview and podcast audio it is, in our tests,
 **more accurate and more readable than Whisper** — it gets technical terms right
 where Whisper mis-hears them (e.g. *Wortfindungsstörungen*, not
 *Gottfindungsstörungen*), spells consistently, and produces fluent, readable
-sentences instead of literal disfluent strings. It runs **faster than realtime**
-even for the 24B model, and never ran into the repetition loops Whisper can
-produce on hard audio.
+sentences instead of literal disfluent strings. With the 3B model it runs
+several times **faster than realtime**; the 24B build is slower than the
+recording (see the table below). It loops on hard audio far less than Whisper
+does — and where it does, the engine detects the loop and repairs the pass
+instead of shipping the damage.
 
 ## Install (macOS, Apple Silicon)
 
@@ -17,8 +19,8 @@ produce on hard audio.
 pip install -r environments/requirements_voxtral_macOS_arm64.txt
 ```
 
-The models `voxtral-mini` and `voxtral-small` then appear in the model dropdown.
-They are downloaded on first use.
+The models `voxtral-mini-8bit` and `voxtral-small-8bit` then appear in the
+model dropdown, each with the RAM it needs. They are downloaded on first use.
 
 ### A note on the pinned dependencies
 
@@ -51,9 +53,10 @@ measurements.
 The pinning is a known liability, so here is the exit route, measured rather
 than assumed. **The coupling is five calls** (plus a handful of attribute reaches —
 `embed_tokens`, `get_audio_embeds`, `config.audio_token_id`, `language_model`,
-`lm_head`) — `load_voxtral_model`,
+`lm_head`, and the one private one, `proc._special_token_ids`) — `load_voxtral_model`,
 `VoxtralProcessor`, `apply_transcrition_request`, `model.generate` (the
-non-greedy fallback only) and `proc.decode`, plus the four audio primitives
+repetition-penalty rung, and any prompt carrying a padding mask) and
+`proc.decode`, plus the four audio primitives
 `stft_mlx`, `hanning`, `get_mel_filters` and `pad_to_multiple` with their
 frame constants behind the feature extractor above,
 and `mlx_voxtral.quantization` and `download_model` in
@@ -65,7 +68,9 @@ which package loads the weights.
 The replacement, if the pin ever breaks against a newer MLX, is
 [`mlx-audio`](https://github.com/Blaizzy/mlx-audio) — actively maintained, and
 its `mlx_audio/stt/models/` carries Voxtral alongside a dozen other ASR models
-behind one API. Three things to know before starting, all verified against
+behind one API. The three things to know before starting come from the migration
+work order, [docs/migration-mlx-audio.md](docs/migration-mlx-audio.md), which
+also carries the steps and the acceptance criteria; all were verified against
 mlx-audio 0.5.0:
 
 * **It will not load the published quantised builds, and it fails silently.**
@@ -106,7 +111,7 @@ alignment quality as an explicit language choice. Mixed speech with a clear
 majority language (e.g. German with English phrases) uses the majority
 model, which also anchors the minority-language words; only text without a
 dominant language falls back to the romanised multilingual aligner
-(MMS-300M, 1130+ languages). If an explicitly selected language contradicts
+(MMS-300M, 1130 languages). If an explicitly selected language contradicts
 what the transcript looks like, a warning is logged.
 
 ## Which model
@@ -124,10 +129,14 @@ making progress. Builds that cannot fit are refused before a run starts.
 | `voxtral-small-8bit` (24B) | 25 GB | ~34 GB | quality ceiling for clean, read-aloud audio on 48 GB+; slower than realtime |
 
 **Which of the two?** It depends on the recording, not on a ranking: on clean,
-read-aloud speech the 24B model is clearly better (2.8 % vs 4.8 % word error
-rate), on hard conversational German with crosstalk and brand names the 3B model
-is (4.3 % vs 7.8 %). For interviews and podcasts, pick mini — it is also the only
-one that runs on a 32 GB or smaller machine. The measurements, including the
+read-aloud speech the 24B model is clearly better (2.8 % against 4.8 % word
+error), on hard conversational German with crosstalk and brand names the 3B
+model is (4.3 % against 7.8 %). Both 24B figures are the best 24B configuration
+measured, which is a locally built 4-bit variant; the shipped 8-bit build scores
+8.3 % on the hard passage. And read the inversion with care: by *character*
+error the 24B model is the better half of it — it hears more and spells worse.
+For interviews and podcasts, pick mini — it is also the only one that runs on a
+32 GB or smaller machine. The measurements, including the
 comparison against Whisper, are in
 [docs/voxtral-quantisierung.md](docs/voxtral-quantisierung.md).
 
@@ -203,8 +212,10 @@ pass never splits a word and boundaries are effectively lossless.
 The first pass is additionally checked for a dropped opening: a window
 occasionally returns without its first seconds of speech, silently, so a short
 head of the same audio is decoded and whatever is missing is spliced back. Later
-passes need no check — they carry a lead-in overlap that the previous pass
-already transcribed. When it finds something, the log says so.
+passes are not checked: on the long path they carry a lead-in overlap that the
+previous pass already transcribed, and probing every pass was measured at ~10 %
+of each decode. (The fast path has no overlap, so there a later pass is simply
+unguarded.) When the check finds something, the log says so.
 
 This is not rare enough to skip: on a raw Zoom recording, 5 of 64 windows cut at
 300 s and 600 s came back missing their opening, once losing 18 words of fluent
@@ -212,7 +223,8 @@ speech. It depends on the recording — read-aloud benchmark audio never shows i
 Measurements in [docs/voxtral-benchmarks.md](docs/voxtral-benchmarks.md), §5.
 
 To pin the length yourself, set `voxtral_chunk_sec:` (seconds) in `config.yml`
-(`0` = automatic). Lower it if other apps need RAM. Raising it past 10 minutes
+(`0` = automatic). If other apps need RAM, raise `voxtral_ram_reserve_gb:`
+instead — that is the knob the automatic length is computed against. Raising it past 10 minutes
 is refused — see the cap above.
 
 ## Correcting brand / product / programme names
@@ -251,3 +263,7 @@ Voxtral does not know is therefore fixed after the fact, here.
 The Voxtral integration for noScribe (engine, forced alignment, quantised
 model builds) was created by **[Markus Kämmerer](https://markus-kaemmerer.de)**
 · [Instagram @markuskaemmerer](https://www.instagram.com/markuskaemmerer/).
+
+It was written with [Claude Code](https://claude.com/claude-code): the design
+decisions, the measurements and what to make of them are the author's; Claude
+wrote and reviewed much of the code and the write-ups under that direction.

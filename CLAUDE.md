@@ -11,7 +11,10 @@ audio into speaker-attributed transcripts.
 The fork's substantial addition is the **Voxtral transcription engine** (`noScribe/voxtral_engine.py`,
 documented in `VOXTRAL.md`) — an Apple-Silicon-only alternative to faster-whisper. Most other
 fork branches are small fixes intended to go back upstream as PRs. Work destined for `upstream`
-should be in English; `docs/` holds German measurement write-ups.
+should be in English. `docs/` holds the measurement write-ups — the newer ones
+in English, `voxtral-benchmarks.md` and `voxtral-audio-vorverarbeitung.md` still
+in German. They are sorted by topic, not by date: a finding belongs in the
+write-up for its subject, or in a comment next to the constant it explains.
 
 The repo ships **two applications**. `noScribe/` is the transcriber (customtkinter/tkinter);
 `noScribeEdit/` is a separate PyQt transcript editor with its own README, requirements and
@@ -19,8 +22,10 @@ PyInstaller specs. `main.py` starts it as a detached process (`launch_editor`) s
 noScribe quitting — the two share no runtime state, only the transcript file. Changes on one
 side rarely affect the other.
 
-Supporting code that is neither: `tools/` (model quantisation, loop-detection calibration),
-`docs/skripte/` (~30 one-off measurement scripts behind the German write-ups in `docs/`), and
+Supporting code that is neither: `tools/` (model quantisation, loop-detection calibration, and
+`check_local_current.py`, which proves `local/main` still carries every line the open PR branches
+add), `docs/skripte/` (~40 one-off measurement scripts behind the write-ups in `docs/`, plus
+`docs/skripte/engines/` for scoring rival ASR engines), and
 `benchmarks-local/`, which is excluded through `.git/info/exclude` rather than `.gitignore` and
 therefore exists only in this working copy.
 

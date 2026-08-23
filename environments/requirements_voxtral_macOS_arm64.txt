@@ -1,6 +1,6 @@
 # Optional Voxtral transcription engine (Apple Silicon only).
-# Install on top of requirements_macOS_arm64.txt to enable the "voxtral-mini"
-# and "voxtral-small" models in the transcription backend:
+# Install on top of requirements_macOS_arm64.txt to enable the
+# "voxtral-mini-8bit" and "voxtral-small-8bit" models in the backend:
 #
 #   pip install -r environments/requirements_voxtral_macOS_arm64.txt
 #
