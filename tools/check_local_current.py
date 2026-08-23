@@ -35,6 +35,10 @@ INTENTIONAL = {
     # würde der Anzeigetext als gemerktes Modell gespeichert.
     "config['last_whisper_model'] = self.option_menu_whisper_model.get()":
         "lokal durch model_key() ersetzt (dekorierter Picker)",
+    # local/main trägt zusätzlich ctc_align (numpy-Viterbi), das es upstream
+    # nicht gibt -- die Zeile ist hier also eine echte Obermenge der PR-Zeile.
+    '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils")':
+        "lokal um ctc_align erweitert",
 }
 
 
