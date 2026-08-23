@@ -406,8 +406,10 @@ Bei 100 ändert das nichts, die Bitgleichheits-Kontrolle bleibt. (Gefunden im
 Review, nicht im Entwurf.)
 
 **Was in überwiegend stillen Pässen passiert: kein Nachweis, aber dünner
-Rand.** Alle Ströme oben sind dichte Rede, dort liegt das 99. Perzentil
-15–18 dB unter dem Maximum. In einem Pass, der vor allem aus Pausen besteht
+Rand.** Alle Ströme oben sind dichte Rede; dort liegt das 99. Perzentil
+19,5–26,8 dB unter dem Maximum (Median 22,0 — auf dem redigierten Interview
+sind es nur 15,6–17,8, VoxPopuli-Schnitte tragen mehr Pausen). In einem Pass,
+der vor allem aus Pausen besteht
 (die 60-s-Kopfprobe auf einer Aufnahme, die mit Stille beginnt), rutscht das
 Perzentil innerhalb der Sprachzellen nach unten und der Boden liegt tiefer als
 je gemessen. `voxpopuli_sparse.py`: dieselben Clips, dazwischen weißes
@@ -416,7 +418,7 @@ Rauschen bei −60 dBFS als Raumton, bis der Sprachanteil stimmt; 10 Ströme à
 
 | Sprachanteil | Abstand max → p99 | max | Perzentil 99 | gepaart |
 |---|---|---|---|---|
-| ~100 % (oben) | 15–18 dB | 11,39 % / 7,32 % | 11,27 % / 7,14 % | −0,12 [−0,85, +0,49] · CER −0,18 [−0,79, +0,28] |
+| ~100 % (oben) | 22,0 dB (19,5–26,8) | 11,39 % / 7,32 % | 11,27 % / 7,14 % | −0,12 [−0,85, +0,49] · CER −0,18 [−0,79, +0,28] |
 | 50 % | 23,6 dB (20,7–28,9) | 10,14 % / 6,35 % | 10,38 % / 6,67 % | **+0,24 [−0,03, +0,55]** · CER +0,32 [−0,01, +0,77] |
 | 20 % | 28,5 dB (26,1–30,0) | 12,30 % / 8,25 % | 12,36 % / 8,54 % | +0,07 [−0,72, +1,10] · CER +0,28 [−0,25, +1,02] |
 
@@ -425,12 +427,39 @@ Hundertstel, und beide CER-Intervalle stehen knapp darunter. Der tiefere
 Boden zeigt in den Pausen Rauschstruktur, die die dichten Ströme nie hatten —
 das ist die Asymmetrie von oben an ihrer Grenze. Der Raumton ist hier
 synthetisch und weiß, echter wäre tieffrequenter; und der 20 %-Lauf trägt nur
-10 min Sprache. **Offen, nicht eingebaut:** den Boden nach unten zu begrenzen
-(`max(p99, log_max − 20 dB) − 8`) hielte stille Pässe im Bereich der dichten
-Messung, würde aber den Schutz vor einem 28-dB-Knall auf 20 dB kappen — die
-Restdosis von 8 dB liegt nach der Tabelle oben zwischen „nichts" (5,2 dB) und
-+0,35 (16,2 dB). Beides ist ungemessen; die Entscheidung braucht einen Lauf
-mit der Kappe auf den stillen *und* den Knall-Strömen.
+10 min Sprache.
+
+**Die Kappe, gemessen und verworfen (2026-08-24).** Der naheliegende Ausweg
+für stille Pässe ist ein Boden, der nie mehr als 20 (oder 25) dB unter dem
+Maximum liegt: `max(p99, log_max − Kappe) − 8`. `clamp_log_mel` trägt dafür
+einen `cap`-Parameter (Voreinstellung `MEL_FLOOR_CAP = None`), die Skripte
+die Arm-Kurzform `99c20`. Alle vier Regime, gleiche Ströme wie oben:
+
+| Regime | max | p99 | p99 Kappe 20 dB | p99 Kappe 25 dB |
+|---|---|---|---|---|
+| Knall 28 dB, Kosten sauber→Knall | **+1,52 [+0,78, +2,26]** \* | +0,01 [−0,03, +0,06] | **+0,81 [+0,18, +1,57]** \* | **+0,75 [+0,10, +1,53]** \* |
+| dicht sauber, gegen max | — | −0,12 [−0,85, +0,49] | −0,07 [−0,81, +0,54] | −0,10 [−0,83, +0,51] |
+| 50 % still, gegen max | — | +0,24 [−0,03, +0,55] | **+0,05 [−0,17, +0,37]** | +0,24 [−0,03, +0,55] |
+| 20 % still, gegen max | — | +0,07 [−0,72, +1,10] | +0,07 [−0,67, +1,07] | +0,07 [−0,67, +1,07] |
+
+Die Kappe tut auf den stillen Strömen, was sie soll (+0,24 → +0,05 bei 50 %),
+aber unterm Knall verliert sie nachweisbar: der Knall hebt das Maximum, die
+Kappe hängt am Maximum, also steigt der Boden wieder mit — auf
+`Kappe − 28 dB` unter den Knall statt 80 dB unter die Sprachspitze. Die
++0,81 bestehen dabei zu etwa drei Vierteln aus einem zurückgegebenen
+Gewinn: auf dem um 24 dB gedämpften Knall-Korpus ist der tiefe
+Perzentil-Boden dem Max-Boden um rund 0,6 Punkte voraus (11,36 gegen 10,76
+sauber, in allen vier Armen wiederholt) — leise ausgesteuertes Material ist
+genau der Fall, in dem schon die Sprachspitze den Boden zu hoch setzt.
+25 dB ist beidseitig dominiert: auf den stillen Strömen greift sie kaum
+(Abstände 20,7–28,9 dB), unterm Knall kostet sie dasselbe. Abwägung: die
+Kappe kauft +0,19 im 50-%-Regime (kein Intervall schließt die Null aus) und
+bezahlt +0,8 im Knall-Regime (Intervall schließt die Null aus) — dem
+Anwendungsfall, für den der Perzentil-Boden gebaut wurde. **Es bleibt beim
+ungekappten Perzentil 99**; `MEL_FLOOR_CAP` bleibt `None` und existiert nur,
+damit die Messskripte den Arm fahren können. Skripte:
+`voxpopuli_spike.py 10 300 24 99c20,99c25`, `voxpopuli_floor.py 10 300
+99c20,99c25`, `voxpopuli_sparse.py 10 300 0.5|0.2 max,99c20,99c25`.
 
 **Auf dem Interview ist der Text mit und ohne Knall nicht bitgleich.** 120 s,
 −20 dB, 60-Hz-Knall bei 45 %: unter dem Max-Boden ändert der Knall 15 Stellen

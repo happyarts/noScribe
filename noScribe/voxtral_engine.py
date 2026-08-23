@@ -1643,17 +1643,30 @@ def _log(cb, level, msg):
 # 60 s pass) is treated as signal and raises the floor like it always did.
 # The one regime with a thin margin is a pass that is mostly silence: the
 # percentile then sits deeper in the speech cells (24-29 dB below the maximum
-# instead of 15-18), and 50 % room tone between the utterances measured
-# +0.24 [-0.03, +0.55] -- not demonstrable, but close (section 6b, last
-# table). The 8.0 is librosa's `top_db=80` and is the range the model was
-# trained on -- it stays.
+# against 20-27 on dense streams), and 50 % room tone between the
+# utterances measured
+# +0.24 [-0.03, +0.55] -- not demonstrable, but close, and capping the
+# floor to fix it was measured and rejected (see MEL_FLOOR_CAP). The 8.0 is
+# librosa's `top_db=80` and is the range the model was trained on -- it
+# stays.
 MEL_FLOOR_PERCENTILE = 99.0
 MEL_FLOOR_RANGE = 8.0
+# Optional lower bound on the floor, in log10 units below the maximum (2.0 =
+# 20 dB): `max(percentile, log_max - cap) - 8`. Measured at 20 and 25 dB over
+# all four regimes and REJECTED: a cap hangs off the maximum, so a knock
+# lifts it along -- +0.81 [+0.18, +1.57] at 20 dB where the uncapped floor
+# costs +0.01 -- while buying only +0.24 -> +0.05 on half-silent streams,
+# where no interval excludes zero (section 6b, last table). None stays the
+# production value; the parameter exists so the measurement scripts can
+# drive the arm (spec `99c20` in docs/skripte).
+MEL_FLOOR_CAP = None
 
 
-def clamp_log_mel(log_spec, pct=MEL_FLOOR_PERCENTILE, real_frames=None):
+def clamp_log_mel(log_spec, pct=MEL_FLOOR_PERCENTILE, real_frames=None,
+                  cap=MEL_FLOOR_CAP):
     """Clamp an unclamped [frames, mels] log-Mel spectrogram at
-    `percentile(pct) - 8` and apply the reference affinity `(x + 4) / 4`.
+    `percentile(pct) - 8` and apply the reference affinity `(x + 4) / 4`;
+    with `cap`, the statistic never sits more than `cap` below the maximum.
 
     The percentile is taken over the first `real_frames` frames only (all of
     them by default): the block is zero-padded to a 30 s multiple, and padding
@@ -1670,8 +1683,11 @@ def clamp_log_mel(log_spec, pct=MEL_FLOOR_PERCENTILE, real_frames=None):
     """
     import numpy as np
     x = np.asarray(log_spec, dtype=np.float32)
-    top = np.percentile(x if real_frames is None else x[:real_frames], pct)
-    floor = np.float32(top) - np.float32(MEL_FLOOR_RANGE)
+    stat = x if real_frames is None else x[:real_frames]
+    top = np.float32(np.percentile(stat, pct))
+    if cap is not None:
+        top = max(top, stat.max() - np.float32(cap))
+    floor = top - np.float32(MEL_FLOOR_RANGE)
     return (np.maximum(x, floor) + np.float32(4.0)) / np.float32(4.0)
 
 
@@ -1692,8 +1708,9 @@ class _PercentileFloorFeatures:
     changed, so the spectrogram has to be exact.
     """
 
-    def __init__(self, pct=MEL_FLOOR_PERCENTILE):
+    def __init__(self, pct=MEL_FLOOR_PERCENTILE, cap=MEL_FLOOR_CAP):
         self.pct = pct
+        self.cap = cap
 
     def __call__(self, raw_speech, sampling_rate=SAMPLE_RATE, **kwargs):
         import numpy as np
@@ -1719,7 +1736,7 @@ class _PercentileFloorFeatures:
         # Frames that contain any input sample (the STFT is centred, so the
         # window reaches N_FFT // 2 samples past the last one).
         real_frames = -(-(len(audio) + N_FFT // 2) // HOP_LENGTH)
-        feats = clamp_log_mel(log_spec, self.pct, real_frames).T
+        feats = clamp_log_mel(log_spec, self.pct, real_frames, self.cap).T
         feats = feats.reshape(N_MELS, n_chunks, N_FRAMES).transpose(1, 0, 2)
         return {"input_features": mx.array(feats)}
 

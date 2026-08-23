@@ -48,6 +48,20 @@ from mlx_voxtral.audio_processing import VoxtralFeatureExtractor  # noqa: E402
 from noScribe.voxtral_engine import _Voxtral, _PercentileFloorFeatures  # noqa: E402
 
 
+def floor_arm(spec):
+    """Ein Boden-Arm aus einer Kurzform: 'max' ist der Bibliothekspfad,
+    '99' ein Perzentil-Boden, '99c20' ein Perzentil mit Kappe in dB
+    (der Boden liegt nie mehr als 20 dB unter dem Maximum). Die Perzentil-
+    und Kappen-Arme kommen aus dem Produktionscode."""
+    if spec == "max":
+        return "max (Bibliothek)", VoxtralFeatureExtractor()
+    if "c" in spec:
+        pct, cap = spec.split("c")
+        return (f"P{float(pct):g} Kappe {float(cap):g}dB",
+                _PercentileFloorFeatures(float(pct), cap=float(cap) / 10.0))
+    return f"Perzentil {float(spec):g}", _PercentileFloorFeatures(float(spec))
+
+
 DIGIT = re.compile(r"\d")
 
 
@@ -114,8 +128,7 @@ def load_clips(n_rows, skip_digits=False):
 def main():
     n_streams = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     sec = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
-    pcts = ([float(x) for x in sys.argv[3].split(",")]
-            if len(sys.argv) > 3 else [99.9])
+    specs = sys.argv[3].split(",") if len(sys.argv) > 3 else ["99.9"]
 
     clips, refs = load_clips(int(n_streams * sec / 9) + 60)
     st = streams(clips, refs, n_streams, sec)
@@ -127,7 +140,7 @@ def main():
     # Der Perzentil-Boden ist seit dem Einbau der Produktionspfad, also kommt
     # der max-Arm explizit aus der Bibliothek, nicht von vox.proc.
     stock = VoxtralFeatureExtractor()
-    arms = [(f"Perzentil {p:g}", _PercentileFloorFeatures(p)) for p in pcts]
+    arms = [floor_arm(s) for s in specs if s != "max"]
 
     # Greift der Tausch? Sonst misst der Lauf zweimal dasselbe.
     probe = st[0][0]

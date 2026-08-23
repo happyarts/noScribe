@@ -141,7 +141,11 @@ Die Belege mit Zahlen stehen wieder in §6b; hier nur, was vom Plan oben abwich.
   nimmt nur die echten Frames (Review-Fund).
 * **Stille Pässe gemessen, nicht abgesichert.** Bei 50 % Raumton zwischen
   den Äußerungen kostet der Perzentil-Boden +0,24 [−0,03, +0,55], bei 20 %
-  +0,07 [−0,72, +1,10] — kein Nachweis, aber ein dünner Rand. Eine Kappe nach
-  unten ist als Option in §6b beschrieben und ungemessen.
+  +0,07 [−0,72, +1,10] — kein Nachweis, aber ein dünner Rand.
+* **Die Kappe nach unten wurde nachgemessen und verworfen (2026-08-24).**
+  20 und 25 dB, alle vier Regime: sie hängt am Maximum und steigt darum mit
+  dem Knall (+0,81 [+0,18, +1,57] bei 20 dB, wo ungekappt +0,01 steht), und
+  kauft dafür nur +0,24 → +0,05 bei 50 % Stille, wo kein Intervall die Null
+  ausschließt. `MEL_FLOOR_CAP` bleibt `None`; Details und Tabelle in §6b.
 * **Kriterium 4 erfüllt:** +1,52 [+0,78, +2,26] und +0,04 [+0,00, +0,10] auf
   die zweite Stelle reproduziert, durch den Produktionscode.

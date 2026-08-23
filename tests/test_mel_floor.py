@@ -90,6 +90,25 @@ def test_the_percentile_floor_never_sits_above_the_reference_floor():
     assert np.any(out < ref)
 
 
+def test_the_cap_bounds_the_floor_but_never_raises_it_past_the_reference():
+    """With `cap`, the statistic never sits more than cap below the maximum:
+    on a spectrogram whose 99th percentile is far below the top, the capped
+    floor lands exactly at max - cap - 8, and at pct=100 the cap is inert
+    (the percentile is already the maximum), so the bit-identity control
+    covers the capped path too."""
+    x = _raw_spectrogram(3, 1.5)
+    assert np.array_equal(clamp_log_mel(x, 100, cap=np.float32(2.0)),
+                          _reference_clamp(x))
+    uncapped_top = np.float32(np.percentile(x, MEL_FLOOR_PERCENTILE))
+    assert uncapped_top < x.max() - np.float32(2.0)   # the cap has work to do
+    capped = clamp_log_mel(x, MEL_FLOOR_PERCENTILE, cap=np.float32(2.0))
+    expected_floor = (x.max() - np.float32(2.0) - np.float32(MEL_FLOOR_RANGE)
+                      + np.float32(4.0)) / np.float32(4.0)
+    assert capped.min() == expected_floor
+    assert np.all(capped >= clamp_log_mel(x, MEL_FLOOR_PERCENTILE))
+    assert np.all(capped <= _reference_clamp(x))
+
+
 def test_a_burst_of_loud_cells_moves_the_reference_floor_but_not_the_percentile():
     """A 0.1 s transient is a couple of hundred cells among 1.5 million on a
     two-minute pass. The maximum floor follows it all the way; the percentile

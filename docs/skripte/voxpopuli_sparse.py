@@ -1,7 +1,8 @@
 """Kostet der Perzentil-Boden etwas, wenn ein Pass grossteils still ist?
 
 `voxpopuli_floor.py` misst dichte Rede: die Stroeme bestehen fast nur aus
-Sprache, und dort liegt das 99. Perzentil 15-18 dB unter dem Maximum. In einem
+Sprache, und dort liegt das 99. Perzentil 19,5-26,8 dB unter dem Maximum
+(Median 22; auf dem redigierten Interview nur 15,6-17,8). In einem
 Pass, der ueberwiegend aus Pausen oder Vorlauf besteht -- die 60-s-Kopfprobe
 auf einer Aufnahme, die mit Stille beginnt, ein Fenster ueber eine lange
 Pause --, ist das oberste Prozent der Zellen immer noch Sprache, aber das
@@ -11,7 +12,10 @@ dieser Lauf: dieselben Goldtranskripte, dieselben Clips, aber zwischen den
 Clips Raumrauschen statt 0,4 s Stille, bis der Sprachanteil bei `anteil`
 liegt. Beide Boeden auf bitgleichem Audio, gepaart.
 
-    python docs/skripte/voxpopuli_sparse.py [n_stroeme] [sekunden] [anteil] [perzentile]
+    python docs/skripte/voxpopuli_sparse.py [n_stroeme] [sekunden] [anteil] [boeden]
+
+`boeden` in der Kurzform von `voxpopuli_floor.floor_arm` (`max,99,99c20`);
+der erste Arm ist die Basis der gepaarten Auswertung.
 
 `anteil` ist der Sprachanteil des Stroms (0,5 = halb Rede, halb Rauschen).
 Das Raumrauschen ist weisses Rauschen bei -60 dBFS -- der Pegel eines
@@ -19,7 +23,6 @@ leisen Raums in einer Aufnahme, die bis 1,0 ausgesteuert ist.
 """
 import pathlib
 import sys
-import time
 
 import numpy as np
 import mlx.core as mx
@@ -29,9 +32,8 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "docs" / "skripte"))
 from wer import norm, wer                                    # noqa: E402
 from fleurs_stream import paired, SR                         # noqa: E402
-from mlx_voxtral.audio_processing import VoxtralFeatureExtractor  # noqa: E402
-from noScribe.voxtral_engine import _Voxtral, _PercentileFloorFeatures  # noqa: E402
-from voxpopuli_floor import load_clips                       # noqa: E402
+from noScribe.voxtral_engine import _Voxtral                 # noqa: E402
+from voxpopuli_floor import floor_arm, load_clips            # noqa: E402
 from mel_outlier_gap import raw_log_mel                      # noqa: E402
 
 ROOM_DB = -60.0
@@ -65,8 +67,7 @@ def main():
     n_streams = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     sec = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
     share = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
-    pcts = ([float(x) for x in sys.argv[4].split(",")]
-            if len(sys.argv) > 4 else [99.0])
+    specs = sys.argv[4].split(",") if len(sys.argv) > 4 else ["max", "99"]
 
     clips, refs = load_clips(int(n_streams * sec * share / 9) + 60)
     st = sparse_streams(clips, refs, n_streams, sec, share)
@@ -75,15 +76,17 @@ def main():
           f"Sprachanteil {share:.0%}, {total/60:.1f} min gesamt")
 
     # Die Dosis: wie weit liegt das Perzentil unter dem Maximum?
-    for p in pcts:
+    for spec in specs:
+        if spec == "max":
+            continue
+        p = float(spec.split("c")[0])
         gaps = [(raw_log_mel(x).max() - np.percentile(raw_log_mel(x), p)) * 10
                 for x, _ in st]
         print(f"# Abstand max -> Perzentil {p:g}: median {np.median(gaps):.1f} dB "
               f"(min {min(gaps):.1f}, max {max(gaps):.1f})")
 
     vox = _Voxtral(str(REPO / "models" / "voxtral-mini-8bit"))
-    arms = [("max (Bibliothek)", VoxtralFeatureExtractor())]
-    arms += [(f"Perzentil {p:g}", _PercentileFloorFeatures(p)) for p in pcts]
+    arms = [floor_arm(s) for s in specs]
 
     def rate(rows, num, den):
         return sum(r[num] for r in rows) / max(1, sum(r[den] for r in rows)) * 100
@@ -104,8 +107,8 @@ def main():
         store[name] = rows
         mx.clear_cache()
 
-    a = store["max (Bibliothek)"]
-    print("\nGepaart gegen max (95%; enthaelt es 0, nicht nachweisbar):")
+    a = store[arms[0][0]]  # erster Arm ist die Basis
+    print(f"\nGepaart gegen {arms[0][0]} (95%; enthaelt es 0, nicht nachweisbar):")
     for name, _ in arms[1:]:
         b = store[name]
         lo_w, hi_w = paired(a, b, "w", "ref_w")
