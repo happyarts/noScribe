@@ -1,12 +1,22 @@
 # Brief: replace torchaudio's forced_align with a numpy Viterbi
 
-Hand this file to a fresh session. Everything below was verified on 2026-08-22; the
-verification method is stated so you can re-check rather than trust.
+**Status: done, 2026-08-23.** The DP lives in `noScribe/ctc_align.py`, both call
+sites in `voxtral_engine.py` use it, the cap and the split stayed with rewritten
+comments, and `tests/test_ctc_align.py` adds the two oracles the recorded reference
+lacks (non-zero blank, exact ties). One claim below did not survive contact:
+`torchaudio==2.11` is **still pinned**, because `pyannote.audio` and
+`torch-audiomentations` require torchaudio -- what went is our own call into its
+kernel, not the package. The rest of this file is kept as the record of how the
+decision was made.
 
-## Read this before writing any code
+The rest of this file is the work order as it stood before the work was done.
+Everything in it was verified on 2026-08-22; the verification method is stated so
+it can be re-checked rather than trusted.
 
-**This task is optional, and there is a cheaper thing to do first.** Do not start
-until you have understood why, because the obvious motivation for it is wrong.
+## What was read before writing any code
+
+**The task was optional, and there was a cheaper thing to do first.** It was not
+started until that was understood, because the obvious motivation for it is wrong.
 
 The motivation people reach for is "get torch out of the alignment path". That is
 unreachable: `environments/requirements_macOS_arm64.txt` pins `torch==2.13` and
@@ -38,7 +48,9 @@ Three things, none of them dependency removal:
    `frames × (2·tokens+1)` DP buffer with 32-bit integers and segfaults past that —
    observed in a real run. A numpy DP with 64-bit indexing cannot do that, so the
    worst case degrades from SIGSEGV to slow.
-2. **It drops the `torchaudio==2.11` pin**, which exists for the same kernel.
+2. **It takes torchaudio's kernel out of our call path.** (Not the pin: `pyannote.audio`
+   requires torchaudio, so the package stays installed and pinned as part of the tested
+   stack. An earlier version of this line claimed the pin would go.)
 3. **It removes the dependency on an unmerged upstream fix.** Our
    [pytorch/audio#4209](https://github.com/pytorch/audio/pull/4209) fixes exactly
    this overflow, was approved by a maintainer on 2026-08-05, and is still unmerged.
@@ -72,7 +84,7 @@ So the honest ledger is roughly **+50 lines net** in `voxtral_engine.py`: about 
 lines go (the constant's overflow comment, `_dp_cells`, the `too_big` explanation and
 its hard-failure branch, the cap half of `_prefix_piece`), and a ~55-line DP plus a
 `merge_tokens` replacement and its tests come in. Take the task for the crash class
-and the pin, not for a smaller file.
+and the tie fix, not for a smaller file -- and not for the pin, which stays.
 
 If none of those matter today, close the task.
 
@@ -542,5 +554,7 @@ starting — their docstrings describe defects that were expensive to find.
 
 ## Rollback
 
-The current state is committed and pushed on `local/main`. Nothing here is urgent;
-if it turns out messier than it looks, revert and leave torchaudio in place.
+Now that it is in: rollback means restoring the torchaudio call path in
+`align_words` and `align_prefix` (the commit that introduced `ctc_align` is one
+`git revert`); the `torchaudio==2.11` pin is untouched either way, since
+pyannote.audio keeps the package installed.

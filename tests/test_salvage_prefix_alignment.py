@@ -26,8 +26,7 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-torchaudio = pytest.importorskip("torchaudio")
-pytest.importorskip("transformers")
+from noScribe import ctc_align  # noqa: E402
 
 from noScribe import voxtral_engine as v  # noqa: E402
 from noScribe.voxtral_engine import (  # noqa: E402
@@ -43,7 +42,6 @@ FPS = 50.0                      # 16 kHz / 320 samples je Frame
 def _stub_aligner(emission_frames):
     """Aligner ohne Gewichte: echte Auswahl-/Ketten-Logik, gestellte Emission."""
     al = object.__new__(_Aligner)
-    al._torch = torch
     al.vocab = {ch: i + 1 for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz")}
     al.blank = 0
     al.delim = None
@@ -96,7 +94,7 @@ def _planted(al, words, n_frames, frames_per_char=2):
         path[g] = al.vocab[_ALPHA[(n // frames_per_char) % len(_ALPHA)]]
     em = torch.full((n_frames, VOCAB_SIZE), -12.0)
     em[torch.arange(n_frames), torch.tensor(path)] = 0.0
-    return torch.log_softmax(em, dim=-1), true_end
+    return torch.log_softmax(em, dim=-1).numpy(), true_end
 
 
 def _audio(n_frames):
@@ -105,13 +103,13 @@ def _audio(n_frames):
 
 def _count_cells(monkeypatch):
     cells = []
-    real = torchaudio.functional.forced_align
+    real = ctc_align.forced_align
 
-    def counting(emission, targets, blank=0):
-        cells.append(emission.shape[1] * (2 * targets.shape[1] + 1))
-        return real(emission, targets, blank=blank)
+    def counting(log_probs, targets, blank=0):
+        cells.append(_Aligner._dp_cells(len(targets), log_probs.shape[0]))
+        return real(log_probs, targets, blank=blank)
 
-    monkeypatch.setattr(torchaudio.functional, "forced_align", counting)
+    monkeypatch.setattr(ctc_align, "forced_align", counting)
     return cells
 
 
@@ -167,10 +165,10 @@ def test_the_audio_is_never_cut_by_character_share(monkeypatch):
                         n_frames * (2 * len(tokens) + 1) // 3)
 
     seen = []
-    real = torchaudio.functional.forced_align
+    real = ctc_align.forced_align
     monkeypatch.setattr(
-        torchaudio.functional, "forced_align",
-        lambda e, t, blank=0: (seen.append(e.shape[1]), real(e, t, blank=blank))[1])
+        ctc_align, "forced_align",
+        lambda e, t, blank=0: (seen.append(e.shape[0]), real(e, t, blank=blank))[1])
 
     al.align_prefix(words, _audio(n_frames))
 
@@ -220,15 +218,15 @@ def test_one_failed_piece_invalidates_the_whole_chain(monkeypatch):
                         n_frames * (2 * len(tokens) + 1) // 3)
 
     calls = []
-    real = torchaudio.functional.forced_align
+    real = ctc_align.forced_align
 
-    def flaky(emission, targets, blank=0):
+    def flaky(log_probs, targets, blank=0):
         calls.append(1)
         if len(calls) == 2:
             raise RuntimeError("simulierter Ausfall im zweiten Stück")
-        return real(emission, targets, blank=blank)
+        return real(log_probs, targets, blank=blank)
 
-    monkeypatch.setattr(torchaudio.functional, "forced_align", flaky)
+    monkeypatch.setattr(ctc_align, "forced_align", flaky)
 
     out = al.align_prefix(words, _audio(n_frames))
 

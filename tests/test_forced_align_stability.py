@@ -1,15 +1,17 @@
-"""Regression guard for the Voxtral aligner's torchaudio dependency.
+"""Acceptance test for the Voxtral aligner's DP against a recorded reference.
 
-The word timestamps come from ``torchaudio.functional.forced_align`` +
-``merge_tokens``. torchaudio 2.8 deprecated forced_align ("will be removed
-from the 2.9 release"), but the removal was walked back: 2.11 ships it
-working and un-deprecated. This test pins the observed behaviour so any
-future torch/torchaudio bump has to prove itself: 43 recorded cases
-(random emissions incl. heavy repeats, tight T == L+R fits, single-token
-targets) must reproduce the torchaudio-2.8 alignment bit-for-bit.
+The word timestamps come from ``noScribe.ctc_align`` (``forced_align`` +
+``merge_tokens``), a numpy replacement for the torchaudio kernel of the same
+names. The reference in ``tests/data/`` was recorded from torchaudio 2.8 on
+2026-07-22 and verified identical on 2.11: 43 cases (random emissions incl.
+heavy repeats, tight T == L+R fits, single-token targets). The numpy DP must
+reproduce every path and span bit-for-bit -- that is what makes it a drop-in
+rather than a rewrite. ``--regenerate`` records the file from torchaudio
+again, so the reference stays the *other* implementation's answer.
 
-Verified identical on torchaudio 2.8.0 and 2.11.0 (torch 2.8/2.13) when
-the reference was recorded (2026-07-22).
+What the reference cannot see, tests/test_ctc_align.py covers: blank indices
+other than 0, and exact ties, where the numpy DP is deliberately *better*
+than torchaudio (pytorch/audio#4221).
 
 Regenerate the reference (only after manually vetting a divergence):
     python tests/test_forced_align_stability.py --regenerate
@@ -20,7 +22,8 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-F = pytest.importorskip("torchaudio.functional")
+
+from noScribe import ctc_align  # noqa: E402
 
 REF_PATH = Path(__file__).parent / "data" / "forced_align_ref.npz"
 
@@ -52,17 +55,28 @@ def _emission(T, C, tg):
     return torch.randn((1, T, C), generator=g).log_softmax(-1)
 
 
-def _run(T, C, tg):
-    lp = _emission(T, C, tg)
-    targets = torch.tensor(tg, dtype=torch.int32).unsqueeze(0)
-    paths, scores = F.forced_align(lp, targets, blank=0)
-    spans = F.merge_tokens(paths[0], scores[0])
+def _pack(paths, scores, spans):
+    # the reference keeps torchaudio's batch axis on paths and scores
     return (
-        paths.numpy(),
-        scores.numpy(),
+        np.asarray(paths).reshape(1, -1),
+        np.asarray(scores).reshape(1, -1),
         np.array([[s.token, s.start, s.end] for s in spans], dtype=np.int64),
         np.array([s.score for s in spans], dtype=np.float64),
     )
+
+
+def _run(T, C, tg):
+    lp = _emission(T, C, tg)[0].numpy()
+    paths, scores = ctc_align.forced_align(lp, tg, blank=0)
+    return _pack(paths, scores, ctc_align.merge_tokens(paths, scores))
+
+
+def _run_torchaudio(T, C, tg):
+    F = pytest.importorskip("torchaudio.functional")
+    lp = _emission(T, C, tg)
+    targets = torch.tensor(tg, dtype=torch.int32).unsqueeze(0)
+    paths, scores = F.forced_align(lp, targets, blank=0)
+    return _pack(paths.numpy(), scores.numpy(), F.merge_tokens(paths[0], scores[0]))
 
 
 @pytest.mark.parametrize("idx,spec", list(enumerate(_cases())))
@@ -81,12 +95,6 @@ def test_forced_align_matches_recorded_reference(idx, spec):
     assert np.allclose(ref[f"spanf_{idx}"], spanf, rtol=0, atol=1e-5), "span scores drifted"
 
 
-def test_forced_align_rejects_blank_in_targets():
-    lp = _emission(10, 5, np.array([1]))
-    with pytest.raises(ValueError):
-        F.forced_align(lp, torch.tensor([[0, 1]], dtype=torch.int32), blank=0)
-
-
 if __name__ == "__main__":
     import sys
 
@@ -94,7 +102,9 @@ if __name__ == "__main__":
         sys.exit("run via pytest, or pass --regenerate to rewrite the reference")
     out = {}
     for i, spec in enumerate(_cases()):
-        for key, arr in zip(("paths", "scores", "spani", "spanf"), _run(*spec)):
+        # recorded from torchaudio on purpose: the reference is the *other*
+        # implementation, not the one under test
+        for key, arr in zip(("paths", "scores", "spani", "spanf"), _run_torchaudio(*spec)):
             out[f"{key}_{i}"] = arr
     REF_PATH.parent.mkdir(exist_ok=True)
     np.savez_compressed(REF_PATH, **out)

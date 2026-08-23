@@ -1,6 +1,7 @@
 """Wann forced_align überhaupt laufen kann -- und was passiert, wenn nicht.
 
-torchaudio verlangt `n_frames >= len(targets) + n_repeats`, wobei n_repeats die
+Der DP verlangt `n_frames >= len(targets) + n_repeats` (wie torchaudio vor
+ihm), wobei n_repeats die
 Paare unmittelbar gleicher Tokens zählt (zwischen zwei gleiche Labels muss ein
 CTC-Pfad ein Blank setzen). Die alte Vorabprüfung liess nur ~5.3% Luft, deutsche
 Texte haben aber 4-30% solcher Paare -- die Fenster dazwischen kamen durch,
@@ -11,9 +12,8 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-torchaudio = pytest.importorskip("torchaudio")
-pytest.importorskip("transformers")
 
+from noScribe import ctc_align  # noqa: E402
 from noScribe.voxtral_engine import (  # noqa: E402
     FORCED_ALIGN_MAX_CELLS,
     SAMPLE_RATE,
@@ -30,14 +30,13 @@ def _stub_aligner():
     damit Routing und Blattprüfung im Test dieselbe Zahl sehen.
     """
     al = object.__new__(_Aligner)
-    al._torch = torch
     al.vocab = {ch: i + 1 for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz")}
     al.blank = 0
     al.delim = None
     gen = torch.Generator().manual_seed(0)
     al._emission = lambda audio: torch.log_softmax(
         torch.rand((al._predict_frames(len(audio)), VOCAB_SIZE), generator=gen),
-        dim=-1)
+        dim=-1).numpy()
     return al
 
 
@@ -50,19 +49,18 @@ def _stub_aligner():
     [4, 4, 4, 9, 9],               # Dreifachlauf zählt als zwei Paare
     [3, 1, 4, 1, 5],               # keine Wiederholung
 ])
-def test_repeat_count_matches_what_torchaudio_demands(tokens):
-    """Gegen die Bibliothek selbst gemessen: das kleinste T, bei dem
-    forced_align nicht mehr wirft, ist genau len(tokens) + _adjacent_repeats."""
+def test_repeat_count_matches_what_the_dp_demands(tokens):
+    """Gegen den DP selbst gemessen: das kleinste T, bei dem forced_align
+    nicht mehr wirft, ist genau len(tokens) + _adjacent_repeats."""
     need = _Aligner._adjacent_repeats(tokens) + len(tokens)
     smallest = None
     for T in range(len(tokens), len(tokens) + 12):
-        emission = torch.log_softmax(torch.zeros((1, T, VOCAB_SIZE)), dim=-1)
-        targets = torch.tensor(tokens, dtype=torch.int32).unsqueeze(0)
+        emission = np.zeros((T, VOCAB_SIZE), dtype=np.float32)
         try:
-            torchaudio.functional.forced_align(emission, targets, blank=0)
+            ctc_align.forced_align(emission, tokens, blank=0)
             smallest = T
             break
-        except Exception:
+        except ValueError:
             continue
     assert smallest == need
 

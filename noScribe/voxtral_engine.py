@@ -139,18 +139,19 @@ MEM_MODEL = {
 # O(T^2) self-attention memory of the *aligner* stays bounded regardless of
 # chunk length (this is the aligner, not Voxtral).
 EMISSION_WINDOW_SEC = 20
-# Hard cap on the forced_align DP-buffer size, frames * (2*tokens + 1).
-# torchaudio's CPU kernel indexes that buffer with 32-bit ints and segfaults
-# once the product nears 2**31 (empirically: 2.10e9 cells fine, 2.17e9 crashes,
-# torchaudio 2.11, int32 and int64 targets alike). 2**30 leaves a 2x safety
-# margin and keeps a single align call under ~5 s. Affects 2.9 through 2.11;
-# fixed upstream by pytorch/audio#4209. Before lifting this once a fixed
-# release is our minimum, read tests/test_forced_align_cap.py: the splitting
-# has a second, independent justification and must stay.
+# Hard cap on the forced-alignment DP size, frames * (2*tokens + 1). The DP
+# (noScribe/ctc_align.py) keeps one byte per cell for its backtrace, so 2**30
+# cells is a 1 GB table and ~5 s for one call -- and halving a window halves
+# both axes of that table, so splitting is cheaper than not splitting
+# (measured: 587 -> 200 ms on a 300 s chunk in four pieces). The constant began
+# as a guard against torchaudio's 32-bit index overflow; that history and the
+# figures are in docs/viterbi-numpy-brief.md, the splitting itself is pinned
+# by tests/test_forced_align_cap.py.
 FORCED_ALIGN_MAX_CELLS = 2**30
 # `_Aligner.align_prefix` is free to choose its own piece sizes, so it uses a
-# smaller budget than the hard cap: measured, one forced_align call peaks at
-# ~1.0 GB and 3.9 s at 2**30 cells but ~0.3 GB and 0.9 s at 2**28. The prefix
+# smaller budget than the hard cap: measured with the C++ kernel, one call
+# peaks at ~1.0 GB and 3.9 s at 2**30 cells but ~0.3 GB and 0.9 s at 2**28
+# (the numpy DP: same memory, ~1.35x the time). The prefix
 # salvage runs right after a Voxtral pass, i.e. exactly when memory is
 # tightest, and more (smaller) pieces cost no accuracy and slightly less total
 # DP work. 2**29 keeps a 1500 s window at ~7 pieces of ~220 s of speech each.
@@ -1600,11 +1601,11 @@ def is_available():
 
     Deliberately NOT cached: _register_voxtral_models re-checks this on every
     dropdown open so a backend pip-installed while the app runs appears without a
-    restart. The check is four cheap importlib.util.find_spec lookups (no heavy
+    restart. The check is three cheap importlib.util.find_spec lookups (no heavy
     import), so re-running it per dropdown open is negligible."""
     import importlib.util
     return all(importlib.util.find_spec(m) is not None
-               for m in ("mlx_voxtral", "transformers", "torchaudio", "soundfile"))
+               for m in ("mlx_voxtral", "transformers", "soundfile"))
 
 
 def _log(cb, level, msg):
@@ -1960,7 +1961,8 @@ class _Aligner:
         self.delim = self.vocab.get("|", None)
 
     def _emission(self, audio):
-        """Windowed wav2vec2 log-prob emissions [T, vocab] (bounded memory)."""
+        """Windowed wav2vec2 log-prob emissions [T, vocab] (bounded memory),
+        as a float32 numpy array -- the DP downstream is numpy."""
         import numpy as np
         torch = self._torch
         # Zero-copy view of the (already float32) audio buffer instead of a
@@ -1988,11 +1990,15 @@ class _Aligner:
             parts = self._forward_windows(wav, win, min_win)
         if not parts:
             return None
-        return torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+        out = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+        # A view for the float32 models this ships with (inference-mode CPU
+        # tensors); .float() only does work for a half-precision checkpoint,
+        # whose bfloat16 .numpy() would otherwise raise outside every try.
+        return out.float().numpy()
 
     def _forward_windows(self, wav, win, min_win):
-        """Log-prob emissions per window, always returned on the CPU so the
-        forced-align call and everything downstream stay unchanged."""
+        """Log-prob emissions per window, always returned on the CPU: the
+        DP that consumes them is numpy and reads host memory."""
         torch = self._torch
         parts = []
         with torch.inference_mode():
@@ -2018,15 +2024,15 @@ class _Aligner:
 
     @staticmethod
     def _adjacent_repeats(tokens):
-        """Pairs of identical neighbouring tokens -- the extra frames forced_align
-        needs, since a CTC path must put a blank between two identical labels."""
-        return sum(1 for i in range(1, len(tokens)) if tokens[i] == tokens[i - 1])
+        """The DP's own rule for the extra frames it needs; one definition."""
+        from noScribe import ctc_align
+        return ctc_align.adjacent_repeats(tokens)
 
     @staticmethod
     def _dp_cells(n_targets, frames):
-        """Size of forced_align's DP buffer. torchaudio indexes it with 32-bit
-        ints and segfaults once the product nears 2**31, so every caller checks
-        it against a cap before handing the work over."""
+        """Size of the forced-alignment DP: one byte per cell for the backtrace
+        table, and the time to fill it. Every caller checks it against a cap
+        before handing the work over -- see FORCED_ALIGN_MAX_CELLS."""
         return frames * (2 * n_targets + 1)
 
     def _predict_frames(self, n_samples):
@@ -2169,8 +2175,7 @@ class _Aligner:
         pause, and align each half recursively — so we always get a transcript
         instead of a crash. As a last resort the words are spread evenly.
         """
-        import torchaudio
-        torch = self._torch
+        from noScribe import ctc_align
         if not words:
             return []
         if len(audio) < int(0.1 * SAMPLE_RATE):
@@ -2190,7 +2195,7 @@ class _Aligner:
         n_frames = self._predict_frames(len(audio))
         # forced_align needs one frame per target token PLUS one for each pair
         # of adjacent identical tokens (a CTC path has to put a blank between
-        # them); torchaudio enforces exactly that and names the repeat count in
+        # them); the DP enforces exactly that and names the repeat count in
         # its error. The old `len(tokens) > n_frames * 0.95` left only ~5.3%
         # slack, while German text runs 3.9-6.1% adjacent repeats -- 8.9% with
         # the multilingual aligner, and up to 29.7% for number-heavy text, where
@@ -2199,18 +2204,14 @@ class _Aligner:
         # and the whole window silently degraded to evenly-spread timestamps.
         repeats = self._adjacent_repeats(tokens)
         too_dense = len(tokens) + repeats > n_frames
-        # torchaudio's CPU forced_align indexes its (frames x 2*tokens+1) DP
-        # buffer with 32-bit ints; once the product nears 2**31 the index
-        # wraps negative and the whole process dies with SIGSEGV (verified
-        # empirically on torchaudio 2.11 -- int64 targets crash too, so no
-        # dtype workaround exists). Split well below that limit; smaller
+        # Above FORCED_ALIGN_MAX_CELLS (see its comment): split. Smaller
         # windows are also much faster to align.
         too_big = self._dp_cells(len(tokens), n_frames) > FORCED_ALIGN_MAX_CELLS
         splittable = len(words) > 1 and depth < self.MAX_SPLIT_DEPTH
         if too_dense and not too_big and depth >= self.MAX_DENSE_SPLIT_DEPTH:
             splittable = False          # halving does not reduce density
         if too_big and not splittable:
-            # Cannot split further -- never risk the segfault.
+            # Cannot split further -- do not run a DP that size.
             return self._spread(words, audio, t_offset)
         if not too_big and (not too_dense or not splittable):
             emission = self._emission(audio)
@@ -2219,16 +2220,15 @@ class _Aligner:
             n_real = emission.shape[0]
             fps = n_real / (len(audio) / SAMPLE_RATE)
             # The prediction only routed us here; the real frame count decides
-            # whether forced_align can run at all. Spreading beats both a raise
-            # and a segfault.
+            # whether the DP can run at all, and within budget. Spreading
+            # beats a raise.
             if (len(tokens) + repeats > n_real
                     or self._dp_cells(len(tokens), n_real) > FORCED_ALIGN_MAX_CELLS):
                 return self._spread(words, audio, t_offset)
             try:
-                targets = torch.tensor(tokens, dtype=torch.int32).unsqueeze(0)
-                aligned, scores = torchaudio.functional.forced_align(
-                    emission.unsqueeze(0), targets, blank=self.blank)
-                spans = torchaudio.functional.merge_tokens(aligned[0], scores[0])
+                aligned, scores = ctc_align.forced_align(
+                    emission, tokens, blank=self.blank)
+                spans = ctc_align.merge_tokens(aligned, scores, blank=self.blank)
             except Exception:
                 # Never silent: a spread window has plausible-looking times that
                 # are wrong by up to minutes, and without this line it is
@@ -2277,7 +2277,7 @@ class _Aligner:
         over the exact predicate is sound (and cheap: ~log2(n) tokenisations).
         """
         # The salvage budget is the smaller of the two in production; the min
-        # is there so that lowering the hard segfault cap still binds.
+        # is there so that lowering the hard cap still binds.
         cap = min(FORCED_ALIGN_MAX_CELLS, SALVAGE_ALIGN_MAX_CELLS)
 
         def fits(k):
@@ -2341,8 +2341,8 @@ class _Aligner:
         as its weakest link: a guessed piece boundary would move every later
         piece, and those would come back carrying perfectly real scores.
         """
-        import torchaudio
-        torch = self._torch
+        import numpy as np
+        from noScribe import ctc_align
         if not words:
             return []
         if len(audio) < int(0.1 * SAMPLE_RATE):
@@ -2357,11 +2357,10 @@ class _Aligner:
         back = int(self.PREFIX_PIECE_BACKOFF_SEC * fps)
         # The star column is a per-frame maximum, so slicing rows first would
         # give the same values: build it once for the window and let each piece
-        # take a row view. `amax` rather than `max` -- the latter also allocates
-        # an indices tensor nobody reads.
+        # take a row view.
         star = emission.shape[1]
-        emission = torch.cat(
-            [emission, torch.amax(emission, -1, keepdim=True)], dim=-1)
+        emission = np.concatenate(
+            [emission, emission.max(axis=-1, keepdims=True)], axis=-1)
 
         def extend(new):
             # The next piece is given a little audio the previous one already
@@ -2394,12 +2393,9 @@ class _Aligner:
                 # is how the aligner is told "after these words the audio is not
                 # mine". Without it the words are stretched over the rest (see
                 # the docstring), with it the last word lands frame-exact.
-                em = emission[f0:]
-                targets = torch.tensor(tokens + [star],
-                                       dtype=torch.int32).unsqueeze(0)
-                aligned, scores = torchaudio.functional.forced_align(
-                    em.unsqueeze(0), targets, blank=self.blank)
-                spans = torchaudio.functional.merge_tokens(aligned[0], scores[0])
+                aligned, scores = ctc_align.forced_align(
+                    emission[f0:], tokens + [star], blank=self.blank)
+                spans = ctc_align.merge_tokens(aligned, scores, blank=self.blank)
             except Exception:
                 logger.warning("Prefix alignment failed on piece %d (%d words, "
                                "%d tokens, %d frames).", piece_no, len(piece),

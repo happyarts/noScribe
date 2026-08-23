@@ -1,39 +1,16 @@
-"""Guard against the forced_align 32-bit index-overflow segfault.
+"""Oversized alignment windows are split before the DP ever sees them.
 
-torchaudio's CPU forced_align kernel indexes its (frames x 2*tokens+1) DP
-buffer with 32-bit ints. Once the product nears 2**31 the index wraps
-negative and the whole worker process dies with SIGSEGV -- observed in a
-real noScribe run (2026-07-22, torchaudio 2.11; int64 targets crash the
-same way, so there is no dtype workaround). ``_Aligner.align_words`` must
-therefore split oversized windows *before* calling forced_align.
-
-This test drives align_words with a fake emission (no wav2vec2 download)
-over a case above FORCED_ALIGN_MAX_CELLS and asserts every actual
-forced_align invocation stays under the cap while still timestamping
-every word.
-
-When can the cap go away?
-    The kernel fix is pytorch/audio#4209 (issue #4208), unmerged as of
-    2026-08-04, so no release before 2.12 can carry it. The segfault is a
-    regression from pytorch/audio#4021, which merged five days after 2.8
-    shipped: 2.8 is safe, 2.9 through 2.11 are affected.
-
-    Once our minimum torchaudio is at or above the first fixed release,
-    the *crash* rationale expires -- but do not simply drop the cap with
-    it. Splitting also bounds memory and latency; the measured figures
-    live next to the constants in voxtral_engine, not here, so they stay
-    in one place. What may then go is the hard-failure path for windows
-    that cannot be split far enough; the splitting itself should stay.
+FORCED_ALIGN_MAX_CELLS is a memory and latency budget for the numpy DP; its
+comment in voxtral_engine has the figures and the history. This test drives
+align_words with a fake emission (no wav2vec2 download) over a case above the
+cap and asserts every actual DP invocation stays under it while every word is
+still timestamped.
 """
 import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-torchaudio = pytest.importorskip("torchaudio")
-# The package __init__ loads noScribe.main lazily, but voxtral_engine still
-# needs its own heavy deps at import time.
-pytest.importorskip("transformers")
-
+from noScribe import ctc_align  # noqa: E402
 from noScribe.voxtral_engine import (  # noqa: E402
     _Aligner,
     FORCED_ALIGN_MAX_CELLS,
@@ -45,7 +22,6 @@ VOCAB_SIZE = 30  # incl. blank
 
 def _stub_aligner():
     al = object.__new__(_Aligner)
-    al._torch = torch
     al.vocab = {ch: i + 1 for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz")}
     al.blank = 0
     al.delim = None
@@ -53,7 +29,7 @@ def _stub_aligner():
     # 50 fps at 16 kHz, random log-probs -- shape is all that matters here.
     al._emission = lambda audio: torch.log_softmax(
         torch.rand((len(audio) // 320, VOCAB_SIZE), generator=gen), dim=-1
-    )
+    ).numpy()
     return al
 
 
@@ -61,13 +37,13 @@ def test_oversized_window_splits_below_cap(monkeypatch):
     al = _stub_aligner()
 
     calls = []
-    real_fa = torchaudio.functional.forced_align
+    real_fa = ctc_align.forced_align
 
-    def checked_fa(emission, targets, blank=0):
-        calls.append(emission.shape[1] * (2 * targets.shape[1] + 1))
-        return real_fa(emission, targets, blank=blank)
+    def checked_fa(log_probs, targets, blank=0):
+        calls.append(_Aligner._dp_cells(len(targets), log_probs.shape[0]))
+        return real_fa(log_probs, targets, blank=blank)
 
-    monkeypatch.setattr(torchaudio.functional, "forced_align", checked_fa)
+    monkeypatch.setattr(ctc_align, "forced_align", checked_fa)
 
     # 1100 s -> 55_000 frames; 2000 x 5-char words -> 10_000 tokens
     # -> 55_000 * 20_001 = 1.10e9 cells, just above the 2**30 cap.

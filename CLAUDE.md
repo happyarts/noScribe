@@ -120,5 +120,5 @@ Many tests are regression guards for defects found in production or in upstream 
 than unit tests of new code — forced-align caps and density, loop breaking, ghost speakers, lost
 head recovery, prefix-salvage alignment. Their docstrings explain the failure they prevent. When a
 test looks arbitrary, read its docstring before changing it: several encode a bug that was
-expensive to find, and one (`test_forced_align_stability.py`) pins torchaudio behaviour across
-version bumps via a recorded reference in `tests/data/`.
+expensive to find, and one (`test_forced_align_stability.py`) pins the numpy forced-alignment DP
+(`noScribe/ctc_align.py`) to a reference recorded from torchaudio in `tests/data/`.

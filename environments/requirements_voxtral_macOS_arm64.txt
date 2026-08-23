@@ -6,7 +6,9 @@
 #
 # Transcription runs on the Apple Silicon GPU via MLX. When a timestamped
 # output is requested, word timestamps are recovered with CTC forced alignment
-# (transformers + torchaudio) against a German wav2vec2 model.
+# against a wav2vec2 model: emissions via transformers, the Viterbi DP in
+# numpy (noScribe/ctc_align.py). torchaudio is no longer needed for this;
+# the base requirements keep it because pyannote.audio depends on it.
 #
 # mlx-voxtral is pinned because the engine was validated against one version,
 # not because upstream is dead: it went a year without a release, then in
@@ -30,5 +32,4 @@ mlx-voxtral==0.0.6
 # already requires it -- a lower floor here only allowed an untested 4.x to
 # satisfy this file while pip installed 5 anyway.
 transformers>=5
-torchaudio
 soundfile

@@ -3,9 +3,9 @@
 `voxtral_engine`'s module docstring promises the segment shape it streams is
 compatible with `whisper_mp_worker`'s, and that worker puts faster-whisper's
 `word.probability` -- a value in [0, 1] -- into this field. The forced aligner
-gets its scores from `torchaudio.functional.merge_tokens`, which returns log
-probabilities (<= 0, measured -11.96 .. -0.0014), so the two paths disagreed on
-what the field meant.
+gets its scores from `noScribe.ctc_align.merge_tokens` (torchaudio's before it),
+which returns log probabilities (<= 0, measured -11.96 .. -0.0014), so the two
+paths disagreed on what the field meant.
 
 0.0 has a second job here: it is the sentinel for a word that was spread evenly
 or interpolated rather than actually aligned, and the salvage guard tests
