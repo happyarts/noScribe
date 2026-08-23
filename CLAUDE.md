@@ -32,7 +32,7 @@ therefore exists only in this working copy.
 ## Commands
 
 ```bash
-venv/bin/python3 -m pytest tests/ -q          # full suite (~356 tests)
+venv/bin/python3 -m pytest tests/ -q          # full suite (~396 tests)
 venv/bin/python3 -m pytest tests/test_loop_breaker.py -q
 venv/bin/python3 -m pytest tests/ -q -k ghost_speaker
 venv/bin/python3 -m noScribe                  # launch the GUI
@@ -72,7 +72,8 @@ conspire here. Get any of them wrong and the test suite stays green while the fr
    `mp.freeze_support()` must run in `noScribe/__main__.py` *before* anything touches
    `noScribe.main`.
 
-`tests/test_worker_import_lightweight.py` guards 1 and 3. Claims about frozen behaviour cannot
+`tests/test_worker_import_lightweight.py` guards all three — including a walk over
+`pyinstaller/*.spec` for point 2. Claims about frozen behaviour cannot
 be derived from source — prove them with a throwaway PyInstaller build.
 
 ### Worker protocol
@@ -87,6 +88,10 @@ contract, which is why `main.py` consumes segments identically regardless of eng
 {"type": "result",   "ok": True,  "info": {...}}
 {"type": "result",   "ok": False, "error": str, "trace": str}
 ```
+
+Not every worker sends every message: `whisper_mp_worker.py` emits no `progress`
+(its own docstring advertises one, and a `segments` list on the result, that it does
+not send), and `pyannote_mp_worker.py` speaks a different contract again.
 
 A broken `segment` put is deliberately *not* swallowed — silently truncating a transcript while
 reporting success is worse than failing the job. Worker modules stay stdlib-only at import time
@@ -104,7 +109,7 @@ search rather than read it.
 
 ### voxtral_engine.py
 
-The fork's own ~2700-line module. Beyond decoding it owns: chunking with pause-aware cut points,
+The fork's own ~3000-line module. Beyond decoding it owns: chunking with pause-aware cut points,
 repetition-loop detection and a temperature ladder, per-chunk aligner-language selection, word
 timestamps via CTC forced alignment (emissions from transformers, the Viterbi DP in
 `noScribe/ctc_align.py` — numpy, torchaudio's kernel is not used; `docs/viterbi-numpy-brief.md`
@@ -122,6 +127,48 @@ changing a number, and check whether a test in `tests/` pins it.
   downloaded on first use.
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
   not the Python source; `de.yml` and `en.yml` are the ones kept current.
+
+## Conventions this repo keeps but does not enforce
+
+- **`local/main` is the integration line**, not a topic branch: the PR branches are cut from
+  `main`, which stays a clean mirror of upstream. `tools/check_local_current.py` exists because
+  a merge can drop a branch's improvement while `git merge` still says "Already up to date";
+  its `INTENTIONAL` table records the lines local/main deliberately differs on.
+- **No real names.** No real file, person or brand name appears in the repo, in commit messages
+  or in issues — the write-ups use a fictional set (Mona, Lena, Muster, VitaFlor, Sonvita) even
+  when quoting a real measurement.
+- **Commit subjects are full sentences** naming the effect, and usually the reason ("Take the
+  log-Mel clamp floor from a percentile, so one loud cell no longer sets it for the whole
+  pass"). No prefixes, no imperative fragments.
+- **A measurement lives next to what it justifies**: a tuning constant carries it in the comment
+  above it, a regression guard in its test docstring, and only what fits neither goes to `docs/`.
+
+## The Voxtral pull request, when it happens
+
+Voxtral goes upstream as **one** feature PR, deliberately not split, and **after** the smaller
+PRs have merged. It therefore has to be built from `local/main` minus everything the other PR
+branches carry. The branch that used to hold it (`feature/voxtral-engine`, tip `8f132bc`) was
+deleted once it had fallen 161 commits behind: opening a PR from it would have shipped errors
+that have since been corrected. Rebuild it from today's `local/main` instead.
+
+That branch was cleanly isolated — it contained none of the other PR branches' commits — and
+this was its boundary, which is what a rebuild has to re-establish:
+
+    added     VOXTRAL.md · environments/requirements_voxtral_macOS_arm64.txt
+              noScribe/{voxtral_engine,voxtral_mp_worker,transcript_corrections}.py
+              tools/{quantize_voxtral,calibrate_loop_detection}.py
+              docs/voxtral-*.md · docs/skripte/*.py · tests/data/forced_align_ref.npz
+              tests/test_{voxtral_smoke,fast_generate,loop_breaker,forced_align_cap,
+                          forced_align_stability,transcript_corrections,turn_split,
+                          quant_summary}.py
+    modified  .gitignore · noScribe/main.py · noScribe/transcription.py · trans/*.yml
+
+Since then Voxtral has also grown `noScribe/ctc_align.py`, `tests/test_mel_floor.py`,
+`tests/test_ctc_align.py`, `docs/skripte/engines/`, `docs/diarisierung.md`,
+`docs/viterbi-numpy-brief.md`, `docs/migration-mlx-audio.md` and
+`docs/voxtral-audio-vorverarbeitung.md`. Everything on `local/main` outside that set belongs to
+one of the smaller PRs and must stay out; `tools/check_local_current.py` says which branch owns
+which line.
 
 ## Test suite character
 
