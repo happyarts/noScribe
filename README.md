@@ -2,6 +2,31 @@
 ### Cutting Edge AI Technology for Automated Audio Transcription
 </br>
 
+> [!IMPORTANT]
+> ### 🍎 This is a fork: noScribe with the Voxtral engine for Apple Silicon
+> On top of everything noScribe does, this fork adds a second transcription
+> engine — Mistral's **Voxtral**, running locally through MLX on Apple Silicon.
+> On hard conversational German it transcribes noticeably better than Whisper:
+> **4.3 % against 8.1 % word error** on a hand-corrected interview passage, with
+> denser punctuation, and it omits where Whisper invents. Everything else about
+> noScribe is unchanged, and it still runs entirely on your own machine.
+>
+> **[→ What it is, how to install it, and every measurement behind it: VOXTRAL.md](VOXTRAL.md)**
+>
+> Requires a Mac with Apple Silicon (M1–M4). There is **no packaged download for
+> this fork yet** — you install it from source, on top of a normal noScribe
+> checkout. Everything else in this README is the original project's and applies
+> unchanged.
+>
+> **Looking for the official noScribe?** It lives at
+> [kaixxx/noScribe](https://github.com/kaixxx/noScribe) and
+> [noscribe.de](https://noscribe.de) — that is where the ready-made downloads for
+> Windows, macOS and Linux are, and where to go for support. This fork exists to
+> try the Voxtral engine out in public; the fixes in it are offered back upstream
+> as pull requests.
+
+---
+
 > [!NOTE]
 > ### 🚀 The new official website for noScribe: https://noscribe.de
 > Learn how to install and use the software, and find tips to improve transcription quality.
