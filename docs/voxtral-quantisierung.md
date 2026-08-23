@@ -101,8 +101,7 @@ every generated token. 8 bit it is.
 **On the 24B model this column is noise, and it runs backwards.** More bits
 score slightly *worse* (2.11 → 2.41 → 2.46), and the whole spread is seven
 characters out of 2034. Under greedy decoding a single token choice flips and
-the text diverges from there on — the same effect the similarity comparison in
-`docs/messungen/` warns about. So `lm_head` precision is simply irrelevant on
+the text diverges from there on. So `lm_head` precision is simply irrelevant on
 the 24B model; pick 4 bit for the speed. On the 3B model the 6→8 step is nine
 characters plus two extra deletions, marginally above that noise floor, and 8
 bit is free anyway.
@@ -133,7 +132,9 @@ precision is worth. The next chapter takes that question to 26 619 words.
 ## Does the 3B encoder need the bits?
 
 Three builds, identical except for the audio encoder — language model and
-`lm_head` at 8 bit throughout, only `audio_tower` and `projector` vary. Scored
+`lm_head` at 8 bit throughout, only `audio_tower` and `projector` vary, verified
+against the quant configs (212 `language_model` tensors and `lm_head` at 8 bit in
+all three; `audio_tower` has 192 tensors, the projector 2). Scored
 on the hand-corrected passage, with bootstrap intervals over 10 000 resamples
 (`docs/skripte/bootstrap_cer.py`):
 
@@ -165,6 +166,7 @@ near-identical spans:
 |---|---:|---:|
 | differing spans (unique) | 104 (88) | 139 (109) |
 | of those acoustic (different word / omission) | 58 = 56.9 % | 77 = 56.2 % |
+| — of which omissions rather than another word | 45 | 63 |
 | acoustic per 1000 words | 2.18 | 2.89 |
 | total words against bf16 | +7 | +27 |
 | omission balance | −8 words | +8 words |
@@ -339,6 +341,11 @@ python tools/quantize_voxtral.py mistralai/Voxtral-Mini-3B-2507 \
 python docs/skripte/wer.py Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav models/voxtral-mini-8bit
 python docs/skripte/fleurs.py 100 models/voxtral-mini-8bit whisper:precise
+
+# the encoder variants the next two commands compare against
+python tools/quantize_voxtral.py mistralai/Voxtral-Mini-3B-2507 \
+    models/voxtral-mini-8bit-enc<N> 8 64 dense-encoder \
+    --lm-head-bits 8 --encoder-bits <N>
 
 # how much of a build-to-build difference the passage can actually resolve
 python docs/skripte/bootstrap_cer.py Audiotest2/referenz/hart_780-900_REFERENZ.txt \

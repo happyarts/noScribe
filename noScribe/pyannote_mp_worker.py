@@ -117,6 +117,12 @@ def pyannote_proc_entrypoint(args: dict, q):
         pipeline.to(torch.device(device))
 
         seg_list = []
+        # A fixed count is an algorithm change, not just a constraint: when the
+        # requested number differs from the one VBx would have found, pyannote
+        # falls back from VBxClustering to KMeans. Worth knowing before adding
+        # min_speakers/max_speakers, which the pipeline does accept and which
+        # would be the more useful knob -- automatic counting guesses too few
+        # three to four times more often than too many (docs/diarisierung.md).
         with SimpleProgressHook() as hook:
             if num_speakers is not None:
                 diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, hook=hook, num_speakers=num_speakers)
