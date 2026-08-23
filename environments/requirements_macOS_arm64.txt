@@ -2,7 +2,7 @@
 # Tested stack (2026-07, macOS arm64): torch 2.13 / torchaudio 2.11 / torchcodec 0.15
 # run pyannote 4 diarization with identical output and speed as torch 2.8, and
 # torchcodec 0.15 loads against Homebrew FFmpeg 8 (0.7 supported FFmpeg 4-7 only).
-torch==2.13
+torch==2.13.0
 # pyannote.audio's dependency (torch-audiomentations too); noScribe itself no
 # longer calls torchaudio -- the alignment DP is noScribe/ctc_align.py.
 torchaudio==2.11
