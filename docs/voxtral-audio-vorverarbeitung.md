@@ -461,6 +461,25 @@ damit die Messskripte den Arm fahren können. Skripte:
 `voxpopuli_spike.py 10 300 24 99c20,99c25`, `voxpopuli_floor.py 10 300
 99c20,99c25`, `voxpopuli_sparse.py 10 300 0.5|0.2 max,99c20,99c25`.
 
+**Der Stack-Benchmark, neu aufgezeichnet (2026-08-24).** Der lokale
+Pre/Post-Update-Benchmark (`benchmarks-local/bench_stack.py`, nur in dieser
+Arbeitskopie) hat jetzt die Baseline `macos27-p99floor`; seine Digests ordnen
+die Änderung noch einmal unabhängig zu. Auf der 60-s-Benchdatei ändert der
+Perzentil-Boden **genau ein Wort von 167** („es" → „das"). Die Gegenprobe
+sitzt tiefer: der heutige Stack mit dem Bibliotheks-Max-Boden reproduziert
+den Juli-Text **bitgleich** (`b700dee60e432450`) — über die Sprünge
+mlx-voxtral 0.1.0 → 0.0.6, mlx 0.32.0 → 0.32.1 und den numpy-Viterbi hinweg
+war der Decode-Pfad auf dieser Datei also bit-stabil, und der Boden ist die
+einzige Textänderung. Der Aligner-Digest wechselt nur, weil der Text
+wechselt: auf dem Juli-Text liefert der heutige Aligner exakt den
+Juli-Digest. Laufzeit und Speicher unverändert (transcribe 6,7 s gegen 6,9,
+Peak 6,83 GB gegen 6,87); Kernel-, forced_align- und pyannote-Digests
+identisch zu den Juli-Baselines. Für Augen-Diffs liegt der Max-Boden-Text
+als `voxtral_60s_text_maxfloor.txt` neben dem aktuellen. Künftige
+`--compare`-Läufe referenzieren für `text_sha` und `stamps_digest` diese
+Baseline; gegen die Juli-Dateien zeigen die beiden Zeilen erwartet
+`DIFFERS` (in der `note` der JSON erklärt).
+
 **Auf dem Interview ist der Text mit und ohne Knall nicht bitgleich.** 120 s,
 −20 dB, 60-Hz-Knall bei 45 %: unter dem Max-Boden ändert der Knall 15 Stellen
 über die ganze Passage, unter dem Perzentil-Boden 3, mindestens zwei davon

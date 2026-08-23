@@ -47,7 +47,14 @@ end with the real aligner on three recordings (the 737 s interview and the two
 hand-corrected references in `Audiotest2/referenz/`, 3 524 words) — every word
 timestamp identical, every probability equal to the last bit, three times over as
 the code changed underneath; PyInstaller's own module graph follows the engine's
-static `from noScribe import ctc_align`.
+static `from noScribe import ctc_align`. A fourth confirmation came for free on
+2026-08-24 from the local stack benchmark (`benchmarks-local/bench_stack.py`,
+this working copy only): today's aligner reproduces the July `stamps_digest`
+on the July benchmark text exactly — the July baselines predate this
+migration, so that digest crossed it bit-for-bit. (`align_sec` also dropped
+4.8–6.8 s → 1.0 s on the 60 s file between those baselines and now; cause not
+attributed, noted here only so nobody credits or blames the DP for it —
+the DP itself is the measured 1.35x of the C++ kernel.)
 
 ---
 
