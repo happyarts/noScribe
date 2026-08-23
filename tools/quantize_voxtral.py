@@ -189,11 +189,12 @@ def mixed(path, module, *rest):
     This is a *simplified* variant of mlx_voxtral's own
     voxtral_mixed_quantization_predicate: the library additionally boosts the
     MLP projections of the first and last two language-model layers and adapts
-    group sizes per tensor. Measured here (see docs/voxtral-benchmarks.md),
-    even the sensitive-tensor boost changes nothing on real audio, so it was
-    not carried over. The per-tensor group adaptation was not carried over for
-    a different reason: it does not work. mlx_lm's quantize_model filters on
-    the *global* group size before any custom predicate is consulted, so a
+    group sizes per tensor. That boost was not carried over because the part
+    that is worth bits is the encoder, and the sweeps that establish it are in
+    docs/voxtral-quantisierung.md. The per-tensor group adaptation was not
+    carried over for a different reason: it does not work. mlx_lm's
+    quantize_model filters on the *global* group size before any custom
+    predicate is consulted, so a
     tensor the group does not divide is skipped whatever a predicate returns
     for it. The group check before the quantize_model call below covers that
     case instead, by refusing.

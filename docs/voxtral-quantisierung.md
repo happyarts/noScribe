@@ -117,6 +117,14 @@ bit is free anyway.
 The recommended build is byte-identical to bf16 on the reference passage. The
 encoder costs 0.5 GB and no measurable speed, because it runs once per pass.
 
+**Above 8 bit there is nothing to gain, and no useful step between.** bf16,
+fp16 and 8 bit produce the same text on a 150 s excerpt (414 words each), and
+fp16 is neither faster nor more accurate than bf16 (1.84x against 1.86x). A
+16-bit integer format does not exist in MLX and would be pointless if it did:
+quantised, a 256x256 block needs 128 KB plus 8 KB of scales, i.e. more than
+fp16's 128 KB. The whole speed jump is bf16 to *any* quantisation (1.5x to
+7.3x); between 8 and 4 bit lie 12 % speed and the quality cliff below.
+
 **But the two metrics disagree about whether it is worth anything.** The uniform
 build differs from the recommended one by exactly two insertions — same
 substitutions, same deletions — and its CER is a hair *lower*. Two insertions at
@@ -290,6 +298,16 @@ For interview and podcast work this favours Voxtral: an omission is visible
 when proof-reading, a fluent hallucination is not. Note also that the larger
 Whisper model is the *worse* one here — `precise` loops where `fast` does not.
 
+Two more differences show up over a whole recording rather than a passage.
+Voxtral **punctuates more densely** — 10.31 commas per 100 words against
+Whisper's 9.58 on the 20-minute podcast, which is what makes its transcripts
+read better even where the word error is comparable — and it **gets brand and
+programme names right where Whisper does not**: on one product name, Whisper
+wrote none of its three occurrences correctly, the 3B build three of four and
+the 24B build four of four. One name in one recording is a direction, not a
+rate; the general fix for names is the correction list (`VOXTRAL.md`), because
+no decoding parameter mends them.
+
 The CER column ranks these four differently from the WER column, and the gap
 between `whisper-fast` and the 24B Voxtral build is where it matters most: near
 identical word error (8.06 % vs 7.82 %), but 3.34 % against 2.11 % in
@@ -341,6 +359,9 @@ python tools/quantize_voxtral.py mistralai/Voxtral-Mini-3B-2507 \
 python docs/skripte/wer.py Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav models/voxtral-mini-8bit
 python docs/skripte/fleurs.py 100 models/voxtral-mini-8bit whisper:precise
+
+# the 24B source is mistralai/Voxtral-Small-24B-2507: 11 shards, 48.5 GB
+# (its duplicate consolidated.safetensors is skipped)
 
 # the encoder variants the next two commands compare against
 python tools/quantize_voxtral.py mistralai/Voxtral-Mini-3B-2507 \

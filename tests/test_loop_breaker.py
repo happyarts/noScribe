@@ -150,7 +150,7 @@ def test_gentle_sampling_comes_before_any_penalty():
 
 def test_full_ladder_order_and_shortest_fallback():
     # Everything fails; audio too short to split, so the order is:
-    # greedy, T=0.2, T=0.5, penalty 1.01, penalty 1.1 -- penalty strictly last.
+    # greedy, T=0.2, split, T=0.8, penalty 1.01, penalty 1.1 -- penalty strictly last.
     vox = _ScriptedVox([
         (DEGEN, {}), (DEGEN, {}), (DEGEN, {}), (DEGEN_SHORT, {}), (DEGEN, {}),
     ])

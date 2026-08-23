@@ -64,6 +64,11 @@ MAX_CHUNK_SEC = 1500         # 25 min: safely under Voxtral's ~30 min / 32k ctx
 # Neither is a threshold effect that a slightly shorter window would dodge, so
 # this is not a fix for either; it is a refusal to run the model twice as far
 # out as anyone has measured it. Raise it when a longer window has been measured.
+# The cap costs no quality: a 600 s single pass and two 300 s passes punctuate
+# the same material equally (10.87 against 10.66 commas per 100 words), and
+# chunk length has an optimum set by training rather than a "longer is better"
+# curve. What does cost quality is the *boundary*, which pause-aligned cuts and
+# the overlap already address.
 TRUSTED_CHUNK_SEC = 600
 # The binding limit is the Voxtral *generate* working set: it must fit in
 # physical RAM, because MLX compute on swapped-out buffers thrashes and never
@@ -1316,6 +1321,9 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     ~3 loop windows instead of running to max_new_tokens.
     """
     dur = len(audio) / SAMPLE_RATE
+    # 20 tokens/s is ~4.3x reserve: German runs 4.64 text tokens/s measured
+    # (docs/voxtral-benchmarks.md, section 2). The budget bounds only the
+    # generation loop -- a high value reserves no memory.
     max_new = min(32768, int(dur * 20) + 512)
     trouble = "repetition loop"         # what the log calls this pass's defect
 
@@ -1961,8 +1969,9 @@ class _Voxtral:
         # which is a chat default: it divides the logit of every token seen in
         # the last 20 tokens, and in verbatim speech the most-repeated tokens are
         # punctuation and function words. Measured on a 10 min German podcast,
-        # the default cost 27% of all commas (8.6 vs 10.9 per 100 words) and
-        # swallowed real repetitions ("sehr, sehr" -> "sehr"), which is what made
+        # the default cost 27% of all commas (426 -> 312 over a 20 min podcast,
+        # 10.51 -> 7.89 per 100 words) and swallowed real repetitions
+        # ("sehr, sehr" -> "sehr"), which is what made
         # transcripts read worse than Whisper's. Generation stays bounded by
         # max_new_tokens.
         if repetition_penalty == 1.0 and "attention_mask" not in mi:

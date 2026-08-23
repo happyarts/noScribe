@@ -209,7 +209,7 @@ already transcribed. When it finds something, the log says so.
 This is not rare enough to skip: on a raw Zoom recording, 5 of 64 windows cut at
 300 s and 600 s came back missing their opening, once losing 18 words of fluent
 speech. It depends on the recording — read-aloud benchmark audio never shows it.
-Measurements in [docs/voxtral-benchmarks.md](docs/voxtral-benchmarks.md), §6b.
+Measurements in [docs/voxtral-benchmarks.md](docs/voxtral-benchmarks.md), §5.
 
 To pin the length yourself, set `voxtral_chunk_sec:` (seconds) in `config.yml`
 (`0` = automatic). Lower it if other apps need RAM. Raising it past 10 minutes
