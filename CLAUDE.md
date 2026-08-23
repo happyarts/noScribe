@@ -170,6 +170,23 @@ Since then Voxtral has also grown `noScribe/ctc_align.py`, `tests/test_mel_floor
 one of the smaller PRs and must stay out; `tools/check_local_current.py` says which branch owns
 which line.
 
+**These are fork-only and must never appear in that pull request**, however convenient the diff
+makes it look:
+
+- **`README.md`** — it carries the fork banner (Voxtral, no packaged download, pointers back to
+  kaixxx/noScribe and noscribe.de). It exists for the fork alone. This one is not a judgement
+  call; leaving it in would push the fork's advertising into the upstream project.
+- **`CLAUDE.md`** — upstream has no such file, and this one describes the fork's own workflow.
+- **`tools/check_local_current.py`** — it checks `local/main` against the *fork's* PR branches;
+  upstream has nothing for it to do.
+- **The deletion of `environments/marked_for_deletion/`** — that directory is the upstream
+  maintainers' own staging area (created 2025-05-29, and the name says they mean to remove it
+  themselves). Removing it for them is not this fork's call, so the deletion stays local.
+- **`.github/workflows/pyinstaller.yml`** — that change belongs to the CI pull request, not to
+  Voxtral.
+- `environments/requirements_win_cpu.txt` and `requirements_win_cuda.txt` — check which branch
+  owns them before including anything; Windows is the upstream maintainers' platform.
+
 ## Test suite character
 
 Many tests are regression guards for defects found in production or in upstream libraries rather
