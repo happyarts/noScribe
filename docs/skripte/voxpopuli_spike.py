@@ -1,7 +1,8 @@
 """Runde 2: der Transienten-Schaden auf vielen Strömen statt einer Passage.
 
 Die Dosis-Wirkung des Clamp-Bodens (`docs/voxtral-audio-vorverarbeitung.md`
-§6b) stand zunächst auf einer einzigen handkorrigierten Passage. Hier läuft
+`docs/voxtral-mel-clamp-boden.md`) stand zunächst auf einer einzigen
+handkorrigierten Passage. Hier läuft
 sie über zehn VoxPopuli-Ströme mit Goldtranskript, jeder einmal sauber und
 einmal mit einem eingesetzten Transienten, unter beiden Böden.
 

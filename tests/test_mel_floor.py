@@ -2,8 +2,8 @@
 
 mlx-voxtral clamps the log-Mel at `log_max - 8` with log_max taken over the
 whole input, so one loud cell -- a door slam -- raises the floor for the whole
-pass and costs a measured +1.52 WER points at 28 dB (docs/voxtral-audio-
-vorverarbeitung.md, section 6b). The engine therefore replaces the processor's
+pass and costs a measured +1.52 WER points at 28 dB
+(docs/voxtral-mel-clamp-boden.md). The engine therefore replaces the processor's
 feature extractor with one whose floor comes from a percentile of the
 spectrogram (MEL_FLOOR_PERCENTILE).
 
@@ -49,8 +49,8 @@ def _floor_db(features):
 
 
 def _with_block(clean, at=0.45, seconds=0.1):
-    """The dose instrument of section 6b: a full-scale block dropped into a
-    quiet recording."""
+    """The dose instrument of the clamp-floor measurements: a full-scale block
+    dropped into a quiet recording."""
     spiked = clean.copy()
     pos = int(at * len(spiked))
     spiked[pos:pos + int(seconds * SAMPLE_RATE)] = 1.0
@@ -167,8 +167,8 @@ def test_pct_100_is_bit_identical_to_the_library(audio):
 
 def test_a_transient_barely_moves_the_percentile_floor_on_real_features():
     """A full-scale 0.1 s block in a quiet recording, the dose instrument of
-    section 6b: the library's floor follows it by tens of dB, the engine's by
-    a fraction of one."""
+    the clamp-floor write-up: the library's floor follows it by tens of dB,
+    the engine's by a fraction of one."""
     pytest.importorskip("mlx_voxtral")
     clean = _speech_like(60.0, 0.1)
     spiked = _with_block(clean)

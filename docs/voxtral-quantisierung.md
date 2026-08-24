@@ -9,7 +9,7 @@ build against another build. The pin moved to 0.0.6, whose log-Mel change was
 measured at the transcript and found neutral; and the engine now clamps the
 log-Mel at a percentile of the spectrogram rather than its maximum, which helps
 only where a transient would otherwise raise the floor. Both in
-`voxtral-audio-vorverarbeitung.md`, sections 6 and 6b.)
+`voxtral-audio-vorverarbeitung.md` section 6 and `voxtral-mel-clamp-boden.md`.)
 
 ## The short answer
 

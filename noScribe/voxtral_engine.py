@@ -1638,7 +1638,7 @@ def _log(cb, level, msg):
 # costs nothing on clean material (-0.12 [-0.85, +0.49], same streams,
 # paired); it can only lower the floor, never raise it. The case against --
 # the model was trained on the maximum-clamped input -- and the measurements
-# are in docs/voxtral-audio-vorverarbeitung.md, section 6b.
+# are in docs/voxtral-mel-clamp-boden.md.
 #
 # On clean material the percentile is not a critical value: 99, 99.9 and
 # 99.99 are indistinguishable from the maximum and from each other. Under a
@@ -1664,7 +1664,8 @@ MEL_FLOOR_RANGE = 8.0
 # all four regimes and REJECTED: a cap hangs off the maximum, so a knock
 # lifts it along -- +0.81 [+0.18, +1.57] at 20 dB where the uncapped floor
 # costs +0.01 -- while buying only +0.24 -> +0.05 on half-silent streams,
-# where no interval excludes zero (section 6b, last table). None stays the
+# where no interval excludes zero (docs/voxtral-mel-clamp-boden.md,
+# section 5). None stays the
 # production value; the parameter exists so the measurement scripts can
 # drive the arm (spec `99c20` in docs/skripte).
 MEL_FLOOR_CAP = None
