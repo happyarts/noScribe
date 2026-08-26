@@ -22,8 +22,10 @@ files.
 
 The model card names no split; it is **test** (dev is the easier one). That
 validates the setup (`pyannote/`, community-1 with VBx+PLDA, on MPS) — from here
-on, our own diarization measurements are worth something. Runtime 14 s/file on
-dev, ~22 s on test.
+on, our own diarization measurements are worth something. Runtime was
+14 s/file on dev, ~22 s on test; since the per-chunk embedding fast path
+(`noScribe/pyannote_fast_embeddings.py`, 2026-08-27) it is ~6 s/file on dev
+at a DER identical on every file.
 
 VoxConverse rather than AMI because the question was the speaker *count*: AMI has
 exactly four participants per session, so the axis under test is constant there,
@@ -67,7 +69,9 @@ belong next to the decision: **relabelling the spurious cluster in noScribe**
 
 mlx-audio carries `vad/sortformer` — NVIDIA's end-to-end diarization, natively on
 MLX, where noScribe runs pyannote through torch on MPS and the embedding stage was
-measured to dominate with no cheap lever. It has a **hard cap of four speakers**,
+measured to dominate. (The cost argument has since weakened: the embedding stage
+lost two thirds of its work to the per-chunk fast path in
+`noScribe/pyannote_fast_embeddings.py`.) It has a **hard cap of four speakers**,
 so it is not a replacement for pyannote, which has none; at best a fast path for
 the two- and three-speaker recordings that make up most of this material. Against
 the counts above — automatic counting already guesses too few three to four times

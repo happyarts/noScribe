@@ -113,6 +113,16 @@ def pyannote_proc_entrypoint(args: dict, q):
 
         with impres.as_file(impres.files("pyannote")) as mypath:
             pipeline = Pipeline.from_pretrained(mypath)
+        # One embedding-model call per chunk instead of one per speaker slot;
+        # noScribe/pyannote_fast_embeddings.py carries the measurement and
+        # the safety gate. An optimization must never break diarization, so
+        # any failure here just means the stock (slow) path runs.
+        try:
+            from .pyannote_fast_embeddings import install_fast_embeddings
+            fast = install_fast_embeddings(pipeline)
+        except Exception:
+            fast = False
+        plog("debug", f"Fast embedding path active: {fast}")
         waveform, sample_rate = load_waveform(audio_file)
         pipeline.to(torch.device(device))
 
