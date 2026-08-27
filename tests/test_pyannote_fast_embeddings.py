@@ -136,14 +136,20 @@ def test_install_refuses_unsafe_pipelines(wespeaker_wrapper):
     assert "get_embeddings" not in pipeline.__dict__
     object.__setattr__(pipeline, "_embedding", real_embedding)
 
-    # WeSpeaker variant whose head is not pooling-transparent
+    # a head that is not pooling-transparent: with two_emb_layer the ResNet
+    # runs a real BatchNorm1d over the pooled stats, which rejects the
+    # (batch, speakers, dim) tensor -- the behavioral probe must catch that
+    from pyannote.audio.models.embedding.wespeaker.resnet import ResNet34
+
     resnet = pipeline._embedding.model_.resnet
     assert resnet.two_emb_layer is False, "bundled model changed shape"
-    resnet.two_emb_layer = True
+    pipeline._embedding.model_.resnet = ResNet34(
+        feat_dim=80, embed_dim=256, two_emb_layer=True
+    ).eval()
     try:
         assert install_fast_embeddings(pipeline) is False
     finally:
-        resnet.two_emb_layer = False
+        pipeline._embedding.model_.resnet = resnet
 
     # training pipeline (embedding cache not carried by the fast path)
     pipeline.training = True

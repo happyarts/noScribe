@@ -51,13 +51,13 @@ def install_fast_embeddings(pipeline) -> bool:
     Returns True when the fast path will actually run. Returns False -- and
     leaves the stock, slow-but-correct ``get_embeddings`` in place -- when
     any assumption the grouping rests on does not hold on this pipeline:
-    a non-WeSpeaker embedding backend, a WeSpeaker variant whose head is
-    not pooling-transparent, a training pipeline (whose embedding cache the
-    fast path does not carry), a changed method signature, or an
-    installation that pyannote's attribute machinery did not accept.
+    a backend that does not demonstrably compute per-speaker embeddings
+    from stacked masks (probed, see ``_accepts_stacked_masks``), a training
+    pipeline (whose embedding cache the fast path does not carry), a
+    changed method signature, or an installation that pyannote's attribute
+    machinery did not accept.
     """
     try:
-        from pyannote.audio.models.embedding.wespeaker import BaseWeSpeakerResNet
         from pyannote.audio.pipelines.speaker_diarization import SpeakerDiarization
         from pyannote.audio.pipelines.speaker_verification import (
             PyannoteAudioPretrainedSpeakerEmbedding,
@@ -73,14 +73,7 @@ def install_fast_embeddings(pipeline) -> bool:
     embedding = getattr(pipeline, "_embedding", None)
     if not isinstance(embedding, PyannoteAudioPretrainedSpeakerEmbedding):
         return False
-    model = getattr(embedding, "model_", None)
-    if not isinstance(model, BaseWeSpeakerResNet):
-        return False
-    # With two_emb_layer the ResNet head runs BatchNorm1d over the pooled
-    # stats, which reads dim 1 as channels and rejects the fast path's
-    # (batch, speakers, dim) tensor. All four models pyannote ships set it
-    # to False; anything else must keep the stock per-pair loop.
-    if getattr(getattr(model, "resnet", None), "two_emb_layer", True):
+    if not _accepts_stacked_masks(embedding):
         return False
 
     # If upstream adds or renames a parameter, apply() will call with it;
@@ -103,6 +96,39 @@ def install_fast_embeddings(pipeline) -> bool:
         pipeline.__dict__.pop("get_embeddings", None)
         return False
     return True
+
+
+def _accepts_stacked_masks(embedding) -> bool:
+    """Probe whether the backend computes per-speaker embeddings from one
+    call with (batch, speakers, frames) masks.
+
+    Probing the actual call (the approach of pyannote-audio#2048) is more
+    robust than deriving the capability from model classes and constructor
+    flags: any head that cannot take the extra speaker dimension simply
+    fails or returns the wrong shape here. On top of the shape check, the
+    stacked result must match per-speaker calls on the same input -- that
+    pins the semantics, not just the container. Costs two small forwards
+    over one second of noise, once per worker process.
+    """
+    import numpy as np
+    import torch
+
+    try:
+        rng = torch.Generator().manual_seed(0)
+        waveform = torch.randn(1, 1, embedding.sample_rate, generator=rng)
+        masks = (torch.rand(2, 16, generator=rng) > 0.5).float()
+        masks[:, :4] = 1.0  # no empty mask: empty ones pool to zeros anyway
+
+        stacked = embedding(waveform, masks=masks[None])
+        per_speaker = embedding(
+            torch.vstack([waveform, waveform]), masks=masks
+        )
+    except Exception:
+        return False
+
+    if getattr(stacked, "shape", None) != (1, 2, embedding.dimension):
+        return False
+    return bool(np.allclose(stacked[0], per_speaker, atol=1e-4, rtol=1e-3))
 
 
 def fast_get_embeddings(
