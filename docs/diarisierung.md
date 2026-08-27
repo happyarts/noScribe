@@ -97,9 +97,10 @@ model once per chunk with stacked masks is the same arithmetic. Shipped as
 
 The two rejected rows are the answer to "why not also widen the segmentation
 step or quantize": every further minute is paid in speaker confusion, and fp16
-buys almost nothing on MPS. Submitted upstream as pyannote-audio#2051 (issue
-#2050); the same optimization was independently proposed there twice before
-(#1996, #2048), both still open.
+buys almost nothing on MPS. Upstream, the same optimization has been discovered
+independently three times (pyannote-audio#1996, #2048, and our #2051, closed in
+favor of #2048); our verification and the analysis live in issue #2050. Should
+one of them merge, `pyannote_fast_embeddings` reduces to a version gate.
 
 ## Open
 
