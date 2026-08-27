@@ -80,6 +80,27 @@ more often than too many — a hard cap is the wrong failure direction again.
 `vad/silero_vad` is there too. This pipeline has no VAD at all, and one would bear
 on the leading speech Voxtral sometimes drops rather than on diarization.
 
+## The embedding fast path, and two speed ideas that did not survive the DER
+
+pyannote's pipeline ran the full embedding model once per (chunk x speaker
+slot) although the WeSpeaker mask only enters at the pooling stage; running the
+model once per chunk with stacked masks is the same arithmetic. Shipped as
+`noScribe/pyannote_fast_embeddings.py` (2026-08-27) after this sweep over the
+216 dev files, all against the baseline above:
+
+    configuration        DER      confusion   diarization total
+    stock                7.18 %      2.59        47.6 min
+    fast path            7.18 %      2.59        21.8 min   <- shipped, 0/216 files differ
+    + step 0.15          7.53 %      2.94        15.9 min   <- rejected
+    + step 0.2           7.96 %      3.40        12.6 min   <- rejected
+    + fp16 trunk (MPS)   7.19 %      2.60        20.8 min   <- rejected, ~5 % for a risk
+
+The two rejected rows are the answer to "why not also widen the segmentation
+step or quantize": every further minute is paid in speaker confusion, and fp16
+buys almost nothing on MPS. Submitted upstream as pyannote-audio#2051 (issue
+#2050); the same optimization was independently proposed there twice before
+(#1996, #2048), both still open.
+
 ## Open
 
 Surface `min_speakers` / `max_speakers` — pyannote accepts both, noScribe offers
