@@ -189,8 +189,9 @@ Voxtral PR:
 - `find_ghost_speakers` and `split_at_speaker_change` in `main.py` (with
   `tests/test_ghost_speaker.py`, `tests/test_segment_speaker_split.py` and the
   `warn_ghost_speaker` key in `de`/`en`) are engine-agnostic and since 2026-09-01 have their own
-  branch, `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`; the
-  PR for it is not opened yet. `docs/diarization.md` stays local: it also documents the
+  branch, `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`:
+  upstream PR #341. The wrapper `on_segment_split` sits after `on_segment` rather than renaming
+  it, so the branch merges cleanly with the other open PRs. `docs/diarization.md` stays local: it also documents the
   fast-embeddings path below, and upstream has no `docs/` directory.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py`: the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
