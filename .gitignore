@@ -4,8 +4,12 @@ dist/
 src/
 __pycache__/
 .vscode/
-noScribeEdit/*
-!noScribeEdit/readme.txt
+# The editor source is kept in this fork (upstream keeps it in kaixxx/noScribeEditor
+# and only ships a compiled copy here). Test/ holds a real recording and must
+# never be committed.
+noScribeEdit/Test/
+noScribeEdit/build/
+noScribeEdit/dist/
 scripts/
 
 *.code-workspace

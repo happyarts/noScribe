@@ -1,0 +1,8 @@
+qtawesome
+pyqt6>=6.10
+AdvancedHTMLParser
+pillow
+appdirs
+PyYAML
+pyinstaller
+av>=11,<13

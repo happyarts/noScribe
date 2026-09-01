@@ -185,6 +185,10 @@ makes it look:
   themselves). Removing it for them is not this fork's call, so the deletion stays local.
 - **`.github/workflows/pyinstaller.yml`** — that change belongs to the CI pull request, not to
   Voxtral.
+- **`noScribeEdit/`** — the editor source is tracked in this fork for local work only
+  (since 2026-09-01; `.gitignore` no longer excludes it). Upstream keeps the editor in
+  its own repository, kaixxx/noScribeEditor, and editor changes go there as PRs from
+  happyarts/noScribeEditor. `noScribeEdit/Test/` stays ignored: it holds a real recording.
 - `environments/requirements_win_cpu.txt` and `requirements_win_cuda.txt` — check which branch
   owns them before including anything; Windows is the upstream maintainers' platform.
 
