@@ -1,16 +1,16 @@
-"""Wann ein Diarisierungs-Label einen zweiten Blick wert ist.
+"""When a diarization label deserves a second look.
 
-Die Schwellen sind gegen Ground Truth gemessen, nicht geraten: VoxConverse v0.3,
-216 dev- plus 232 test-Aufnahmen mit 1 bis 21 Sprechern und RTTM-Referenz. Auf
-Label-Ebene liegt die Genauigkeit bei rund zwei Dritteln (dev 83 %, test 69 %),
-die Trefferquote bei etwa einem Achtel. Beide Zahlen sind hier festgehalten,
-weil sie die Aussage der Meldung begrenzen -- und weil eine engere Schwelle
-nachweislich NICHT hilft: 0,01 traf auf dev 100 % und auf test 67 %.
+The thresholds are measured against ground truth, not guessed: VoxConverse
+v0.3, 216 dev plus 232 test recordings with 1 to 21 speakers and an RTTM
+reference. At label level the precision is about two thirds (dev 83 %, test
+69 %), the recall about one in eight. Both figures are recorded here because
+they bound what the report may claim -- and because a tighter threshold
+demonstrably does NOT help: 0.01 scored 100 % on dev and 67 % on test.
 
-Die Gegenprobe, die die zweite Bedingung rechtfertigt: auf einer 25-minütigen
-Fragerunde mit 14 echten Sprechern liegen 13 unter 5 % Sprechzeit -- alle
-sprechen aber in Sätzen, und über VoxConverse dev bleiben nur 2 von 860 echten
-Sprechern unter einem 2-s-Beitrag.
+The counter-check that justifies the second condition: on a 25-minute question
+round with 14 real speakers, 13 hold less than 5 % of the speech time -- but
+every one of them speaks in sentences, and across VoxConverse dev only 2 of 860
+real speakers ever stay under a 2 s turn.
 """
 import yaml
 from pathlib import Path
@@ -27,20 +27,20 @@ def _seg(start, end, label):
 
 
 def _spread(label, n, length, step=20.0, offset=0.0):
-    """n kurze Beiträge über die Datei verteilt -- das Bild eines Geistes."""
+    """n short turns spread over the file -- the shape of a ghost."""
     return [_seg(offset + i * step, offset + i * step + length, label)
             for i in range(n)]
 
 
 def _floor(label, n, length, step=60.0, offset=5.0):
-    """n echte Redebeiträge."""
+    """n real turns holding the floor."""
     return [_seg(offset + i * step, offset + i * step + length, label)
             for i in range(n)]
 
 
 def test_the_measured_ghost_is_reported():
-    """Die echte Stelle: zwei Sprecher mit je ~50 % und Beiträgen bis 29 s, dazu
-    ein Label mit 1,7 % und keinem Beitrag über 1,52 s -- beides unter den Schwellen."""
+    """The real case: two speakers at ~50 % each with turns up to 29 s, plus a
+    label with 1.7 % and no turn over 1.52 s -- both under the thresholds."""
     diarization = (_floor('SPEAKER_00', 20, 28.0)
                    + _floor('SPEAKER_01', 20, 26.0, offset=35.0)
                    + _spread('SPEAKER_02', 56, 0.35))
@@ -51,31 +51,31 @@ def test_the_measured_ghost_is_reported():
 
 
 def test_fourteen_real_speakers_are_left_alone():
-    """Die Falsch-Positiv-Kontrolle, und der Grund für die zweite Bedingung:
-    13 der 14 gemessenen Sprecher liegen unter 5 % Sprechzeit. Ihr längster
-    Beitrag lag zwischen 5,86 s und 42,8 s, also weit über der Schwelle."""
+    """The false-positive control, and the reason for the second condition:
+    13 of the 14 measured speakers hold less than 5 % of the speech time. Their
+    longest turn was between 5.86 s and 42.8 s, far above the threshold."""
     longest_turns = [5.855, 6.109, 7.830, 8.522, 10.125, 10.851, 11.104,
                      11.813, 15.086, 16.301, 22.950, 24.401, 28.620, 42.778]
     diarization = []
     for i, longest in enumerate(longest_turns):
-        # ein langer Beitrag plus Kleinkram -- der Anteil bleibt klein
+        # one long turn plus small change -- the share stays small
         diarization.append(_seg(i * 100, i * 100 + longest, f'SPEAKER_{i:02d}'))
         diarization += _spread(f'SPEAKER_{i:02d}', 3, 0.4, offset=i * 100 + 50)
-    diarization += _floor('SPEAKER_99', 12, 42.0, offset=2000.0)   # der Trainer
+    diarization += _floor('SPEAKER_99', 12, 42.0, offset=2000.0)   # the trainer
     assert find_ghost_speakers(diarization) == []
 
 
 def test_two_speakers_are_never_judged():
-    """Mit zwei Labels ist "eines davon ist falsch" keine Aussage, die hier
-    getroffen werden kann -- das verbleibende müsste alle sein. Auch dann nicht,
-    wenn eines der beiden winzig ist."""
+    """With two labels, "one of them is spurious" is not a conclusion this can
+    draw -- the remaining one would have to be everybody. Not even when one of
+    the two is tiny."""
     diarization = _floor('SPEAKER_00', 20, 28.0) + _spread('SPEAKER_01', 40, 0.3)
     assert find_ghost_speakers(diarization) == []
 
 
 def test_not_every_label_can_be_a_ghost():
-    """Eine Datei ohne jeden Sprecher ist nie die nützliche Lesart, wie schief
-    die Verteilung auch ist."""
+    """A file with no speaker at all is never the useful reading, however
+    lopsided the distribution."""
     diarization = (_spread('SPEAKER_00', 30, 0.4)
                    + _spread('SPEAKER_01', 30, 0.4, offset=1.0)
                    + _spread('SPEAKER_02', 30, 0.4, offset=2.0))
@@ -83,8 +83,8 @@ def test_not_every_label_can_be_a_ghost():
 
 
 def test_a_brief_but_real_third_speaker_is_left_alone():
-    """Der Grenzfall, den die Dauerbedingung schützt: jemand antwortet einmal
-    auf eine Frage und schweigt sonst. Wenig Sprechzeit, aber ein ganzer Satz."""
+    """The edge case the turn-length condition protects: someone answers one
+    question and is otherwise silent. Little speech time, but a whole sentence."""
     diarization = (_floor('SPEAKER_00', 20, 28.0)
                    + _floor('SPEAKER_01', 20, 26.0, offset=35.0)
                    + [_seg(500.0, 504.5, 'SPEAKER_02')])
@@ -94,25 +94,25 @@ def test_a_brief_but_real_third_speaker_is_left_alone():
 def test_empty_and_degenerate_input():
     assert find_ghost_speakers(None) == []
     assert find_ghost_speakers([]) == []
-    # Alle Segmente ohne Länge: keine Sprechzeit, also nichts zu beurteilen.
+    # Every segment of zero length: no speech time, so nothing to judge.
     assert find_ghost_speakers([_seg(1.0, 1.0, f'SPEAKER_0{i}') for i in range(3)]) == []
 
 
 def test_thresholds_are_the_documented_ones():
-    """Die Werte tragen die Aussage der Meldung; ein stiller Dreh daran macht aus
-    einer gemessenen Schwelle eine geratene. 0,02 ist der einzige Wert, der auf
-    dev UND test besser war als der ursprüngliche 0,05."""
+    """The values carry the report's claim; a quiet tweak turns a measured
+    threshold into a guessed one. 0.02 is the only value that beat the original
+    0.05 on dev AND test."""
     assert GHOST_SPEAKER_MAX_SHARE == 0.02
     assert GHOST_SPEAKER_MAX_TURN_MS == 2000
 
 
 def test_a_quiet_real_speaker_can_trip_this_and_that_is_known():
-    """Die Grenze des Verfahrens, absichtlich festgehalten. Auf VoxConverse test
-    war etwa ein Drittel der Meldungen ein echter Sprecher, der einfach fast
-    nichts sagte -- gemessen z. B. 0,32 % Sprechzeit mit 1266 ms als längstem
-    Beitrag, extremer als der Geist, der das Ganze ausgelöst hat (1,7 % /
-    1519 ms). Auf diesen zwei Achsen ist diese Verwechslung nicht auflösbar;
-    deshalb meldet die Funktion und entscheidet nicht."""
+    """The method's limit, recorded on purpose. On VoxConverse test about a third
+    of the reports were a real speaker who simply said almost nothing -- measured
+    e.g. 0.32 % of the speech time with 1266 ms as the longest turn, more extreme
+    than the ghost that started all this (1.7 % / 1519 ms). On these two axes
+    the two cannot be told apart; that is why the function reports and does not
+    decide."""
     diarization = (_floor('SPEAKER_00', 20, 30.0)
                    + _floor('SPEAKER_01', 20, 28.0, offset=35.0)
                    + [_seg(400.0, 401.27, 'SPEAKER_02'),
@@ -122,10 +122,10 @@ def test_a_quiet_real_speaker_can_trip_this_and_that_is_known():
 
 
 def test_many_short_turns_are_not_required():
-    """Die naheliegende dritte Achse ist gemessen und verworfen: der auslösende
-    Geist hatte 56 kurze Beiträge, aber auf VoxConverse haben überzählige Labels
-    typisch wenige -- eine Mindestzahl an Beiträgen brach die Treffer von 5 auf 1
-    ein. Ein Label mit nur zwei kurzen Beiträgen muss also gemeldet werden."""
+    """The obvious third axis was measured and rejected: the ghost that started
+    this had 56 short turns, but on VoxConverse surplus labels typically have
+    few -- a minimum turn count dropped the hits from 5 to 1. So a label with
+    only two short turns must still be reported."""
     diarization = (_floor('SPEAKER_00', 20, 30.0)
                    + _floor('SPEAKER_01', 20, 28.0, offset=35.0)
                    + [_seg(400.0, 400.9, 'SPEAKER_02'),
@@ -134,8 +134,8 @@ def test_many_short_turns_are_not_required():
 
 
 def test_warning_string_exists_in_every_locale_or_falls_back_to_english():
-    """i18n fällt auf "en" zurück, also muss der Schlüssel dort da sein --
-    sonst erscheint im Log der Schlüsselname statt eines Satzes."""
+    """i18n falls back to "en", so the key has to be there -- otherwise the log
+    shows the key name instead of a sentence."""
     trans = Path(__file__).resolve().parent.parent / 'trans'
     en = yaml.safe_load((trans / 'noScribe.en.yml').read_text(encoding='utf-8'))
     assert 'warn_ghost_speaker' in en['en']

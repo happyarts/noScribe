@@ -3,7 +3,7 @@
 A segment is the unit a speaker is assigned to, so one that spans a turn hands
 the whole text to whoever overlaps it most and the shorter half is lost. The
 regression that motivated this is pinned below with the real timings from the
-run that produced it: Voxtral's cue builder had merged the turn-final answer
+run that produced it: the segment builder had merged the turn-final answer
 "Ja, unbedingt." into the question before it, and the merged cue went to the
 questioner on 40.4% overlap against 39.3%.
 """
@@ -111,7 +111,7 @@ def test_incomplete_word_stamps_pass_through():
 # Text reassembly
 # --------------------------------------------------------------------------- #
 def test_whisper_style_words_keep_their_own_spacing():
-    """faster-whisper words carry a leading space; Voxtral's are bare tokens.
+    """faster-whisper words carry a leading space; another engine's may be bare tokens.
     Both have to come back out as normal text."""
     seg = {"start": 8.27, "end": 10.45, "text": " Welt? Ja, unbedingt.",
            "words": _words((" Welt?", 8.27, 8.59), (" Ja,", 9.35, 9.47),

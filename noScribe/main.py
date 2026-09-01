@@ -629,10 +629,8 @@ class TranscriptionQueue:
     
 
 # Word endings that close a sentence, ignoring trailing quotes and brackets.
-# Deliberately narrower than voxtral_engine._SENTENCE_END, which also counts a
-# colon: that one hunts for a place to cut a looping decode, where any clause
-# boundary will do. Here a cut claims "the speaker may change here", and a colon
-# lands mid-utterance ("Und dann sagte er: ich komme").
+# Deliberately no colon: a cut here claims "the speaker may change here", and a
+# colon lands mid-utterance ("Und dann sagte er: ich komme").
 _SEGMENT_SENTENCE_END = ('.', '!', '?', '…')
 _SEGMENT_SENTENCE_TRAIL = '"\'»)] '
 
@@ -711,8 +709,9 @@ def find_ghost_speakers(diarization,
 def _join_words(words):
     """Rebuild a segment's text from its words.
 
-    Whisper's words carry their own leading space, Voxtral's are bare tokens,
-    so the separator has to follow the source rather than be assumed.
+    faster-whisper's words carry their own leading space; another engine's
+    word list may be bare tokens, so the separator has to follow the source
+    rather than be assumed.
     """
     tokens = [w.get('word') or '' for w in words]
     separator = '' if any(t.startswith((' ', '\u00a0')) for t in tokens) else ' '
@@ -724,11 +723,11 @@ def split_at_speaker_change(segment, speaker_of):
 
     A segment is the unit a speaker is assigned to, so one that straddles a
     turn silently loses the shorter half: the whole thing goes to whoever
-    overlaps it most. That is not hypothetical. Voxtral's cue builder merges a
-    short trailing cue into the one before it so subtitles don't get one-word
-    fragments, and a turn-final "Ja, unbedingt." merged that way went to the
-    previous speaker on 40.4% overlap against 39.3% -- the answer ended up in
-    the question's paragraph.
+    overlaps it most. That is not hypothetical: a segment builder that merges
+    a short trailing cue into the one before it (so subtitles get no one-word
+    fragments) put a turn-final "Ja, unbedingt." into the question before it,
+    and the merged segment went to the questioner on 40.4% overlap against
+    39.3% -- the answer ended up in the question's paragraph.
 
     Speakers change between sentences, not inside them, so cutting at sentence
     ends undoes it. The pieces still go through the unchanged assignment in the
