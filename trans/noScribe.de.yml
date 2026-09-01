@@ -116,6 +116,7 @@ de:
   err_ffmpeg: 'ffmpeg hat einen Fehler gemeldet.'
   err_converting_audio: Fehler im 1. Schritt - Audiokonvertierung.
   err_identifying_speakers: Fehler im 2. Schritt - Erkennung der Sprecher:innen. 
+  warn_ghost_speaker: 'Prüfen: %{speaker} hält nie das Wort – nur %{share} % der Sprechzeit und kein Redebeitrag länger als %{longest} s. Ist das eine echte Sprecherin oder ein echter Sprecher? Wenn nicht, entfernt ein neuer Lauf mit fest eingestellter Sprecheranzahl das Label meist. Umgekehrt findet die automatische Zählung öfter zu wenige als zu viele Sprecher – ein Blick in die Aufnahme entscheidet das schneller als ein zweiter Lauf.'
   err_loading_prompt: 'Warnung: Whisper-Prompt konnte nicht geladen werden.'
   transcription_canceled: 'Transkription wirklich abbrechen?'
   queue_cancel_all_confirm: 'Dadurch werden alle unerledigten Aufträge in der Warteschlange abgebrochen. Möchtest du fortfahren?'

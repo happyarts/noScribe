@@ -122,6 +122,7 @@ en:
   err_ffmpeg: 'ffmpeg returned an error'
   err_converting_audio: Error in step 1 - converting the audio.
   err_identifying_speakers: Error in step 2 - identifying the speakers.
+  warn_ghost_speaker: 'Worth a check: %{speaker} never holds the floor – only %{share}% of the speech time and no turn longer than %{longest} s. Is this a real speaker? If not, re-running with a fixed number of speakers usually removes the label. Note that automatic counting more often finds too few speakers than too many, so listening to the recording settles it faster than a second run.'
   err_loading_prompt: 'Warning: Failed to load whisper prompt.'
   transcription_canceled: 'Do you really want to cancel the transcription?'  
   queue_cancel_all_confirm: 'This will cancel all unfinished jobs in the queue. Do you want to continue?' 
