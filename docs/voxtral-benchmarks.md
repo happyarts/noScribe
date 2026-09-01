@@ -1,238 +1,224 @@
-# Voxtral in noScribe — Messergebnisse
+# Voxtral in noScribe — Measurement Results
 
-Stand: 19./20. Juli 2026, im August nachgezogen · M1 Max, 32 GB · Testmaterial:
-„Mona Podcast 323" (20,4 min, Deutsch, 2 Sprecher)
+As of 19/20 July 2026, updated in August · M1 Max, 32 GB · test material:
+"Mona Podcast 323" (20.4 min, German, 2 speakers)
 
-**Was im Code steht, steht hier nicht mehr.** Die Schwellen der
-Schleifenerkennung, die Reparaturleiter, das Speichermodell, die Kopfreparatur
-und die Namenskorrektur tragen ihre Messung im Kommentar neben der Konstante,
-so wie es dieses Repository hält. Diese Datei behält, was dort keinen Platz
-hat: Messungen zu Entscheidungen, die *nicht* getroffen wurden, Belege dafür,
-dass ein Defekt nicht bei uns liegt, und Messfallen. Die Quantisierung hat ihr
-eigenes Dokument, `voxtral-quantisierung.md`.
+**What lives in the code is no longer repeated here.** The loop-detection
+thresholds, the repair ladder, the memory model, the lost-head repair and the
+name correction carry their measurement in the comment next to the constant,
+as this repository has it. This file keeps what has no place there:
+measurements behind decisions that were *not* taken, evidence that a defect is
+not ours, and measurement traps. Quantisation has its own document,
+`voxtral-quantisation.md`.
 
-Referenzgröße für Lesbarkeit ist die Kommadichte pro 100 Wörter; Whisper liegt
-auf diesem Material bei **9,58–10,62** (je nach Ausschnitt), was als „gut
-lesbar" gilt.
+The reference measure for readability is comma density per 100 words; on this
+material Whisper sits at **9.58–10.62** (depending on the excerpt), which
+counts as "readable".
 
 ---
 
-## 1. Der wichtigste Fund: `repetition_penalty`
+## 1. The most important finding: `repetition_penalty`
 
-`mlx_voxtral.generate()` setzt den Wert per Default auf **1.2** — ein
-Chat-Default, den wir nie überschrieben hatten. Warum das in gesprochener
-Sprache gerade die Satzzeichen kostet, steht im Kommentar über dem Aufruf in
-`voxtral_engine.transcribe_array`; die Sprossen der Strafenleiter stehen bei
-`RETRY_REPETITION_PENALTIES`. Hier bleiben die beiden Messreihen, aus denen
-diese Kommentare ihre Zahlen ziehen.
+`mlx_voxtral.generate()` defaults the value to **1.2** — a chat default we had
+never overridden. Why that costs precisely the punctuation in spoken language
+is explained in the comment above the call in
+`voxtral_engine.transcribe_array`; the rungs of the penalty ladder are at
+`RETRY_REPETITION_PENALTIES`. What remains here are the two measurement series
+those comments draw their numbers from.
 
-| `repetition_penalty` | Kommas/100 W (mini, 600 s) | doppeltes „nicht" |
+| `repetition_penalty` | commas/100 w (mini, 600 s) | doubled "nicht" |
 |---|---|---|
-| **1.0** | **10,87** | erhalten |
-| 1.01 | 10,17 | erhalten |
-| 1.05 | 10,01 | erhalten |
-| 1.1 | 9,60 | **verschluckt** |
-| 1.15 | 9,21 | **verschluckt** |
-| 1.2 (alter Default) | 8,57 | verschluckt |
+| **1.0** | **10.87** | kept |
+| 1.01 | 10.17 | kept |
+| 1.05 | 10.01 | kept |
+| 1.1 | 9.60 | **swallowed** |
+| 1.15 | 9.21 | **swallowed** |
+| 1.2 (old default) | 8.57 | swallowed |
 
-Am vollen Podcast durch die echte Pipeline:
+On the full podcast through the real pipeline:
 
-| | Wörter | Kommas/100 W | Satzenden/100 W |
+| | words | commas/100 w | sentence ends/100 w |
 |---|---|---|---|
-| Whisper (Referenz) | 4069 | 9,76 | 9,58 |
-| mini **alt** (1.2) | 3954 | 7,89 | 7,54 |
-| mini **neu** (1.0) | 4054 | **10,51** | 9,25 |
+| Whisper (reference) | 4069 | 9.76 | 9.58 |
+| mini **old** (1.2) | 3954 | 7.89 | 7.54 |
+| mini **new** (1.0) | 4054 | **10.51** | 9.25 |
 
-Aus dieser zweiten Tabelle stammt die Zahl „27 % aller Kommas": 3954 Wörter bei
-7,89 sind 312 Kommas, 4054 bei 10,51 sind 426.
+This second table is where the figure "27 % of all commas" comes from: 3954
+words at 7.89 are 312 commas, 4054 at 10.51 are 426.
 
-**Es gibt keinen belegten Standardwert.** Weder das Voxtral-Paper noch die
-Modellkarte nennen einen; Mistrals Referenzaufruf ist
-`TranscriptionRequest(model, audio, language, temperature=0.0)` ohne Strafe. Die
-1.1 in `mzbac/mlx.voxtral` steht in einem illustrativen Beispiel. Die Literatur
-erklärt den Konflikt: Die Strafe wirkt auf *alle* Tokens gleich und tauscht
-Wiederholungsunterdrückung gegen grammatische Flüssigkeit.
+**There is no documented default.** Neither the Voxtral paper nor the model
+card names one; Mistral's reference call is
+`TranscriptionRequest(model, audio, language, temperature=0.0)` with no
+penalty. The 1.1 in `mzbac/mlx.voxtral` sits in an illustrative example. The
+literature explains the conflict: the penalty acts on *all* tokens alike and
+trades repetition suppression for grammatical fluency.
 
-**Weitere Parameter:** Bei `temperature=0.0` (greedy) sind `top_p`/`top_k`/`min_p`
-wirkungslos — deshalb stört die Reparaturleiter den Decode über die Temperatur
-und nicht über sie. `logit_bias` funktioniert als echte Hotword-Steuerung (Token
-`'y'` +2 korrigierte „Mohnas" → „Mona's" ohne messbaren Kollateralschaden), ist
-aber kontextfrei und tokenisierungsabhängig — `Markus` ist ein einzelnes Token,
-`Mona` zerfällt in `[' Mon','a']`. Gebaut wurde stattdessen die
-Korrekturliste, die ganze Phrasen trifft.
+**Other parameters:** at `temperature=0.0` (greedy), `top_p`/`top_k`/`min_p`
+have no effect — which is why the repair ladder perturbs the decode through the
+temperature and not through them. `logit_bias` works as genuine hotword
+steering (token `'y'` +2 corrected "Mohnas" → "Mona's" with no measurable
+collateral damage), but it is context-free and tokenisation-dependent —
+`Markus` is a single token, `Mona` splits into `[' Mon','a']`. What was built
+instead is the correction list, which matches whole phrases.
 
 ---
 
-## 2. `max_new_tokens` — latenter Datenverlust
+## 2. `max_new_tokens` — latent data loss
 
-Deutsche Sprache erzeugt **4,64 Text-Tokens/s** (gemessen; das ist die Herkunft
-des Faktors 20 im Token-Budget). Das feste Limit von 4096 hätte jeden Pass über
-~15 min am Ende beschnitten:
+German speech produces **4.64 text tokens/s** (measured; that is where the
+factor 20 in the token budget comes from). The fixed limit of 4096 would have
+truncated the end of every pass over ~15 min:
 
-| Pass | gebraucht | altes Limit 4096 |
+| Pass | needed | old limit 4096 |
 |---|---|---|
 | 600 s | 2782 | ok |
-| 1006 s | ~4664 | **schneidet ab** |
-| 1500 s | ~6955 | schneidet ab |
+| 1006 s | ~4664 | **truncates** |
+| 1500 s | ~6955 | truncates |
 
-Die beiden langen Zeilen sind historisch: seit `TRUSTED_CHUNK_SEC` kappt die
-Automatik jeden Pass bei 600 s, weil Voxtral darüber hinaus nicht gemessen ist.
+The two long rows are historical: since `TRUSTED_CHUNK_SEC`, the automatic
+chunking caps every pass at 600 s, because Voxtral is not measured beyond that.
 
-Das Limit ist reine Schleifenbremse — es begrenzt nur die Generierungsschleife,
-der KVCache wächst aus den *tatsächlich* erzeugten Tokens. Ein hoher Wert
-reserviert **nichts**. Jetzt `min(32768, dauer*20 + 512)` = 4,3× Reserve. (Der
-greedy-Pfad läuft inzwischen über `mlx_lm.generate_step`, das Argument gilt
-dort genauso; nur die Strafen-Sprosse geht noch durch `mlx_voxtral.generate`.)
-Das Kontextfenster von ~32k bindet nicht: Audio kostet 12,6 Tokens/s, ein
-600-s-Pass also ~7,6k + ~2,8k Tokens.
-
----
-
-## 3. Sprache
-
-`language=None` (noScribes „Auto") fügt **keinen** `lang:`-Token ein — echtes
-Auto-Detect, kein heimliches Englisch-Default.
-
-**Achtung:** Eine *falsche* Sprachvorgabe lässt Voxtral **übersetzen** statt
-transkribieren — `language='en'` auf deutschem Audio liefert flüssiges Englisch.
-Deshalb wird die Sprache nur weitergegeben, wenn sie explizit gewählt wurde.
-
-Auto und `de` sind allerdings auch bei klarem Deutsch nicht austauschbar: an
-welcher Stelle der Unterschied auftaucht, zeigt §5 — dort kostet einmal die
-Vorgabe `de` die ersten ~150 Wörter, einmal die Auto-Erkennung den Vorlauf.
-
-*Das damals offene Restrisiko* — ein einzelner Pass kippt und übersetzt sich
-selbst — ist inzwischen abgesichert, und es brauchte dafür weder einen
-Whisper-Ladevorgang noch eine neue Abhängigkeit: ein Stoppwort- und
-Schriftzeichen-Detektor bestimmt die Sprache aus dem *Text*, zwei Chunks müssen
-sich einig sein, und ein übersetzter Pass wird zum Grund für die
-Reparaturleiter. Der Mechanismus und seine Feldmessungen stehen bei
-`_detect_language` / `_file_language` / `want_lang` in `voxtral_engine.py` und
-in den Tests dazu.
+The limit is purely a loop brake — it only bounds the generation loop; the
+KVCache grows from the tokens *actually* produced. A high value reserves
+**nothing**. Now `min(32768, duration*20 + 512)` = 4.3× headroom. (The greedy
+path now runs through `mlx_lm.generate_step`, where the same argument applies;
+only the penalty rung still goes through `mlx_voxtral.generate`.) The context
+window of ~32k is not binding: audio costs 12.6 tokens/s, so a 600-s pass is
+~7.6k + ~2.8k tokens.
 
 ---
 
-## 4. Wiederholungsschleifen
+## 3. Language
 
-Ohne Strafe kippte small auf einem 410-s-Pass in eine Schleife: **4099 identische
-Wörter**. Das war der Anlass; Erkennungsschwellen, Kalibrierkorpus und die
-Reihenfolge der Reparatur haben sich seither mehrfach geändert und stehen dort,
-wo sie gelten — bei `DEGENERATE_CYCLE_REPEATS` und in `_transcribe_guarded`.
+`language=None` (noScribe's "Auto") inserts **no** `lang:` token — genuine
+auto-detection, no hidden English default.
 
-Was hier bleibt, weil es eine *nicht* getroffene Entscheidung begründet: eine
-Strafe kann Schleife und Bedeutung nicht unterscheiden. 1.1 machte aus „wir
-können es dir **nicht nicht** erzählen" ein „… nicht erzählen" — der Satz kippt
-ins Gegenteil. Ein flüssig lesbarer, aber falscher Satz ist gefährlicher als
-offensichtlich kaputter Text. Deshalb steht die Strafe am *Ende* der Leiter und
-nicht am Anfang, und deshalb wird zuerst geteilt: der 410-s-Pass lieferte als
-2×205 s sauberen Text, inklusive des doppelten „nicht" und des echten
-vierfachen „Jetzt. Jetzt. Jetzt. Jetzt."
+**Caution:** a *wrong* language setting makes Voxtral **translate** instead of
+transcribe — `language='en'` on German audio yields fluent English. That is why
+the language is only passed on when it was chosen explicitly.
+
+Auto and `de` are nevertheless not interchangeable even on clearly German
+audio: §5 shows where the difference surfaces — there the `de` setting once
+costs the first ~150 words, and once the auto-detection costs the lead-in.
+
+*The residual risk that was open at the time* — a single pass flips and
+translates itself — has since been guarded against, and it took neither a
+Whisper load nor a new dependency: a stopword and script detector determines
+the language from the *text*, two chunks have to agree, and a translated pass
+becomes a reason for the repair ladder. The mechanism and its field
+measurements are at `_detect_language` / `_file_language` / `want_lang` in
+`voxtral_engine.py` and in the tests for them.
 
 ---
 
-## 5. Der verlorene Anfang eines Passes
+## 4. Repetition loops
 
-Ein langer Pass kommt manchmal **ohne seine ersten Sekunden Sprache** zurück —
-ohne Schleife, ohne falsche Sprache, ohne Spur im Log. Der Defekt, seine
-Häufigkeit und die Reparatur (`_recover_lost_head`) sind im Code beschrieben.
-Hier stehen die drei Dinge, die dort keinen Platz haben.
+Without a penalty, small tipped into a loop on a 410-s pass: **4099 identical
+words**. That was the trigger; detection thresholds, calibration corpus and
+the order of repair have changed several times since and live where they
+apply — at `DEGENERATE_CYCLE_REPEATS` and in `_transcribe_guarded`.
 
-**Erstens: es hängt am Ende des Fensters, nicht am Anfang.** Feiner Sweep bei
-Auto auf einem 20-Minuten-Video, dessen erste 2,4 s eine Bemerkung vor dem Take
-enthalten; der Anfang des Audios ist in allen sieben Läufen bitgleich, nur das
-Ende wandert:
+What stays here, because it justifies a decision that was *not* taken: a
+penalty cannot tell a loop from meaning. 1.1 turned "wir können es dir **nicht
+nicht** erzählen" ("we can't *not* tell you") into "… nicht erzählen" — the
+sentence flips into its opposite. A fluently readable but wrong sentence is
+more dangerous than visibly broken text. That is why the penalty sits at the
+*end* of the ladder and not at the start, and why splitting comes first: as
+2×205 s the 410-s pass produced clean text, including the doubled "nicht" and
+the genuine fourfold "Jetzt. Jetzt. Jetzt. Jetzt."
 
-| Fenster | 1180 | 1195 | 1205 | 1215 | 1220 | 1223 | 1226 |
+---
+
+## 5. The lost start of a pass
+
+A long pass sometimes comes back **without its first seconds of speech** — no
+loop, no wrong language, no trace in the log. The defect, its frequency and
+the repair (`_recover_lost_head`) are described in the code. Here are the three
+things that have no place there.
+
+**First: it depends on the end of the window, not the start.** Fine sweep on
+Auto over a 20-minute video whose first 2.4 s hold a remark before the take;
+the start of the audio is bit-identical in all seven runs, only the end moves:
+
+| Window | 1180 | 1195 | 1205 | 1215 | 1220 | 1223 | 1226 |
 |---|---|---|---|---|---|---|---|
-| Anfang | da | **weg** | da | da | da | da | **weg** |
+| Start | there | **gone** | there | there | there | there | **gone** |
 
-Nicht monoton, keine Schwelle — dieselbe Signatur wie beim Sprach-Kippen.
+Not monotonic, no threshold — the same signature as the language flip.
 
-**Zweitens: es liegt nicht an uns.** Damit sind die naheliegenden Gegenmittel
-widerlegt: kürzere Fenster (1195 verliert, 1223 nicht), Sprache pinnen (kippt in
-beide Richtungen — einmal kostete `lang:de` die ersten ~150 Wörter eines
-1426-s-Fensters), Stille voranstellen (0 von 6, und löste den Verlust in einem
-Test sogar aus). Auch referenzgenaue Audio-Features ändern nichts, und unsere
-Prompt-Tokens sind bitgleich mit `mistral_common`.
+**Second: it is not ours.** That refutes the obvious remedies: shorter windows
+(1195 loses, 1223 does not), pinning the language (flips in both directions —
+once `lang:de` cost the first ~150 words of a 1426-s window), prepending
+silence (0 of 6, and in one test it even triggered the loss). Reference-exact
+audio features change nothing either, and our prompt tokens are bit-identical
+with `mistral_common`.
 
-**Drittens, die Messfalle:** FLEURS taugt für diese Frage nicht. Dort ist der
-Anfang bei 120/300/450/600 s sauber — aber auch bei 1200 s, wo er es nicht sein
-dürfte. Die Positivkontrolle fällt durch, also sagen die sauberen Zeilen nichts.
-Wer das nachmisst, braucht Material, das den Defekt nachweislich zeigt; ein
-roher Zoom-Mitschnitt (4,8 h) tut es zuverlässig — auf ihm verlieren 5 von 64
-Fensterläufen (32 Fenster à 300 s und 600 s, je einmal auf Auto und auf `de`)
-ihren Anfang, im schlimmsten Fall 18 Wörter zusammenhängender Rede. Das ist
-die Zahl, die `VOXTRAL.md` zitiert; die Aufschlüsselung steht im Kommentar zu
-`_recover_lost_head`.
+**Third, the measurement trap:** FLEURS is no use for this question. There the
+start is clean at 120/300/450/600 s — but also at 1200 s, where it should not
+be. The positive control fails, so the clean rows say nothing. Anyone
+re-measuring this needs material that demonstrably shows the defect; a raw
+Zoom recording (4.8 h) does so reliably — on it, 5 of 64 window runs (32
+windows of 300 s and 600 s, each once on Auto and once on `de`) lose their
+start, in the worst case 18 words of continuous speech. That is the figure
+`VOXTRAL.md` cites; the breakdown is in the comment on `_recover_lost_head`.
 
 ---
 
-## 6. Was 8-bit small auf 32 GB verhindert (geprüft, verworfen)
+## 6. What rules out 8-bit small on 32 GB (checked, rejected)
 
-Der Sockel ist das Problem: **26,4 GB allein für die Gewichte**. Dazu ein
-zweiter, unabhängiger K.-o.: **0,80× Echtzeit**, also langsamer als die
-Aufnahme. Die Auswege sind in `voxtral-quantisierung.md` durchgemessen und
-abgehakt; zwei Rechnungen von hier tragen noch, weil sie erklären, *warum* sie
-so ausgingen.
+The base is the problem: **26.4 GB for the weights alone**. On top of that a
+second, independent knock-out: **0.80× real time**, i.e. slower than the
+recording. The ways out are measured through and ticked off in
+`voxtral-quantisation.md`; two calculations from here still stand because
+they explain *why* they came out that way.
 
-**Der KV-Cache ist viel kleiner als die Steigung.** Aus der Architektur
-gerechnet (`Schichten × 2 × KV-Köpfe × head_dim × Tokens`, Audio kostet
-12,6 Tokens/s):
+**The KV cache is much smaller than the slope.** Computed from the architecture
+(`layers × 2 × KV heads × head_dim × tokens`, audio costs 12.6 tokens/s):
 
-| | KV-Cache (bf16) | gemessene Steigung insgesamt |
+| | KV cache (bf16) | measured total slope |
 |---|---|---|
-| small, 300 s | 0,62 GB | 4,05 GB |
-| small, 1500 s | 3,10 GB | 20,3 GB |
-| mini, 600 s | 0,93 GB | 6,2 GB |
+| small, 300 s | 0.62 GB | 4.05 GB |
+| small, 1500 s | 3.10 GB | 20.3 GB |
+| mini, 600 s | 0.93 GB | 6.2 GB |
 
-Der KV-Cache macht nur **~15 %** der Steigung aus; der Rest entfällt auf den
-Audio-Encoder. Eine KV-Quantisierung kann den Peak deshalb kaum senken — die
-spätere Direktmessung zeigt sogar, dass sie ihn *hebt*.
+The KV cache accounts for only **~15 %** of the slope; the rest goes to the
+audio encoder. KV quantisation can therefore hardly lower the peak — the later
+direct measurement even shows that it *raises* it.
 
-**Bringen längere Pässe überhaupt Qualität?** Gemessen: 600-s-Einzelpass 10,87
-Kommas/100 W vs. 2×300 s 10,66 — praktisch gleich. Die Literatur stützt das: Es
-gibt ein *Optimum* der Chunk-Länge, das vom Training abhängt (Whisper 30 s,
-Distil-Whisper 15 s), nicht „je länger desto besser". Das reale Problem sind die
-**Grenzen** (abgeschnittene Satzbezüge, Sprecherwechsel an der Kante) — dagegen
-arbeiten pausen-ausgerichtete Schnitte plus Overlap bereits. Das ist der Beleg
-dafür, dass die 600-s-Kappe nichts kostet.
-
----
-
-## 7. Was aus den offenen Punkten wurde
-
-Alle fünf sind entschieden; die Liste bleibt, damit niemand sie ein zweites Mal
-aufmacht.
-
-- **mini 8-bit als Standard** — gebaut und registriert als `voxtral-mini-8bit`,
-  inzwischen die Empfehlung.
-- **small 8-bit** — gebaut und registriert als `voxtral-small-8bit`. Die Frage
-  „läuft es auf 32 GB?" ist beantwortet: nein, es braucht ~34 GB für seinen
-  kürzesten Pass und wird darunter vor dem Start abgelehnt.
-- **Sprach-Fixierung über mehrere Pässe** — gebaut, siehe §3. Rest-Lücke:
-  Chunks, die schon geschrieben waren, bevor die Dateisprache feststand,
-  bekommen nur eine Warnung mit ihrer Nummer.
-- **Voxtral-Mini-4B-Realtime** — **verworfen**, an Mistrals eigenen
-  FLEURS-Zahlen: Deutsch 6,19 % WER bei 480 ms, 4,15 % selbst bei 2,4 s
-  Verzögerung, gegen 3,54 % beim offline Mini 3B — ein kleineres Modell schlägt
-  es. Streaming tauscht Vorausschau gegen Latenz, und Latenz ist bei einer
-  Datei-Transkription wertlos.
-- **`voxtral-mini-2602` („Transcribe 2")** — weiterhin **API-only** und damit
-  für vertrauliche Interviews ungeeignet.
+**Do longer passes bring any quality at all?** Measured: single 600-s pass
+10.87 commas/100 w vs. 2×300 s 10.66 — practically equal. The literature
+supports this: there is an *optimum* chunk length that depends on the training
+(Whisper 30 s, Distil-Whisper 15 s), not "the longer the better". The real
+problem is the **boundaries** (cut-off sentence references, speaker changes at
+the edge) — pause-aligned cuts plus overlap already work against that. That is
+the evidence that the 600-s cap costs nothing.
 
 ---
 
-## 8. Reproduzieren
+## 7. What became of the open points
 
-Die Skripte liegen in `docs/skripte/`: `bitmatrix.py` (Tempo/Worttreue),
-`decisive.py` (Satzzeichen je Strafe), `rep_matrix.py` (Strafensprossen gegen
-das doppelte „nicht"), `split_retry.py` (Schleifenreparatur), `cli_check.py`
-(Formatprüfung). Die Konvertierung liegt als `tools/quantize_voxtral.py` im
-Repository.
+All five are decided; the list stays so that nobody opens them a second time.
 
-Die Arbeit dieser Messreihe liegt auf `feature/voxtral-engine`: die
-Decoding-Fixes (Strafe 1.0, Stop-Tokens, Token-Budget), die Namenskorrektur nur
-für Deutsch, die Schleifenerkennung, Teilen-statt-Strafe mit Eskalation ab 1.01
-und die konfigurierbare Speicherreserve. Frühere Fassungen dieser Datei nannten
-dafür sieben Commit-Kurz-IDs; die zeigen auf Objekte, die von keinem Branch mehr
-erreichbar sind, und sind deshalb ersatzlos entfernt.
+- **mini 8-bit as default** — built and registered as `voxtral-mini-8bit`, now
+  the recommendation.
+- **small 8-bit** — built and registered as `voxtral-small-8bit`. The question
+  "does it run on 32 GB?" is answered: no, it needs ~34 GB for its shortest
+  pass and is rejected before starting below that.
+- **Language pinning across several passes** — built, see §3. Remaining gap:
+  chunks that were already written before the file language was settled only
+  get a warning with their number.
+- **Voxtral-Mini-4B-Realtime** — **rejected**, on Mistral's own FLEURS figures:
+  German 6.19 % WER at 480 ms, 4.15 % even at 2.4 s delay, against 3.54 % for
+  the offline Mini 3B — a smaller model beats it. Streaming trades lookahead
+  for latency, and latency is worthless in a file transcription.
+- **`voxtral-mini-2602` ("Transcribe 2")** — still **API-only** and therefore
+  unsuitable for confidential interviews.
+
+---
+
+## 8. Reproducing
+
+The scripts are in `docs/scripts/`: `bitmatrix.py` (speed/word fidelity),
+`decisive.py` (punctuation per penalty), `rep_matrix.py` (penalty rungs against
+the doubled "nicht"), `split_retry.py` (loop repair), `cli_check.py` (format
+check). The conversion is in the repository as `tools/quantize_voxtral.py`.

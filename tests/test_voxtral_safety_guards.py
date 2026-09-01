@@ -1,8 +1,8 @@
-"""Die Schutzgeländer vor dem Modell-Laden -- und die des Salvage-Schnitts.
+"""The guard rails before model loading -- and those of the salvage cut.
 
-Gemeinsam ist ihnen, dass ein Fehler hier nicht abstürzt, sondern die Maschine
-in den Swap schickt, den Job nie fertig werden lässt, oder Sprache aus dem
-Transkript entfernt, ohne dass es im Log anders aussieht als ein guter Lauf.
+What they have in common is that a mistake here does not crash: it sends the
+machine into swap, never lets the job finish, or removes speech from the
+transcript, without the log looking any different from a good run.
 """
 import numpy as np
 import pytest
@@ -18,8 +18,8 @@ from noScribe.voxtral_engine import (
 
 
 class _StopRun(Exception):
-    """Der gestubbte Modell-Konstruktor wirft das: beweist, dass der Lauf genau
-    bis zum Modell-Laden kam und keinen Schritt weiter."""
+    """The stubbed model constructor raises this: proves that the run got
+    exactly as far as model loading and not one step further."""
 
 
 def _tiny_wav(tmp_path):
@@ -30,7 +30,7 @@ def _tiny_wav(tmp_path):
 
 
 def _sized(monkeypatch, tmp_path, ram=32.0, **kw):
-    """transcribe() bis zum Modell-Laden treiben und die Logzeilen einsammeln."""
+    """Drive transcribe() up to model loading and collect the log lines."""
     def stop(repo):
         raise _StopRun
 
@@ -44,30 +44,29 @@ def _sized(monkeypatch, tmp_path, ram=32.0, **kw):
 
 
 # --------------------------------------------------------------------------- #
-# Speicher-Profil eines Builds
+# Memory profile of a build
 # --------------------------------------------------------------------------- #
 def test_a_24b_build_without_a_bit_width_is_metered_conservatively():
-    """`small` ist das 4-Bit-Profil und damit das billigste der drei 24B-
-    Einträge. Ein unquantisierter oder 6-Bit-Ordner ohne Bitbreite im Namen
-    landete darauf und bekam mehrere hundert Sekunden lange Durchgänge für
-    Gewichte, die 25-48 GB brauchen -- der Lauf swappt dann endlos, statt
-    abgelehnt zu werden."""
+    """`small` is the 4-bit profile and therefore the cheapest of the three 24B
+    entries. An unquantised or 6-bit folder without a bit width in its name
+    landed on it and got passes several hundred seconds long for weights that
+    need 25-48 GB -- the run then swaps endlessly instead of being refused."""
     assert _model_kind("models/Voxtral-Small-24B-2507") == "small8"
     assert _model_kind("my-voxtral-24b") == "small8"
-    # Mit ausdrücklicher Bitbreite bleibt alles wie gehabt.
+    # With an explicit bit width everything stays as it was.
     assert _model_kind("voxtral-small-4bit") == "small"
     assert _model_kind("voxtral-small-6bit") == "small6"
     assert _model_kind("voxtral-small-8bit") == "small8"
-    # Die mini-Seite war nie betroffen: ohne Bitbreite trifft sie das teurere
-    # bf16-Profil, also die sichere Richtung.
+    # The mini side was never affected: without a bit width it hits the more
+    # expensive bf16 profile, i.e. the safe direction.
     assert _model_kind("models/Voxtral-Mini-3B-2507") == "mini"
     assert _model_kind("voxtral-mini-8bit") == "mini8"
 
 
 def test_an_unquantised_source_release_is_refused_by_path_too(monkeypatch, tmp_path):
-    """Die Sperre verglich nur die vollständige Hub-Repo-ID. Eine lokale Kopie
-    unter models/ ist aber ein Dateipfad -- also genau der Build, den die Sperre
-    aufhalten soll, kam an ihr vorbei."""
+    """The block only compared the full Hub repo ID. A local copy under
+    models/ is a file path, though -- so exactly the build the block is meant
+    to stop got past it."""
     def stop(repo):
         raise _StopRun
 
@@ -82,18 +81,18 @@ def test_an_unquantised_source_release_is_refused_by_path_too(monkeypatch, tmp_p
 
 
 # --------------------------------------------------------------------------- #
-# Angehefteter chunk_sec
+# Pinned chunk_sec
 # --------------------------------------------------------------------------- #
 def test_a_sub_second_pinned_chunk_sec_cannot_collapse_the_passes(monkeypatch, tmp_path):
-    """int() macht aus allem unter 1 s eine 0, und max(1, 0 * SAMPLE_RATE) macht
-    daraus einen Durchgang von EINEM Sample: eine 2-Minuten-Datei zerfiel in
-    2401 Voxtral-Dekodierungen à 50 ms, der Job wurde nie fertig. Die
-    Untergrenze galt bisher nur im automatischen Pfad."""
+    """int() turns anything below 1 s into 0, and max(1, 0 * SAMPLE_RATE)
+    turns that into a pass of ONE sample: a 2-minute file fell apart into 2401
+    Voxtral decodes of 50 ms each, and the job never finished. Until now the
+    floor applied only on the automatic path."""
     logs = _sized(monkeypatch, tmp_path, chunk_sec=0.5,
                   voxtral_repo="models/voxtral-mini-8bit")
     assert any(lvl == "warn" and "below the" in msg and "minimum" in msg
                for lvl, msg in logs), logs
-    # ...und die alte, irreführende Begründung ist weg.
+    # ...and the old, misleading justification is gone.
     assert not any("more context than the model has" in msg for _, msg in logs), logs
 
 
@@ -104,7 +103,7 @@ def test_a_pinned_chunk_sec_below_the_floor_is_lifted(monkeypatch, tmp_path):
 
 
 def test_a_sane_pinned_chunk_sec_is_left_alone(monkeypatch, tmp_path):
-    """Gegenprobe: ein brauchbarer Wert darf keine Warnung auslösen."""
+    """Counter-check: a usable value must not trigger a warning."""
     logs = _sized(monkeypatch, tmp_path, chunk_sec=600,
                   voxtral_repo="models/voxtral-mini-8bit")
     assert not any(lvl == "warn" and "voxtral_chunk_sec" in msg
@@ -112,7 +111,7 @@ def test_a_sane_pinned_chunk_sec_is_left_alone(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Worauf der Salvage-Schnitt sich stützen darf
+# What the salvage cut may rely on
 # --------------------------------------------------------------------------- #
 LOOP_TEXT = ("Wir haben gestern lange über die eigentlichen Ziele gesprochen. "
              "Danach kam ziemlich unvermittelt die Frage nach den Werten auf. "
@@ -121,10 +120,10 @@ LOOP_TEXT = ("Wir haben gestern lange über die eigentlichen Ziele gesprochen. "
 
 
 def _stamps(words, real_tail, step=4.0):
-    """Ein Wort alle `step` Sekunden -- weit genug, dass der Präfix über
-    SALVAGE_MIN_PREFIX_SEC liegt und die Kürze-Schranke nicht zuerst greift.
-    `real_tail` bestimmt, ob das LETZTE Wort wirklich ausgerichtet wurde oder
-    nur eine Schätzung ist."""
+    """One word every `step` seconds -- far enough apart that the prefix lies
+    above SALVAGE_MIN_PREFIX_SEC and the shortness bound does not fire first.
+    `real_tail` decides whether the LAST word was really aligned or is only
+    an estimate."""
     out = [{"word": w, "start": i * step, "end": (i + 1) * step, "prob": -0.1}
            for i, w in enumerate(words)]
     if not real_tail:
@@ -133,11 +132,11 @@ def _stamps(words, real_tail, step=4.0):
 
 
 def test_salvage_refuses_a_cut_taken_from_an_invented_timestamp():
-    """Geprüft wurde mit any() über den ganzen Präfix -- ein einziges echt
-    ausgerichtetes Wort genügte. Geschnitten wird aber ausschliesslich auf dem
-    LETZTEN Zeitstempel. War dessen Zeit geraten (gleichverteilte oder
-    interpolierte Wörter am Ende), landete der Wiedereinstieg gemessen 27 s zu
-    spät, und die Sprache dazwischen fiel aus dem Transkript."""
+    """The check used any() over the whole prefix -- a single genuinely
+    aligned word was enough. The cut, however, is taken exclusively on the
+    LAST timestamp. When that time was guessed (evenly spread or interpolated
+    words at the end), the resume point landed a measured 27 s too late, and
+    the speech in between fell out of the transcript."""
     audio = np.zeros(200 * SAMPLE_RATE, dtype=np.float32)
 
     good, why = _salvage_prefix(
@@ -151,24 +150,24 @@ def test_salvage_refuses_a_cut_taken_from_an_invented_timestamp():
 
 
 def test_salvage_still_refuses_a_fully_spread_alignment():
-    """Der ältere Fall bleibt erhalten, samt seiner Begründung im Log."""
+    """The older case is kept, together with its justification in the log."""
     audio = np.zeros(200 * SAMPLE_RATE, dtype=np.float32)
     spread = lambda w, a: [{"word": x, "start": float(i), "end": float(i + 1),
                             "prob": 0.0} for i, x in enumerate(w)]
     out, why = _salvage_prefix(LOOP_TEXT, audio, spread)
-    # Gleichverteilte Zeiten sind reine Schätzung; die Begründung muss das
-    # benennen, sonst ist eine abgelehnte Rettung im Log nicht von einer
-    # Sprosse zu unterscheiden, die nie gelaufen ist.
+    # Evenly spread times are pure guesswork; the justification has to name
+    # that, otherwise a refused salvage cannot be told in the log from a rung
+    # that never ran.
     assert out is None and "even guess" in why
 
 
 def test_a_degenerate_prefix_is_not_shipped_as_a_success():
-    """Der `rest_sec < 1.0`-Ausgang war der einzige Erfolgsausgang der Leiter
-    ohne Degenerations-Prüfung: ein Präfix, das selbst noch schleift, ging als
-    fertiges Ergebnis durch und eskalierte nie."""
+    """The `rest_sec < 1.0` exit was the only success exit of the ladder
+    without a degeneracy check: a prefix that is still looping itself passed
+    as a finished result and never escalated."""
     audio = np.zeros(200 * SAMPLE_RATE, dtype=np.float32)
-    # Ein Präfix, dessen Satz sich wortwörtlich wiederholt (Kompressionsarm des
-    # Detektors), gefolgt von einer kurzen Zyklus-Schleife.
+    # A prefix whose sentence repeats verbatim (the compression arm of the
+    # detector), followed by a short cycle loop.
     sentence = "Und dann sagte sie genau dasselbe noch ein weiteres Mal dazu. "
     text = (sentence * 60 + "dass das, " * 40).strip()
 
@@ -182,8 +181,8 @@ def test_a_degenerate_prefix_is_not_shipped_as_a_success():
             return text if len(calls) == 1 else "Ein sauberer zweiter Versuch."
 
     def _align_to_the_very_end(words, window):
-        # Letztes Wort echt ausgerichtet, aber praktisch am Fensterende ->
-        # rest_sec < 1.0, also der fragliche Ausgang.
+        # Last word really aligned, but practically at the window end ->
+        # rest_sec < 1.0, i.e. the exit in question.
         n = len(words)
         step = (len(window) / SAMPLE_RATE) / n
         return [{"word": w, "start": i * step, "end": (i + 1) * step,
@@ -194,5 +193,5 @@ def test_a_degenerate_prefix_is_not_shipped_as_a_success():
                               lambda lvl, msg: logs.append(msg), "Pass 1/1",
                               align_cb=_align_to_the_very_end)
     assert not v._looks_degenerate(out), out[:120]
-    assert len(calls) > 1, "die Leiter hat nach dem Präfix nicht weitergemacht"
+    assert len(calls) > 1, "the ladder did not carry on after the prefix"
     assert any("still looks degenerate" in m for m in logs), logs

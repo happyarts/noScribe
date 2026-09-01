@@ -33,6 +33,36 @@ def test_load_corrections_missing_file():
     assert tc.load_corrections("/nonexistent/corrections.yml") == []
 
 
+def test_load_corrections_unparsable_file_is_reported_not_raised(tmp_path, caplog):
+    """A hand-edited file with a YAML error must not crash the job: the loader
+    warns and the run continues without corrections."""
+    f = tmp_path / "corrections.yml"
+    f.write_text("- to: [unclosed\n", encoding="utf-8")
+    assert tc.load_corrections(str(f)) == []
+    assert "Could not read corrections file" in caplog.text
+
+
+def test_load_corrections_rejects_a_non_list_root(tmp_path, caplog):
+    """The format is a list of entries; a bare mapping is the likeliest typo."""
+    f = tmp_path / "corrections.yml"
+    f.write_text("to: VitaFlor\nfrom: vitaflor\n", encoding="utf-8")
+    assert tc.load_corrections(str(f)) == []
+    assert "must contain a list" in caplog.text
+
+
+def test_longest_pattern_wins_within_an_entry(tmp_path):
+    """Patterns are tried longest first, so a phrase is not eaten by its own
+    prefix: "vita flor oil" must not become "VitaFlor oil"."""
+    f = tmp_path / "corrections.yml"
+    f.write_text(
+        "- to: VitaFlor-Oil\n"
+        "  from: ['vita flor', 'vita flor oil']\n",
+        encoding="utf-8",
+    )
+    rules = tc.load_corrections(str(f))
+    assert tc.apply_corrections("take vita flor oil daily", rules) == "take VitaFlor-Oil daily"
+
+
 def test_default_template_has_no_active_rules(tmp_path):
     """The shipped file is a commented template: it must not rewrite anything."""
     path = tc.ensure_default_file(str(tmp_path))
@@ -570,8 +600,8 @@ def test_no_salvage_when_alignment_only_spread_the_words():
                               align_cb=_align_by_spreading)
     assert not _looks_degenerate(out)
     assert vox.calls[:2] == [200, 200]     # no salvage; the full retry happened
-    # ...und im Log steht der Grund, damit eine abgelehnte Rettung von einer
-    # Sprosse zu unterscheiden ist, die gar nicht erst lief
+    # ...and the log states the reason, so a refused salvage can be told from
+    # a rung that never ran at all
     assert any("cannot keep the clean part" in m and "even guess" in m
                for m in logged), logged
 
@@ -612,9 +642,9 @@ ENGLISH_PREFIX = (
 
 
 class _TranslatesThenLoops:
-    """Der gemessene Fall aus Lauf 7: der Greedy-Durchgang übersetzt das Fenster
-    ins Englische und schleift dann; jeder kürzere Durchgang kommt deutsch
-    zurück. Genau dieser Durchgang ist der, den die Präfix-Sprosse behält."""
+    """The measured case from run 7: the greedy pass translates the window
+    into English and then loops; every shorter pass comes back German. That
+    very pass is the one the prefix rung keeps."""
 
     def __init__(self):
         self.calls = []
@@ -630,17 +660,17 @@ class _TranslatesThenLoops:
 
 
 def test_a_translated_prefix_is_not_stitched_onto_a_german_remainder():
-    """Voxtral übersetzt gelegentlich, statt zu transkribieren. Alle anderen
-    Sprossen werfen so einen Durchgang weg und dekodieren neu -- was die
-    Übersetzung nebenbei repariert. Die Präfix-Sprosse ist die einzige, die ihn
-    BEHÄLT, also muss sie hinsehen: gemessen (Lauf 7) blieben die ersten 902 s
-    eines Chunks englisch, während der neu transkribierte Rest deutsch war, und
-    das Transkript wechselte mitten im Chunk die Sprache."""
+    """Voxtral occasionally translates instead of transcribing. All other
+    rungs throw such a pass away and decode afresh -- which repairs the
+    translation as a side effect. The prefix rung is the only one that KEEPS
+    it, so it has to look: measured (run 7), the first 902 s of a chunk stayed
+    English while the freshly transcribed remainder was German, and the
+    transcript switched language in the middle of the chunk."""
     from noScribe.voxtral_engine import (_transcribe_guarded, _detect_language,
                                          _looks_degenerate)
 
-    # Testaufbau: die beiden Hälften müssen wirklich verschieden erkannt werden,
-    # sonst prüft der Test nichts.
+    # Test setup: the two halves really have to be detected as different,
+    # otherwise the test checks nothing.
     assert _detect_language(ENGLISH_PREFIX)[0] == "en"
     assert _detect_language(CLEAN_PREFIX)[0] == "de"
 
@@ -652,46 +682,46 @@ def test_a_translated_prefix_is_not_stitched_onto_a_german_remainder():
 
     assert not _looks_degenerate(out)
     assert _detect_language(out)[0] == "de", \
-        "das englische Präfix wurde ins Ergebnis geheftet"
+        "the English prefix was stitched into the result"
     assert "welcome" not in out.lower() and "yesterday" not in out.lower()
-    # ...und der Grund steht im Log, sonst sieht es aus wie ein gewöhnlicher Loop
+    # ...and the reason is in the log, otherwise it looks like an ordinary loop
     assert any("translated pass" in m for m in logged), logged
 
 
 def test_a_salvage_whose_halves_agree_is_still_kept():
-    """Gegenprobe: der Wächter vergleicht Präfix gegen Rest, nicht gegen die
-    eingestellte Sprache. Deutsch-englisch gemischte Sprecher sind in diesem
-    Material der Normalfall -- ein Wächter, der gegen die Einstellung prüft,
-    würde gute Rettungen reihenweise ablehnen."""
+    """Counter-check: the guard compares prefix against remainder, not against
+    the configured language. Speakers mixing German and English are the
+    normal case in this material -- a guard that checked against the setting
+    would refuse good salvages by the dozen."""
     from noScribe.voxtral_engine import _transcribe_guarded
 
     vox = _LoopsLateVoxtral()
     out = _transcribe_guarded(vox, _fake_audio(200), "en", None, "Pass 1/1",
                               align_cb=_align_one_word_per_second)
-    assert out.startswith(CLEAN_PREFIX[:40])      # gerettet, obwohl 'en' gesetzt
-    assert vox.calls[:2] == [200, 104]            # Präfix behalten, Rest neu
+    assert out.startswith(CLEAN_PREFIX[:40])      # salvaged although 'en' is set
+    assert vox.calls[:2] == [200, 104]            # prefix kept, remainder redone
 
 
 # --------------------------------------------------------------------------- #
-# Ein ganzer Chunk kommt in der falschen Sprache zurück
+# A whole chunk comes back in the wrong language
 # --------------------------------------------------------------------------- #
 def test_one_chunk_never_establishes_the_files_language():
-    """Der gefährlichste Fehlgriff wäre, die Sprache des ERSTEN Chunks als
-    Wahrheit zu nehmen: ist genau der der übersetzte, würde jeder folgende
-    Chunk in die falsche Sprache 'repariert'. Zwei müssen sich einig sein."""
+    """The most dangerous mistake would be to take the language of the FIRST
+    chunk as the truth: if that is the translated one, every following chunk
+    would be 'repaired' into the wrong language. Two have to agree."""
     from noScribe.voxtral_engine import _file_language
 
     assert _file_language({}) is None
-    assert _file_language({"en": 1}) is None            # der Ausreißer allein
-    assert _file_language({"en": 1, "de": 1}) is None   # Patt entscheidet nichts
+    assert _file_language({"en": 1}) is None            # the outlier alone
+    assert _file_language({"en": 1, "de": 1}) is None   # a tie decides nothing
     assert _file_language({"en": 1, "de": 2}) == "de"
     assert _file_language({"de": 5, "en": 1}) == "de"
 
 
 class _TranslatesWithoutLooping:
-    """Der gemessene Fall aus den Läufen 1-4: der Greedy-Durchgang kommt
-    englisch zurück, ohne jeden Loop. Erst ein Versuch mit Temperatur liefert
-    Deutsch."""
+    """The measured case from runs 1-4: the greedy pass comes back English,
+    without any loop at all. Only an attempt with temperature yields
+    German."""
 
     def __init__(self):
         self.calls = []
@@ -704,14 +734,14 @@ class _TranslatesWithoutLooping:
 
 
 def test_a_translated_pass_makes_the_ladder_run_even_without_a_loop():
-    """Eine Übersetzung ist genauso unbrauchbar wie ein Loop und bekommt
-    dieselben Reparaturen -- der Fall braucht keine zweite Leiter daneben.
-    Gemessen: `lang:de` in den Prompt zu schreiben holte 0 von 2 gekippten
-    Fenstern zurück, ein Temperatur-Versuch beide."""
+    """A translation is just as unusable as a loop and gets the same repairs
+    -- the case needs no second ladder alongside. Measured: writing `lang:de`
+    into the prompt brought back 0 of 2 flipped windows, one temperature
+    attempt brought back both."""
     from noScribe.voxtral_engine import (_transcribe_guarded, _detect_language,
                                          _looks_degenerate)
 
-    assert _detect_language(ENGLISH_PREFIX)[0] == "en"   # Testaufbau
+    assert _detect_language(ENGLISH_PREFIX)[0] == "en"   # test setup
     logged = []
     vox = _TranslatesWithoutLooping()
     out = _transcribe_guarded(vox, _fake_audio(200), "de",
@@ -719,15 +749,15 @@ def test_a_translated_pass_makes_the_ladder_run_even_without_a_loop():
                               want_lang="de")
 
     assert not _looks_degenerate(out)
-    assert _detect_language(out)[0] == "de", "die Übersetzung wurde ausgeliefert"
+    assert _detect_language(out)[0] == "de", "the translation was shipped"
     assert vox.calls[:2] == [0.0, 0.2], vox.calls
     assert any("translated pass" in m for m in logged), logged
 
 
 def test_without_an_expected_language_nothing_is_called_translated():
-    """Gegenprobe: solange die Datei nicht gesagt hat, was sie ist, darf kein
-    Durchgang wegen seiner Sprache verworfen werden -- sonst entscheidet der
-    erste Chunk über alle folgenden."""
+    """Counter-check: as long as the file has not said what it is, no pass may
+    be discarded because of its language -- otherwise the first chunk decides
+    for all that follow."""
     from noScribe.voxtral_engine import _transcribe_guarded
 
     vox = _TranslatesWithoutLooping()
@@ -736,10 +766,10 @@ def test_without_an_expected_language_nothing_is_called_translated():
 
 
 def test_a_seam_between_two_languages_is_refused():
-    """Beide Sprossen, die ein Fenster reparieren, nähen zwei getrennt erzeugte
-    Hälften zusammen. Kippt eine davon ins Englische, wechselt das Transkript
-    mitten im Chunk die Sprache -- gemessen in Lauf 7, wo der behaltene Präfix
-    902 s Englisch war und der neu transkribierte Rest deutsch."""
+    """Both rungs that repair a window sew together two separately produced
+    halves. If one of them flips into English, the transcript switches
+    language in the middle of the chunk -- measured in run 7, where the kept
+    prefix was 902 s of English and the freshly transcribed remainder German."""
     from noScribe.voxtral_engine import _halves_disagree
 
     logged = []
@@ -747,48 +777,33 @@ def test_a_seam_between_two_languages_is_refused():
     assert _halves_disagree(ENGLISH_PREFIX, CLEAN_PREFIX, log, "Chunk 1/15",
                             "the kept part", "the remainder")
     assert any("translated pass" in m for m in logged), logged
-    # Gleiche Sprache auf beiden Seiten, und zu kurz zum Urteilen: beides still.
+    # Same language on both sides, and too short to judge: both stay silent.
     assert not _halves_disagree(CLEAN_PREFIX, CLEAN_PREFIX, log, "x", "a", "b")
     assert not _halves_disagree(CLEAN_PREFIX, "Ja, genau.", log, "x", "a", "b")
 
 
 def test_transcribe_asks_the_ladder_for_a_language():
-    """Verdrahtung: der Fall aus den Läufen 1-4 hatte GAR KEINEN Loop. Die
-    Erwartung muss deshalb in die Leiter hinein, nicht danach geprüft werden."""
+    """Wiring: the case from runs 1-4 had NO loop AT ALL. The expectation
+    therefore has to go into the ladder, not be checked afterwards."""
     import inspect
     from noScribe import voxtral_engine as v
 
     src = inspect.getsource(v.transcribe)
-    assert "want_lang=want" in src, "die Leiter erfährt die erwartete Sprache nicht"
-    assert "_file_language(" in src, "die Dateisprache wird nicht bestimmt"
-    # ...und was vor dem Bekanntwerden der Sprache schon rausging, wird benannt.
+    assert "want_lang=want" in src, "the ladder is not told the expected language"
+    assert "_file_language(" in src, "the file language is not determined"
+    # ...and whatever went out before the language became known is named.
     assert "already written out" in src
 
 
 def test_remembered_model_survives_the_decorated_picker():
-    """Die Modellauswahl wird als Klarname gespeichert, nicht als Anzeigetext.
+    """The model choice is stored as its plain name, not as the display text.
 
-    Der Picker zeigt "name   ·   N GB RAM"; beim Start wird der gemerkte Wert in
-    whisper_models nachgeschlagen, wo nur Klarnamen stehen. Ein Merge hatte den
-    model_key()-Aufruf verloren, womit die Wahl beim nächsten Start still
-    vergessen worden wäre."""
+    The picker shows "name   ·   N GB RAM"; at start-up the remembered value is
+    looked up in whisper_models, which holds plain names only. A merge had lost
+    the model_key() call, which would have silently forgotten the choice at
+    the next start."""
     import inspect
     import noScribe.main as m
 
     src = inspect.getsource(m.App.save_ui_state)
-    assert "self.model_key(" in src, "save_ui_state speichert den Anzeigetext"
-
-
-def test_build_stamp_extends_the_version_without_replacing_it():
-    """Der Transkript-Kopf soll zeigen, welcher Build ihn erzeugt hat.
-
-    Die reine app_version ist zwischen zwei Releases identisch und sagt bei
-    einem Arbeitsbaum, der sich mehrmals täglich ändert, nichts aus. Wichtig:
-    app_version selbst bleibt unangetastet -- sie wird im Update-Check gegen
-    die veröffentlichte Version verglichen."""
-    import noScribe.main as m
-
-    stamp = m.local_build_stamp()
-    assert stamp.startswith(m.app_version)      # Version zuerst, dann Herkunft
-    assert 'MK' in stamp
-    assert m.app_version == '0.7.2'             # unverändert für version_higher
+    assert "self.model_key(" in src, "save_ui_state stores the display text"

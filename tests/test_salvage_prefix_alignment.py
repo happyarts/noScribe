@@ -1,26 +1,26 @@
-"""Die Audiozeit, an der ein sauberer Präfix endet -- zuverlässig bestimmt.
+"""The audio time at which a clean prefix ends -- determined reliably.
 
-Der Präfix-Erhalt der Loop-Leiter braucht genau eine Zahl: wo im Audio der
-saubere Teil aufhört. Zwei Dinge stehen dem im Weg, beide an echten Emissionen
-nachgemessen (300 s Deutsch, Grundwahrheit aus dem Greedy-Decode desselben
-Aligners, also frame-genau bekannt):
+Keeping the prefix in the loop ladder needs exactly one number: where in the
+audio the clean part stops. Two things stand in the way, both measured on real
+emissions (300 s of German, ground truth from the greedy decode of the same
+aligner, so known to the frame):
 
-1. **Reine Ausrichtung kann nicht früh aufhören.** Ein CTC-Pfad muss jeden
-   Frame belegen, und über 215 s echter Sprache auf Blank zu parken kostet mehr
-   (-21905), als die letzten Präfix-Wörter darüber zu ziehen. Also tut der
-   wahrscheinlichste Pfad genau das: ein 85-s-Präfix endete bei 299.98 s eines
-   300-s-Fensters -- mit tadellosem Score (-0.000), weshalb kein nachgelagerter
-   Wächter das je hätte sehen können. Es ist keine Willkür des Tie-Breaks, der
-   verschobene Pfad gewinnt um 802 nat. Gegenmittel ist das Star-Token aus dem
-   MMS-/torchaudio-Rezept für Teiltranskripte.
-2. **Ein grosses Fenster reisst FORCED_ALIGN_MAX_CELLS.** Die Antwort von
-   `align_words` darauf -- Wörter halbieren, Audio nach ihrem Zeichenanteil
-   schneiden -- ist für einen Präfix unzulässig (gemessen: Wiederaufsetzpunkt
-   152 s zu spät, diese Sprache fiel aus dem Transkript). `align_prefix`
-   schneidet deshalb die WÖRTER und gibt jedem Stück das gesamte Restaudio.
+1. **Pure alignment cannot stop early.** A CTC path has to occupy every frame,
+   and parking on blank across 215 s of real speech costs more (-21905) than
+   dragging the last prefix words across it. So the most probable path does
+   exactly that: an 85 s prefix ended at 299.98 s of a 300 s window -- with an
+   immaculate score (-0.000), which is why no downstream guard could ever have
+   seen it. Nor is it an arbitrary tie-break: the shifted path wins by 802
+   nat. The remedy is the star token from the MMS/torchaudio recipe for
+   partial transcripts.
+2. **A large window breaks FORCED_ALIGN_MAX_CELLS.** The answer `align_words`
+   gives to that -- halve the words, cut the audio by their character share --
+   is inadmissible for a prefix (measured: resume point 152 s too late, that
+   speech fell out of the transcript). `align_prefix` therefore cuts the WORDS
+   and gives each piece the entire remaining audio.
 
-Die Sprosse war dadurch nicht nur begrenzt (1500-s-Fenster: Präfixe bis
-~440 s), sie schnitt in dem Band, in dem sie feuerte, an der falschen Stelle.
+This left the rung not only limited (1500 s window: prefixes up to ~440 s), it
+also cut in the wrong place in the very band where it fired.
 """
 import numpy as np
 import pytest
@@ -36,11 +36,11 @@ from noScribe.voxtral_engine import (  # noqa: E402
 )
 
 VOCAB_SIZE = 30
-FPS = 50.0                      # 16 kHz / 320 samples je Frame
+FPS = 50.0                      # 16 kHz / 320 samples per frame
 
 
 def _stub_aligner(emission_frames):
-    """Aligner ohne Gewichte: echte Auswahl-/Ketten-Logik, gestellte Emission."""
+    """Aligner without weights: real selection/chain logic, staged emission."""
     al = object.__new__(_Aligner)
     al.vocab = {ch: i + 1 for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz")}
     al.blank = 0
@@ -49,15 +49,15 @@ def _stub_aligner(emission_frames):
     return al
 
 
-_ALPHA = "abcdefghijklmnopqrstuvwxy"      # 'z' bleibt dem Fremdmaterial
+_ALPHA = "abcdefghijklmnopqrstuvwxy"      # 'z' is reserved for the foreign material
 
 
 def _words(n):
-    """`n` möglichst unterschiedliche Wörter.
+    """`n` words, as different from one another as possible.
 
-    Wichtig für die Beweisführung: wiederholt sich der Wortlauf, hat die
-    Ausrichtung mehrere gleich gute Pfade und der "wahre" Zeitpunkt ist gar
-    nicht bestimmt -- der Test misst dann nur noch die Willkür des Tie-Breaks.
+    Important for the proof: if the wording repeats, the alignment has several
+    equally good paths and the "true" time is not determined at all -- the
+    test then measures nothing but the arbitrariness of the tie-break.
     """
     return [_ALPHA[i % 25] + _ALPHA[(i // 25) % 25] + _ALPHA[(i * 7) % 25]
             + _ALPHA[(i * 11 + 3) % 25] + _ALPHA[(i * 17 + 5) % 25]
@@ -65,31 +65,31 @@ def _words(n):
 
 
 def _planted(al, words, n_frames, frames_per_char=2):
-    """Emission, in der `words` wirklich am Anfang des Audios stehen -- und in
-    der DANACH weitergesprochen wird.
+    """Emission in which `words` really stand at the start of the audio -- and
+    in which speech CONTINUES afterwards.
 
-    Der zweite Teil ist der entscheidende: hinter dem Präfix liegt im echten
-    Fall keine Stille, sondern der Rest des Fensters. Auf Blank zu parken ist
-    dort teuer, und genau deshalb zieht die reine Ausrichtung die letzten
-    Präfix-Wörter über das Restaudio (an echten Emissionen nachgerechnet: der
-    verschobene Pfad gewinnt um 802 nat, das ist keine Willkür des
-    Tie-Breaks). Rückgabe: (Emission, wahres Ende des letzten Wortes).
+    The second part is the decisive one: in the real case, what lies behind
+    the prefix is not silence but the rest of the window. Parking on blank is
+    expensive there, and that is exactly why pure alignment drags the last
+    prefix words across the remaining audio (recomputed on real emissions:
+    the shifted path wins by 802 nat, that is no arbitrariness of the
+    tie-break). Returns: (emission, true end of the last word).
     """
     path = [al.blank] * n_frames
-    f = int(1.0 * FPS)                       # ein bisschen Vorlauf
+    f = int(1.0 * FPS)                       # a little lead-in
     for w in words:
         for ch in w:
             for _ in range(frames_per_char):
                 path[f] = al.vocab[ch]
                 f += 1
-            path[f] = al.blank               # Blank zwischen gleichen Labels
+            path[f] = al.blank               # blank between identical labels
             f += 1
-        f += 2                               # Wortlücke
+        f += 2                               # word gap
     true_end = (f - 3) / FPS
-    # Restaudio: durchgehend Sprache, kein Blank -- sonst kostet das
-    # Nicht-Abdecken nichts und der Fehler tritt gar nicht erst auf. Und
-    # abwechslungsreich, denn genau daher bezieht der verschobene Pfad seinen
-    # Vorteil: er findet für jedes Wort irgendwo hinten passende Buchstaben.
+    # Remaining audio: continuous speech, no blank -- otherwise not covering it
+    # costs nothing and the defect never occurs in the first place. And varied,
+    # because that is exactly where the shifted path draws its advantage from:
+    # for every word it finds matching letters somewhere further back.
     for n, g in enumerate(range(f + int(1.0 * FPS), n_frames)):
         path[g] = al.vocab[_ALPHA[(n // frames_per_char) % len(_ALPHA)]]
     em = torch.full((n_frames, VOCAB_SIZE), -12.0)
@@ -114,21 +114,21 @@ def _count_cells(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Der Kern: ein Präfix, der eine einzelne forced_align-Rechnung sprengt
+# The core: a prefix that breaks a single forced_align computation
 # --------------------------------------------------------------------------- #
 def test_a_prefix_too_big_for_one_call_still_gets_a_real_end_time(monkeypatch):
-    """Bisher endete dieser Fall in `_spread` (prob 0.0) und die Sprosse lehnte
-    ab -- ein 1500-s-Fenster liess nur Präfixe bis ~440 s durch. Jetzt muss die
-    Kette eine echte Zeit liefern, und zwar die richtige."""
+    """Until now this case ended in `_spread` (prob 0.0) and the rung refused
+    -- a 1500 s window let only prefixes up to ~440 s through. Now the chain
+    has to deliver a real time, and the right one at that."""
     n_frames = 6000                                     # 120 s
     words = _words(100)
     al = _stub_aligner(None)
     emission, true_end = _planted(al, words, n_frames)
     al._emission = lambda audio: emission
 
-    # Die Zellgrenze so setzen, dass der ganze Präfix in einem Rutsch nicht
-    # ausgerichtet werden kann -- derselbe Zustand wie ein 900-s-Präfix in
-    # einem 1500-s-Fenster, nur klein genug für einen Test.
+    # Set the cell limit so that the whole prefix cannot be aligned in one go
+    # -- the same state as a 900 s prefix in a 1500 s window, only small
+    # enough for a test.
     tokens, _ = al._tokenize(words)
     cap = n_frames * (2 * len(tokens) + 1) // 3
     monkeypatch.setattr(v, "FORCED_ALIGN_MAX_CELLS", cap)
@@ -136,13 +136,13 @@ def test_a_prefix_too_big_for_one_call_still_gets_a_real_end_time(monkeypatch):
 
     out = al.align_prefix(words, _audio(n_frames))
 
-    assert len(cells) >= 2, "der Präfix passte doch in eine Rechnung"
+    assert len(cells) >= 2, "the prefix fitted into one computation after all"
     assert all(c <= cap for c in cells), cells
     assert len(out) == len(words)
-    # Das ist die Zahl, aus der der Schnitt entsteht.
-    assert out[-1]["prob"] != 0.0, "das Präfixende wurde nicht wirklich ausgerichtet"
+    # This is the number the cut is made from.
+    assert out[-1]["prob"] != 0.0, "the prefix end was not really aligned"
     assert abs(out[-1]["end"] - true_end) < 0.5, (out[-1]["end"], true_end)
-    # ...und der Präfix bleibt vorn: er darf nicht ins Fremdmaterial laufen.
+    # ...and the prefix stays at the front: it must not run into the foreign material.
     assert out[-1]["end"] < n_frames / FPS * 0.6
     starts = [w["start"] for w in out]
     assert starts == sorted(starts)
@@ -150,10 +150,10 @@ def test_a_prefix_too_big_for_one_call_still_gets_a_real_end_time(monkeypatch):
 
 
 def test_the_audio_is_never_cut_by_character_share(monkeypatch):
-    """Der eigentliche Defekt: geteilt werden die WÖRTER, nie das Audio nach
-    Zeichenanteil. Jedes Stück muss deshalb gegen das gesamte Restaudio laufen
-    -- erkennbar daran, dass die Framezahl jeder Rechnung dem Rest entspricht
-    und nicht einem Bruchteil, der aus der Textlänge geschätzt wurde."""
+    """The actual defect: it is the WORDS that get split, never the audio by
+    character share. Every piece therefore has to run against the entire
+    remaining audio -- recognisable by the frame count of every computation
+    matching the remainder, not a fraction estimated from the text length."""
     n_frames = 6000
     words = _words(100)
     al = _stub_aligner(None)
@@ -172,18 +172,20 @@ def test_the_audio_is_never_cut_by_character_share(monkeypatch):
 
     al.align_prefix(words, _audio(n_frames))
 
-    assert seen[0] == n_frames, "das erste Stück sah nicht das ganze Fenster"
-    # Jedes Folgestück beginnt am Ende des vorigen und behält alles danach:
-    # die Restlänge sinkt, endet aber immer am Fensterende.
+    assert seen[0] == n_frames, "the first piece did not see the whole window"
+    # Every following piece starts at the end of the previous one and keeps
+    # everything after it: the remaining length shrinks but always ends at the
+    # window end.
     assert seen == sorted(seen, reverse=True)
-    # Der Rest ist echtes Restaudio, nicht der geschätzte Zeichenanteil des
-    # Präfix: nach dem letzten Wort liegt noch Fremdmaterial im Fenster.
+    # The remainder is real remaining audio, not the prefix's estimated
+    # character share: after the last word there is still foreign material in
+    # the window.
     assert seen[-1] > (n_frames - true_end * FPS) * 0.8
 
 
 def test_a_small_window_is_still_one_single_alignment(monkeypatch):
-    """Gegenprobe: wo eine Rechnung reicht, darf nichts gestückelt werden --
-    die Kette ist die Ausnahme, nicht der neue Normalfall."""
+    """Counter-check: where one computation is enough, nothing may be chopped
+    up -- the chain is the exception, not the new normal."""
     n_frames = 3000
     words = _words(30)
     al = _stub_aligner(None)
@@ -199,14 +201,14 @@ def test_a_small_window_is_still_one_single_alignment(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Was passieren muss, wenn ein Stück nicht wirklich ausgerichtet werden kann
+# What has to happen when a piece cannot really be aligned
 # --------------------------------------------------------------------------- #
 def test_one_failed_piece_invalidates_the_whole_chain(monkeypatch):
-    """Eine Kette ist nur so gut wie ihr schwächstes Glied: wäre eine
-    Stückgrenze geraten, lägen alle folgenden Stücke daneben -- und kämen mit
-    tadellosen Scores zurück, also unbemerkbar. Deshalb muss ein gescheitertes
-    Stück das ganze Ergebnis auf gleichverteilte Zeiten (prob 0.0) werfen, auf
-    die `_salvage_prefix` per Konstruktion nicht schneidet."""
+    """A chain is only as good as its weakest link: had a piece boundary been
+    guessed, all following pieces would be off -- and would come back with
+    immaculate scores, i.e. undetectably. A failed piece therefore has to
+    throw the whole result onto evenly spread times (prob 0.0), which
+    `_salvage_prefix` by construction does not cut on."""
     n_frames = 6000
     words = _words(100)
     al = _stub_aligner(None)
@@ -223,7 +225,7 @@ def test_one_failed_piece_invalidates_the_whole_chain(monkeypatch):
     def flaky(log_probs, targets, blank=0):
         calls.append(1)
         if len(calls) == 2:
-            raise RuntimeError("simulierter Ausfall im zweiten Stück")
+            raise RuntimeError("simulated failure in the second piece")
         return real(log_probs, targets, blank=blank)
 
     monkeypatch.setattr(ctc_align, "forced_align", flaky)
@@ -232,8 +234,8 @@ def test_one_failed_piece_invalidates_the_whole_chain(monkeypatch):
 
     assert len(out) == len(words)
     assert all(w["prob"] == 0.0 for w in out), \
-        "ein Teilergebnis der Kette wurde als echte Zeit ausgegeben"
-    # ...und _salvage_prefix lehnt darauf ab.
+        "a partial result of the chain was reported as a real time"
+    # ...and _salvage_prefix refuses on it.
     text = " ".join(words[:len(words) // 2]) + ". " + "dass das, " * 40
     got, why = v._salvage_prefix(text, _audio(n_frames),
                                  lambda w, a: al.align_prefix(w, a))
@@ -241,9 +243,9 @@ def test_one_failed_piece_invalidates_the_whole_chain(monkeypatch):
 
 
 def test_the_ladder_asks_for_a_prefix_alignment(monkeypatch):
-    """Verdrahtung: die Sprosse muss `align_prefix` bekommen. `align_words` mit
-    `words_span_audio=False` degradiert bei grossen Fenstern sichtbar zu
-    `_spread` -- genau die Obergrenze, die hier fallen soll."""
+    """Wiring: the rung has to be given `align_prefix`. `align_words` with
+    `words_span_audio=False` visibly degrades to `_spread` on large windows --
+    exactly the ceiling that is meant to fall here."""
     from noScribe.voxtral_engine import _AlignerPool
 
     used = []

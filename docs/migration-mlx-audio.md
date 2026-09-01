@@ -1,7 +1,7 @@
 # Brief: move the Voxtral engine from mlx-voxtral to mlx-audio
 
-Hand this file to a fresh session **if** one of the triggers below has fired. It is
-a conditional work order, not a plan of record — nothing here is scheduled.
+This is a conditional work order, not a plan of record: nothing here is
+scheduled, and it only becomes relevant if one of the triggers below fires.
 
 Facts re-verified 2026-08-22 against `mlx-voxtral` 0.0.6, `mlx-audio` 0.5.0 and
 `mlx` 0.32.1. Each states how it was checked, so you can re-check rather than trust.
@@ -22,7 +22,7 @@ The author relicensed within a day of being asked. Do the migration only if one 
 * **A second engine is worth shipping.** `mlx-audio` carries Voxtral alongside a
   dozen other ASR models behind one API, so the move pays for itself in one go
   rather than one engine at a time. What those models are worth is measured in
-  `docs/andere-asr-engines.md`; what its aligner models are worth, in
+  `docs/other-asr-engines.md`; what its aligner models are worth, in
   `docs/viterbi-numpy-brief.md`.
 
 If none of those is true, close the task.
@@ -44,10 +44,10 @@ drift — grep rather than trust them:
 
 | where | what |
 |---|---|
-| `voxtral_engine.py:1642` | `load_voxtral_model`, `VoxtralProcessor` |
-| `voxtral_engine.py:1829` | `proc.apply_transcrition_request(...)` (note the upstream typo) |
-| `voxtral_engine.py:1869` | `model.generate(...)` — the non-greedy fallback only |
-| `voxtral_engine.py:1874` | `proc.decode(...)` |
+| `_Voxtral.__init__` | `load_voxtral_model`, `VoxtralProcessor` |
+| `_Voxtral.transcribe_array` | `proc.apply_transcrition_request(...)` (note the upstream typo) |
+| `_Voxtral.transcribe_array` | `model.generate(...)` — the non-greedy fallback only |
+| `_Voxtral.transcribe_array` | `proc.decode(...)` |
 | `tools/quantize_voxtral.py` | `mlx_voxtral.quantization`, `utils.model_loading.download_model` |
 
 Plus `_merged_embeddings` and `_LMAdapter`, both of which likely become unnecessary
@@ -84,7 +84,7 @@ mlx-audio's predicate is `not p.startswith("audio_tower")`, which selects exactl
 the set the current builds carry: **213 modules, all 8 bit, group size 64, affine,
 encoder dense**. Same weights in, same tensors out; only the keys change.
 
-So the measurement tables in `docs/voxtral-quantisierung.md` still describe a
+So the measurement tables in `docs/voxtral-quantisation.md` still describe a
 re-quantised build. **Do not re-run the bit sweeps.**
 
 **3. What could change output, and therefore must be checked:**
@@ -161,15 +161,15 @@ back to re-quantising.
    old and new paths must produce the same transcript. `tests/test_voxtral_smoke.py`
    asserts fast == library today; extend it to assert **the number of quantised
    modules is non-zero**, because the failure mode in fact 1 is silent.
-6. Re-measure `MEM_MODEL` (see `docs/voxtral-quantisierung.md`, *Decode path and
+6. Re-measure `MEM_MODEL` (see `docs/voxtral-quantisation.md`, *Decode path and
    memory*) and update the entries.
 7. Re-run the two hand-corrected references and FLEURS with
-   `docs/skripte/wer.py` and `docs/skripte/fleurs.py`. Expect the numbers to match
+   `docs/scripts/wer.py` and `docs/scripts/fleurs.py`. Expect the numbers to match
    the tables. **If they do not, something in fact 3 is biting — find it, do not
    update the tables.**
 8. Update the dependency notes in `VOXTRAL.md` and
    `environments/requirements_voxtral_macOS_arm64.txt`, and the *Re-quantising
-   with another tool changes nothing* section of `docs/voxtral-quantisierung.md`
+   with another tool changes nothing* section of `docs/voxtral-quantisation.md`
    if the build tables move.
 
 ## Acceptance
@@ -197,6 +197,6 @@ back to re-quantising.
 
 ## Rollback
 
-The current state is committed and pushed on `local/main`. If the migration stalls,
+The current state is committed. If the migration stalls,
 the pins are stable and nothing is broken — revert. The measurement documents
 describe the pre-migration state accurately.

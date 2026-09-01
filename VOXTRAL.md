@@ -36,8 +36,7 @@ The pin is `0.0.6`. One of those fixes moves this engine's output — the log-Me
 is now computed over the whole audio rather than per 30-second chunk, changing
 the encoder input on most frames — and it was measured over 92 minutes of paired
 audio to cost nothing at the transcript (dWER +0.02 [−0.19, +0.24]); see
-[docs/voxtral-audio-vorverarbeitung.md](docs/voxtral-audio-vorverarbeitung.md),
-section 6.
+[docs/voxtral-mel-clamp-floor.md](docs/voxtral-mel-clamp-floor.md), section 8.
 
 The engine also swaps the processor's feature extractor for its own
 (`_PercentileFloorFeatures`): the library clamps the log-Mel at `log_max − 8`
@@ -47,55 +46,27 @@ points at 28 dB; the engine takes the floor from a percentile of the
 spectrogram instead, which removes that and costs nothing on clean material.
 The spectrogram itself is the library's (built from its own window, STFT and
 filter bank), and `tests/test_mel_floor.py` pins it bit for bit to the
-library's path at percentile 100. Section 6b of the same document has the
-measurements.
+library's path at percentile 100. The same document has the measurements.
 
-The pinning is a known liability, so here is the exit route, measured rather
-than assumed. **The coupling is five calls** (plus a handful of attribute reaches —
-`embed_tokens`, `get_audio_embeds`, `config.audio_token_id`, `language_model`,
-`lm_head`, and the one private one, `proc._special_token_ids`) — `load_voxtral_model`,
-`VoxtralProcessor`, `apply_transcrition_request`, `model.generate` (the
-repetition-penalty rung, and any prompt carrying a padding mask) and
-`proc.decode`, plus the four audio primitives
-`stft_mlx`, `hanning`, `get_mel_filters` and `pad_to_multiple` with their
-frame constants behind the feature extractor above,
-and `mlx_voxtral.quantization` and `download_model` in
-`tools/quantize_voxtral.py`. Everything else in
-`voxtral_engine.py` is this project's own: chunking, loop detection, the
-temperature ladder, forced alignment, prefix salvage. None of it depends on
-which package loads the weights.
+The coupling to `mlx-voxtral` is small and listed, so the pin is a known
+liability with a measured exit route: five library calls (`load_voxtral_model`,
+`VoxtralProcessor`, `apply_transcrition_request`, `model.generate` for the
+repetition-penalty rung, `proc.decode`), the four audio primitives behind the
+feature extractor, three `mlx-lm` imports for the decode loop, and a handful
+of attribute reaches. Everything else in `voxtral_engine.py` — chunking, loop
+detection, the temperature ladder, forced alignment, prefix salvage — is this
+project's own and does not depend on which package loads the weights. If the
+pin ever breaks against a newer MLX, the replacement is
+[`mlx-audio`](https://github.com/Blaizzy/mlx-audio);
+[docs/migration-mlx-audio.md](docs/migration-mlx-audio.md) records what was
+verified about it (it does not load the published quantised builds, and fails
+silently doing so; it carries the same stop-token defect this engine already
+works around) and the steps and acceptance criteria for the move.
 
-The replacement, if the pin ever breaks against a newer MLX, is
-[`mlx-audio`](https://github.com/Blaizzy/mlx-audio) — actively maintained, and
-its `mlx_audio/stt/models/` carries Voxtral alongside a dozen other ASR models
-behind one API. The three things to know before starting come from the migration
-work order, [docs/migration-mlx-audio.md](docs/migration-mlx-audio.md), which
-also carries the steps and the acceptance criteria; all were verified against
-mlx-audio 0.5.0:
-
-* **It will not load the published quantised builds, and it fails silently.**
-  Loading `voxtral-mini-8bit` yields *zero* quantised modules and 405 dense
-  `Linear` layers, 211 of them in the language model, with no exception raised.
-  The cause is naming: these builds write `language_model.layers.0…` while
-  mlx-audio's tree is `language_model.model.layers.0…`. Migration therefore
-  means re-quantising and re-publishing both builds, and any smoke test has to
-  assert the number of quantised modules, because the failure mode is quiet.
-* **It carries the same stop-token defect this engine already works around** —
-  `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, and 32000 is the ordinary text
-  token `" Capital"`, not a pad token. See `_resolve_stop_tokens`.
-* **Its `_merge_input_embeddings` scatters without promoting dtype first.**
-  `_merged_embeddings` promotes deliberately, so a build whose projector and
-  token embeddings disagree would round every audio embedding away silently.
-  Measured on the shipped 8-bit builds both sides are bfloat16 and nothing is
-  lost, so this is a latent risk rather than a live defect — but it is the kind
-  of thing that only shows up as different logits, so re-check it against
-  whatever build is in use.
-
-Re-quantising itself is safe: MLX's affine quantisation is deterministic and
-data-free, and mlx-audio's own predicate (`not p.startswith("audio_tower")`)
-selects exactly the layer set these builds already use — 213 modules at 8 bit,
-group size 64, encoder left dense. Same weights in, same tensors out; only the
-keys change.
+A frozen (PyInstaller) build does not bundle the MLX stack, so a packaged app
+shows no Voxtral models; `is_available()` checks for the packages and the
+feature stays inert without them. Voxtral is for running from source on an
+Apple Silicon Mac.
 
 ## Language & word-timestamp quality
 
@@ -138,7 +109,7 @@ error the 24B model is the better half of it — it hears more and spells worse.
 For interviews and podcasts, pick mini — it is also the only one that runs on a
 32 GB or smaller machine. The measurements, including the
 comparison against Whisper, are in
-[docs/voxtral-quantisierung.md](docs/voxtral-quantisierung.md).
+[docs/voxtral-quantisation.md](docs/voxtral-quantisation.md).
 
 Both builds keep the **audio encoder in bf16** and quantise the language model
 and `lm_head` to 8 bit. The encoder runs once per pass, so its precision costs no
@@ -152,7 +123,7 @@ They download on first use from Hugging Face
 the weights are Apache-2.0. Other bit widths (4/5/6-bit, or a bf16 encoder on a
 lower-bit body) can be made locally in a few seconds with
 `tools/quantize_voxtral.py` — see the script's header and
-[docs/voxtral-quantisierung.md](docs/voxtral-quantisierung.md).
+[docs/voxtral-quantisation.md](docs/voxtral-quantisation.md).
 
 ## How it works
 
@@ -237,6 +208,10 @@ find/replace list at:
 ```
 
 (macOS: `~/Library/Application Support/noScribe/voxtral_corrections.yml`)
+
+Speaker names entered in the app are normalised in the same step: a spoken name
+the model spelled differently ("Marcus" for "Markus") is corrected to the
+spelling given, matched by sound. This part works for German only.
 
 ```yaml
 - to: VitaFlor

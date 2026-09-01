@@ -16,7 +16,7 @@ tests/test_forced_align_stability.py; the tie cases are in tests/test_ctc_align.
 Cost and memory: ~1.35x the C++ kernel, and one byte per DP cell for the
 backtrace (as in torchaudio), so the cell budgets in ``voxtral_engine`` still
 apply. The measurements, every optimisation tried, and the benches that
-reproduce them: ``docs/viterbi-numpy-brief.md``, ``docs/skripte/viterbi_bench*.py``.
+reproduce them: ``docs/viterbi-numpy-brief.md``, ``docs/scripts/viterbi_bench*.py``.
 """
 from typing import List, NamedTuple
 

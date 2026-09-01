@@ -3,7 +3,7 @@
 mlx-voxtral clamps the log-Mel at `log_max - 8` with log_max taken over the
 whole input, so one loud cell -- a door slam -- raises the floor for the whole
 pass and costs a measured +1.52 WER points at 28 dB
-(docs/voxtral-mel-clamp-boden.md). The engine therefore replaces the processor's
+(docs/voxtral-mel-clamp-floor.md). The engine therefore replaces the processor's
 feature extractor with one whose floor comes from a percentile of the
 spectrogram (MEL_FLOOR_PERCENTILE).
 

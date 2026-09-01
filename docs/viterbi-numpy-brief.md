@@ -4,15 +4,13 @@
 
 **Done.** The DP lives in `noScribe/ctc_align.py`; `_Aligner._emission` returns a
 float32 numpy array and is the torch→numpy boundary; `align_words` and `align_prefix`
-no longer touch torch. Five commits on `local/main`, in order:
+no longer touch torch. It landed in five steps:
 
-| commit | what |
-|---|---|
-| `ca1469d4` | this brief's round five (630 → 347 ms, torchaudio's tie order) and the benches in `docs/skripte/viterbi_bench*.py` |
-| `a70aefec` | the blank-label bug: every verification case used `blank=0`, so `ext = np.zeros` passed 277 of 277 and mislabelled every blank frame for any other index |
-| `74a47ea0` | the migration itself, after a simplify and a code-review round (12 agents, 7 findings applied) |
-| `0fa1374f` | the 43 reference emissions stored in the npz, so the acceptance test needs no torch |
-| `5d9711e4` | every degrading `_spread` in `align_words` now logs why (`_spread_loudly`) |
+* this brief's round five (630 → 347 ms, torchaudio's tie order) and the benches in `docs/scripts/viterbi_bench*.py`;
+* the blank-label bug: every verification case used `blank=0`, so `ext = np.zeros` passed 277 of 277 and mislabelled every blank frame for any other index;
+* the migration itself, after a simplification and review round;
+* the 43 reference emissions stored in the npz, so the acceptance test needs no torch;
+* every degrading `_spread` in `align_words` now logs why (`_spread_loudly`).
 
 **What it bought.** The crash class from pytorch/audio#4208 cannot occur in noScribe
 any more (64-bit indexing: the worst case is slow, not dead). And on an exact tie
@@ -48,8 +46,7 @@ hand-corrected references in `Audiotest2/referenz/`, 3 524 words) — every word
 timestamp identical, every probability equal to the last bit, three times over as
 the code changed underneath; PyInstaller's own module graph follows the engine's
 static `from noScribe import ctc_align`. A fourth confirmation came for free on
-2026-08-24 from the local stack benchmark (`benchmarks-local/bench_stack.py`,
-this working copy only): today's aligner reproduces the July `stamps_digest`
+2026-08-24 from a local stack benchmark (not in the repository): today's aligner reproduces the July `stamps_digest`
 on the July benchmark text exactly — the July baselines predate this
 migration, so that digest crossed it bit-for-bit. (`align_sec` also dropped
 4.8–6.8 s → 1.0 s on the 60 s file between those baselines and now; cause not
@@ -140,38 +137,7 @@ not rediscovered from scratch.
 
 ---
 
-The rest of this file is the work order as it stood before the work was done.
-Everything in it was verified on 2026-08-22; the verification method is stated so
-it can be re-checked rather than trusted.
-
-## What was read before writing any code
-
-**The task was optional, and there was a cheaper thing to do first.** It was not
-started until that was understood, because the obvious motivation for it is wrong.
-
-The motivation people reach for is "get torch out of the alignment path". That is
-unreachable: `environments/requirements_macOS_arm64.txt` pins `torch==2.13` and
-`pyannote.audio>=4` in the **base** requirements, because the diarizer is torch-based.
-Removing torchaudio does not remove torch.
-
-The speed motivation is real but **separable, and far cheaper than this task.** The
-aligner currently runs on the **CPU** — there is no `.to(device)` in the file at all.
-Moving it to MPS takes it from 20.2x to 65.2x realtime with an identical argmax on
-every frame, which is about 130 seconds per hour of audio for one line of code.
-Emissions are 97 % of the aligner's runtime, so that captures nearly all of the
-available benefit.
-
-**That is already done** — the aligner runs on MPS as of 2026-08-22, with every
-timestamp bit-identical to the CPU path. See the *aligner moved to the GPU* section
-of `docs/voxtral-quantisierung.md`. So the speed argument for this task is spent;
-what remains is the code-simplification argument below.
-
-Also note that `forced_align` is not going away. TorchAudio is in maintenance, but
-its v2.10 release notes name `forced_align` explicitly as one of five C++ extensions
-"preserved and will remain in torchaudio", and 2.11 is documented as compatible with
-future torch versions.
-
-## What this task actually buys
+## What the migration bought
 
 Three things, none of them dependency removal:
 
@@ -181,15 +147,14 @@ Three things, none of them dependency removal:
    worst case degrades from SIGSEGV to slow.
 2. **It takes torchaudio's kernel out of our call path.** (Not the pin: `pyannote.audio`
    requires torchaudio, so the package stays installed and pinned as part of the tested
-   stack. An earlier version of this line claimed the pin would go.)
+   stack.)
 3. **It removes the dependency on an unmerged upstream fix.** Our
    [pytorch/audio#4209](https://github.com/pytorch/audio/pull/4209) fixes exactly
    this overflow, was approved by a maintainer on 2026-08-05, and is still unmerged.
 
-**What it does *not* buy — read this before selling the task on simplification.**
-An earlier version of this brief claimed the cap and the recursive split exist
-"purely" to dodge the overflow and could go with it. That is wrong on both counts,
-and `tests/test_forced_align_cap.py` already said so in its docstring:
+**What it does *not* buy.** It is tempting to think the cap and the recursive
+split existed purely to dodge the overflow and could go with it. That is wrong on
+both counts, as `tests/test_forced_align_cap.py` explains in its docstring:
 
 * **The cap stays, with a new justification.** Measured on the 300 s reference chunk,
   *both* implementations use **1.0 byte per DP cell** (141 MB vs 140 MB peak over
@@ -208,16 +173,14 @@ and `tests/test_forced_align_cap.py` already said so in its docstring:
 * **`align_prefix`'s piecing stays** for the same two reasons — density and the
   memory budget — including `_prefix_piece` and its binary search.
 * **The transcription chunking is not involved at all.** Pause-aware cut points and
-  the 1500 s windows are driven by Voxtral's context length. Nothing there reads a
-  forced-align constant.
+  the pass length (capped at 600 s, `TRUSTED_CHUNK_SEC`) are driven by Voxtral's
+  memory and measured range. Nothing there reads a forced-align constant.
 
 So the honest ledger is roughly **+50 lines net** in `voxtral_engine.py`: about 30
 lines go (the constant's overflow comment, `_dp_cells`, the `too_big` explanation and
 its hard-failure branch, the cap half of `_prefix_piece`), and a ~55-line DP plus a
 `merge_tokens` replacement and its tests come in. Take the task for the crash class
 and the tie fix, not for a smaller file -- and not for the pin, which stays.
-
-If none of those matter today, close the task.
 
 ## Everything that was checked so it need not be built
 
@@ -414,7 +377,7 @@ was verified identical to `torchaudio.functional.forced_align` on 200 random cas
 chunk, all under `np.errstate(all="raise")`; on 34 constructed tie cases it follows
 torchaudio's tie order except where torchaudio itself is wrong (see the *Ties* trap).
 Re-deriving the optimisations from scratch is the expensive part, not the algorithm —
-the benches that reproduce every number here are `docs/skripte/viterbi_bench*.py`.
+the benches that reproduce every number here are `docs/scripts/viterbi_bench*.py`.
 
 The backtrace loop is Python over T, which is fine — it is ~15 000 scalar steps and
 measures under 20 ms. The `ValueError`s mirror torchaudio's checks: the engine
@@ -495,42 +458,17 @@ of evenly spread wrong ones. Check first whether that path is reachable — with
 then, so in practice the reachable hard failure is `too_dense`, which checkpointing
 does not help. Probably dead code to optimise. Measure before building.
 
-## The task
-
-Replace `torchaudio.functional.forced_align` and `torchaudio.functional.merge_tokens`
-in `noScribe/voxtral_engine.py` with a numpy implementation.
-
-**Algorithm.** Standard CTC forced alignment. The target token sequence of length S
-is blank-interleaved to length 2S+1. Viterbi over `T × (2S+1)` with three
-transitions into each state — stay, advance one, advance two — where advance-by-two
-is legal only when it skips a blank between two *different* labels. Backtrace yields
-one label per frame; `merge_tokens` collapses equal runs into spans carrying a mean
-score.
-
-**Shape of the implementation.** Take the reference above. Vectorise over the state
-axis, loop over time; T is around 50 frames per second of audio, so a ten-minute pass
-is ~30 000 iterations of a vector update. Note that MLX is the *wrong* tool here
-because the recurrence is strictly sequential in time and would mean one kernel launch
-per frame. The backtrace table is `T × (2S+1)` `uint8` — 146 MB on the 300 s chunk,
-which is why it must not be `int64`.
-
-**The oracle already exists.** `tests/test_forced_align_stability.py` pins
-torchaudio's behaviour against a recorded reference in `tests/data/`. That is the
-acceptance test: the new implementation must reproduce it. Read that test and
-`tests/test_forced_align_cap.py` and `tests/test_forced_align_density.py` before
-starting — their docstrings describe defects that were expensive to find.
-
-## Acceptance (all met, see *Outcome*)
+## Acceptance (all met)
 
 * ✔ Frame-for-frame identical output to `torchaudio.functional.forced_align` on the
-  recorded reference, and on the two hand-corrected references in
-  `Audiotest2/referenz/` (gitignored; ask if absent).
-* ✔ `venv/bin/python3 -m pytest tests/ -q` green — 381.
+  recorded reference, and on two hand-corrected references (local material,
+  not in the repository).
+* ✔ `venv/bin/python3 -m pytest tests/ -q` green.
 * ✔ Word timestamps unchanged end to end — compared against stored runs of the real
   aligner, 3 524 words, not eyeballed.
 * ✔ No `torchaudio` left in `noScribe/`: `grep -rn torchaudio noScribe/` empty except
   comments that record the history.
-* ✔ The DP cap and the recursive split **stay** (see *What this task actually buys*);
+* ✔ The DP cap and the recursive split **stay** (see *What the migration bought*);
   only the cap's comment changes, from segfault to memory. A pass that would
   previously have tripped the cap still splits and still aligns
   (`tests/test_forced_align_cap.py`, now also on CI).

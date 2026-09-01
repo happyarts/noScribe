@@ -129,11 +129,11 @@ def test_diagnosis_line_appears_when_gentle_repairs_fail():
 
 
 def test_alignment_pool_serves_the_loop_ladder():
-    """Der Präfix-Erhalt braucht eine Zeitabbildung. Sie hing als Closure an
-    einer Variablen in transcribe() und wurde still wirkungslos, als die
-    Alignment-Architektur auf den Pool umgestellt wurde -- der Cherry-Pick lief
-    konfliktfrei durch, die Tests blieben grün, das Feature war tot. Jetzt
-    gehört sie dem Pool, und das ist hier festgehalten."""
+    """Keeping the prefix needs a time mapping. It hung as a closure on a
+    variable in transcribe() and silently became a no-op when the alignment
+    architecture was moved onto the pool -- the cherry-pick went through
+    without conflicts, the tests stayed green, the feature was dead. Now it
+    belongs to the pool, and that is pinned here."""
     from noScribe.voxtral_engine import _AlignerPool
 
     pool = _AlignerPool("de", None)
@@ -158,21 +158,22 @@ def test_alignment_pool_serves_the_loop_ladder():
     out = pool.align_for_salvage(["Guten", "Morgen."], "AUDIO")
     assert seen["words"] == ["Guten", "Morgen."] and seen["audio"] == "AUDIO"
     assert out[-1]["end"] == 2
-    # Der Präfix deckt nur den Anfang des Fensters ab. `align_words` kann das
-    # nicht: es hat keine Möglichkeit, früh aufzuhören, und zieht die letzten
-    # Wörter über das Restaudio (gemessen: 85-s-Präfix endete bei 299.98 s
-    # eines 300-s-Fensters, mit tadellosen Scores).
+    # The prefix only covers the start of the window. `align_words` cannot do
+    # that: it has no way of stopping early and drags the last words across
+    # the remaining audio (measured: an 85 s prefix ended at 299.98 s of a
+    # 300 s window, with immaculate scores).
     assert seen["how"] == "align_prefix"
-    # ...und ein internes Alignment eines womöglich verworfenen Bruchstücks
-    # darf die Modellwahl des nächsten Chunks nicht setzen.
+    # ...and an internal alignment of a fragment that may well be discarded
+    # must not set the model choice for the next chunk.
     assert seen["remember"] is False
 
 
 def test_salvage_alignment_does_not_move_the_pool_state(monkeypatch):
-    """Regression: die Salvage-Sprosse lief durch aligner_for und überschrieb
-    damit _last_model -- der nächste Chunk ohne eigene Sprachdominanz erbte
-    still die Sprache eines Bruchstücks, das oft gar nicht im Transkript
-    landet. Dasselbe galt für die einmalige Sprachwarnung."""
+    """Regression: the salvage rung went through aligner_for and thereby
+    overwrote _last_model -- the next chunk without a dominant language of its
+    own silently inherited the language of a fragment that often does not
+    even end up in the transcript. The same applied to the one-off language
+    warning."""
     from noScribe.voxtral_engine import _AlignerPool, ALIGN_MODELS
 
     loaded = []
@@ -190,7 +191,7 @@ def test_salvage_alignment_does_not_move_the_pool_state(monkeypatch):
 
     monkeypatch.setattr(_AlignerPool, "_load", _fake_load)
 
-    # _detect_language braucht >= 40 Tokens, sonst liefe der Test leer durch.
+    # _detect_language needs >= 40 tokens, otherwise the test would run empty.
     german = ("der die das und ich nicht ist wir ein eine mit auf für aber "
               "auch dann wenn noch dass sind habe schon mal jetzt ") * 2
     english = (("the and you that this not with for have are was but they "
@@ -199,33 +200,33 @@ def test_salvage_alignment_does_not_move_the_pool_state(monkeypatch):
     assert _detect_language(german)[0] == "de"
     assert _detect_language(" ".join(english))[0] == "en"
 
-    # Auto: Chunk 1 ist deutsch und setzt die Wahl.
+    # Auto: chunk 1 is German and sets the choice.
     pool = _AlignerPool(None, None)
     pool.aligner_for(german)
     assert pool._last_model == ALIGN_MODELS["de"]
-    # Eine englische Salvage-Passage darf daran nichts ändern.
+    # An English salvage passage must not change that.
     pool.align_for_salvage(english, "AUDIO")
     assert pool._last_model == ALIGN_MODELS["de"], \
-        "das Bruchstück hat die Modellwahl des nächsten Chunks überschrieben"
+        "the fragment overwrote the model choice of the next chunk"
 
-    # Explizite Sprache: die einmalige Warnung gehört dem Transkript.
+    # Explicit language: the one-off warning belongs to the transcript.
     warned = []
     pool2 = _AlignerPool("de", lambda lvl, msg: warned.append((lvl, msg)))
     pool2.align_for_salvage(english, "AUDIO")
-    assert not warned, "die Warnung wurde an ein Bruchstück vergeben"
+    assert not warned, "the warning was spent on a fragment"
     assert pool2._warned is False
 
 
 def test_transcribe_hands_the_ladder_a_real_callback():
-    """Gegenprobe zur Verdrahtung: transcribe() muss die Pool-Methode
-    weiterreichen, nicht None und nicht eine veraltete lokale Variable."""
+    """Counter-check on the wiring: transcribe() has to pass the pool method
+    on, not None and not a stale local variable."""
     import inspect
     from noScribe import voxtral_engine as v
 
     src = inspect.getsource(v.transcribe)
     call = src[src.index("_transcribe_guarded("):]
     assert "align_cb=(aligner_pool.align_for_salvage" in call, \
-        "die Leiter bekommt keine Zeitabbildung mehr"
+        "the ladder no longer gets a time mapping"
 
 
 def test_backchannel_inside_a_turn_does_not_move_the_cut():

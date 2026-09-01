@@ -25,8 +25,8 @@ mlx-lm==0.31.3
 # token) plus the log-Mel and embedding-merge ones. The log-Mel is now computed
 # over the whole audio and split afterwards, as Voxtral specifies, which changes
 # the encoder input on most frames -- measured to cost nothing at the
-# transcript (dWER +0.02 [-0.19, +0.24]), see docs/voxtral-audio-vorverarbeitung.md
-# section 6. mlx>=0.32.1 is its own floor, not ours.
+# transcript (dWER +0.02 [-0.19, +0.24]), see docs/voxtral-mel-clamp-floor.md
+# section 8. mlx>=0.32.1 is its own floor, not ours.
 mlx-voxtral==0.0.6
 # transformers 5 is what the engine was validated against, and mlx-lm 0.31.3
 # already requires it -- a lower floor here only allowed an untested 4.x to

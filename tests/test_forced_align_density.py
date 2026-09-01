@@ -1,12 +1,11 @@
-"""Wann forced_align überhaupt laufen kann -- und was passiert, wenn nicht.
+"""When forced_align can run at all -- and what happens when it cannot.
 
-Der DP verlangt `n_frames >= len(targets) + n_repeats` (wie torchaudio vor
-ihm), wobei n_repeats die
-Paare unmittelbar gleicher Tokens zählt (zwischen zwei gleiche Labels muss ein
-CTC-Pfad ein Blank setzen). Die alte Vorabprüfung liess nur ~5.3% Luft, deutsche
-Texte haben aber 4-30% solcher Paare -- die Fenster dazwischen kamen durch,
-forced_align warf, und der `except` machte daraus still gleichverteilte
-Zeitstempel für das ganze Fenster.
+The DP demands `n_frames >= len(targets) + n_repeats` (as torchaudio did before
+it), where n_repeats counts the pairs of immediately adjacent identical tokens
+(a CTC path has to place a blank between two identical labels). The old
+pre-check left only ~5.3% headroom, but German text has 4-30% such pairs -- the
+windows in between got through, forced_align raised, and the `except` silently
+turned that into evenly spread timestamps for the whole window.
 """
 import logging
 
@@ -25,10 +24,10 @@ VOCAB_SIZE = 30
 
 
 def _stub_aligner():
-    """Aligner ohne Gewichte: echte Split-/Prüflogik, gefälschte Emissionen.
+    """Aligner without weights: real split/check logic, faked emissions.
 
-    Die Emission liefert genau so viele Frames, wie _predict_frames vorhersagt,
-    damit Routing und Blattprüfung im Test dieselbe Zahl sehen.
+    The emission yields exactly as many frames as _predict_frames predicts, so
+    that routing and the leaf check see the same number in the test.
     """
     al = object.__new__(_Aligner)
     al.vocab = {ch: i + 1 for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz")}
@@ -42,17 +41,17 @@ def _stub_aligner():
 
 
 # --------------------------------------------------------------------------- #
-# Die Bedingung selbst
+# The condition itself
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("tokens", [
-    [7, 18, 18, 11, 25],           # ein Paar
-    [7, 18, 18, 11, 25, 25],       # zwei Paare
-    [4, 4, 4, 9, 9],               # Dreifachlauf zählt als zwei Paare
-    [3, 1, 4, 1, 5],               # keine Wiederholung
+    [7, 18, 18, 11, 25],           # one pair
+    [7, 18, 18, 11, 25, 25],       # two pairs
+    [4, 4, 4, 9, 9],               # a triple run counts as two pairs
+    [3, 1, 4, 1, 5],               # no repetition
 ])
 def test_repeat_count_matches_what_the_dp_demands(tokens):
-    """Gegen den DP selbst gemessen: das kleinste T, bei dem forced_align
-    nicht mehr wirft, ist genau len(tokens) + _adjacent_repeats."""
+    """Measured against the DP itself: the smallest T at which forced_align
+    no longer raises is exactly len(tokens) + _adjacent_repeats."""
     need = _Aligner._adjacent_repeats(tokens) + len(tokens)
     smallest = None
     for T in range(len(tokens), len(tokens) + 12):
@@ -67,37 +66,37 @@ def test_repeat_count_matches_what_the_dp_demands(tokens):
 
 
 def test_a_window_in_the_repeat_band_does_not_degrade_silently(caplog):
-    """Genau der Fall, den die alte 0.95-Schranke durchliess: knapp genug Frames
-    für die Tokens, aber nicht für die Wiederholungen. Es darf keine Ausnahme
-    nach aussen dringen -- und wenn nur noch Gleichverteilung bleibt, muss das
-    im Log stehen, sonst ist ein kaputtes Fenster von einem guten nicht zu
-    unterscheiden. Bis 2026-08 stand das nur in diesem Docstring: die
-    Blattprüfung spreizte still, nur der `except`-Pfad daneben warnte."""
+    """Exactly the case the old 0.95 bound let through: barely enough frames
+    for the tokens, but not for the repeats. No exception may escape -- and if
+    an even spread is all that is left, it has to be in the log, otherwise a
+    broken window cannot be told from a good one. Until 2026-08 this stood
+    only in this docstring: the leaf check spread silently, only the `except`
+    path next to it warned."""
     al = _stub_aligner()
-    words = ["aabb"] * 40                      # jedes Wort bringt zwei Paare mit
+    words = ["aabb"] * 40                      # every word brings two pairs along
     audio = np.zeros(int(3.5 * SAMPLE_RATE), dtype=np.float32)
     tokens, _ = al._tokenize(words)
     frames = al._predict_frames(len(audio))
-    assert len(tokens) <= frames, "Testaufbau: Tokens müssen knapp hineinpassen"
+    assert len(tokens) <= frames, "test setup: the tokens must just about fit"
     assert len(tokens) + al._adjacent_repeats(tokens) > frames, \
-        "Testaufbau: erst die Wiederholungen dürfen es sprengen"
+        "test setup: only the repeats may push it over"
 
     with caplog.at_level(logging.WARNING, logger="noScribe.voxtral_engine"):
-        out = al.align_words(words, audio)      # darf nicht werfen
+        out = al.align_words(words, audio)      # must not raise
     assert len(out) == len(words)
     assert all(w["end"] >= w["start"] for w in out)
-    # Nach dem Teilen gelingt einigen Hälften die echte Ausrichtung; mindestens
-    # ein Blatt bleibt zu dicht und wird gespreizt -- und muss das sagen.
-    assert any(w["prob"] == 0.0 for w in out), "Testaufbau: kein Blatt wurde gespreizt"
+    # After splitting, some halves manage a real alignment; at least one leaf
+    # stays too dense and is spread -- and has to say so.
+    assert any(w["prob"] == 0.0 for w in out), "test setup: no leaf was spread"
     spread_lines = [r for r in caplog.records if "evenly spread" in r.getMessage()]
-    assert spread_lines, "gespreizt, aber nichts im Log"
+    assert spread_lines, "spread, but nothing in the log"
     assert "repeats need more frames" in spread_lines[0].getMessage()
 
 
 def test_prediction_matches_the_emission_it_replaces():
-    """Die Split-Entscheidung läuft auf vorhergesagten Frames, damit ein Fenster,
-    das ohnehin geteilt wird, keinen weggeworfenen wav2vec2-Durchlauf bezahlt.
-    Vorhersage und echte Emission müssen deshalb übereinstimmen."""
+    """The split decision runs on predicted frames, so that a window which is
+    going to be split anyway does not pay for a discarded wav2vec2 pass.
+    Prediction and real emission therefore have to agree."""
     al = _stub_aligner()
     for seconds in (0.5, 2.5, 20.0, 20.5, 47.3):
         audio = np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32)
@@ -105,45 +104,45 @@ def test_prediction_matches_the_emission_it_replaces():
 
 
 # --------------------------------------------------------------------------- #
-# Teilabdeckung: der Salvage-Präfix
+# Partial coverage: the salvage prefix
 # --------------------------------------------------------------------------- #
 def test_a_partial_prefix_has_its_own_entry_point():
-    """Der Split schneidet das Audio nach Zeichenanteil der Wörter -- zulässig
-    nur, wenn die Wörter das Fenster ausfüllen. Ein Salvage-Präfix tut das
-    nicht; dafür gibt es `align_prefix` (siehe test_salvage_prefix_alignment).
-    Hier bleibt festgehalten, dass `align_words` diesen Fall gar nicht erst
-    annimmt, statt ihn still falsch zu rechnen."""
+    """The split cuts the audio by the words' character share -- admissible
+    only when the words fill the window. A salvage prefix does not; for that
+    there is `align_prefix` (see test_salvage_prefix_alignment). What is
+    pinned here is that `align_words` does not accept this case in the first
+    place, instead of silently computing it wrong."""
     import inspect
     assert "words_span_audio" not in inspect.signature(_Aligner.align_words).parameters
     assert hasattr(_Aligner, "align_prefix")
 
 
 def test_a_full_window_is_still_split_as_before():
-    """Gegenprobe: die Vollabdeckung (der Normalfall) teilt weiterhin."""
+    """Counter-check: full coverage (the normal case) still splits."""
     al = _stub_aligner()
     words = ["abcde"] * 2000
     audio = np.zeros(1100 * SAMPLE_RATE, dtype=np.float32)
     out = al.align_words(words, audio)
     assert len(out) == len(words)
-    assert any(w["prob"] != 0.0 for w in out), "gar nichts wurde ausgerichtet"
+    assert any(w["prob"] != 0.0 for w in out), "nothing at all was aligned"
 
 
 def test_dense_recursion_is_bounded():
-    """Halbieren senkt die Dichte nicht: das Audio wird im selben Zeichenanteil
-    geschnitten wie die Wörter, also ist tokens/frames in beiden Hälften gleich
-    und die Prüfung feuert auf jeder Ebene erneut. Ungebremst lief das bis zur
-    vollen Tiefe und schob das 10-13-fache des Chunks durch wav2vec2, um in
-    Blättern zu enden, die ohnehin gleichverteilen."""
+    """Halving does not lower the density: the audio is cut at the same
+    character share as the words, so tokens/frames is the same in both halves
+    and the check fires again on every level. Unchecked, this ran to full
+    depth and pushed 10-13 times the chunk through wav2vec2, only to end in
+    leaves that spread evenly anyway."""
     al = _stub_aligner()
     seen = []
     inner = al._emission
     al._emission = lambda audio: (seen.append(len(audio)), inner(audio))[1]
 
-    words = ["abcdefghij"] * 400                # sehr dicht für kurzes Audio
+    words = ["abcdefghij"] * 400                # very dense for short audio
     audio = np.zeros(int(4.0 * SAMPLE_RATE), dtype=np.float32)
     out = al.align_words(words, audio)
 
     assert len(out) == len(words)
-    # 2 Ebenen Dichte-Split => höchstens 2^2 Blätter, plus deren Emissionen.
+    # 2 levels of density split => at most 2^2 leaves, plus their emissions.
     assert len(seen) <= 2 ** _Aligner.MAX_DENSE_SPLIT_DEPTH, len(seen)
-    assert sum(seen) <= 3 * len(audio), "zu viel Audio mehrfach durchgerechnet"
+    assert sum(seen) <= 3 * len(audio), "too much audio computed more than once"

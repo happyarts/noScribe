@@ -163,24 +163,25 @@ def test_full_ladder_order_and_shortest_fallback():
 
 
 def test_a_truncated_attempt_never_beats_a_complete_one():
-    """Gibt der Breaker auf, bricht _consume_tokens den Strom mitten im Lauf ab
-    -- dieser Versuch ist damit per Konstruktion der kürzeste. Solange die
-    Leiter am Ende einfach den kürzesten Kandidaten nahm, gewann er jeden
-    Vergleich: gemessen ging ein 148-Wort-Stumpf statt eines fast vollständigen
-    2733-Wort-Transkripts ins Transkript, der Rest des Chunks war weg."""
+    """When the breaker gives up, _consume_tokens cuts the stream off in the
+    middle of the run -- so that attempt is the shortest by construction. As
+    long as the ladder simply took the shortest candidate at the end, it won
+    every comparison: measured, a 148-word stump went into the transcript
+    instead of an almost complete 2733-word transcript, and the rest of the
+    chunk was gone."""
     stump = ("Ein sauberer Anfang, der abbricht. " + "na " * 20).strip()
     vox = _ScriptedVox([
         (stump, {"loop_gave_up": True, "loop_kicks": 4}),
         (DEGEN, {}), (DEGEN, {}), (DEGEN, {}), (DEGEN, {}),
     ])
     out = _transcribe_guarded(vox, NO_SPLIT_AUDIO, "de", None, "t")
-    assert out != stump, "der abgeschnittene Versuch hat wieder gewonnen"
+    assert out != stump, "the truncated attempt won again"
     assert out == DEGEN
     assert len(out.split()) > len(stump.split())
 
 
 def test_a_truncated_attempt_is_used_when_it_is_all_there_is():
-    """Gegenprobe: es darf nicht dazu führen, dass gar nichts zurückkommt."""
+    """Counter-check: it must not lead to nothing coming back at all."""
     stump = "nur dieses Bruchstück"
     vox = _ScriptedVox([(stump, {"loop_gave_up": True})] * 5)
     out = _transcribe_guarded(vox, NO_SPLIT_AUDIO, "de", None, "t")
@@ -188,10 +189,10 @@ def test_a_truncated_attempt_is_used_when_it_is_all_there_is():
 
 
 def test_incremental_sync_survives_the_tail_bound():
-    """Der Zähler der gesehenen Tokens darf nicht aus len(self._tail) abgeleitet
-    werden: der Puffer hört ab der Schranke auf zu wachsen, also sah ab da jeder
-    Schritt wie ein Versatz aus und nahm den vollständigen Resync -- ~220
-    Geräte-Skalare pro erzeugtem Token, gemessen ~10 ms Zusatzlatenz je Token."""
+    """The count of tokens seen must not be derived from len(self._tail): the
+    buffer stops growing at the bound, so from then on every step looked like
+    an offset and took the full resync -- ~220 device scalars per generated
+    token, a measured ~10 ms of extra latency per token."""
     class _Tokens(list):
         def __init__(self, items):
             super().__init__(items)
@@ -211,7 +212,7 @@ def test_incremental_sync_survives_the_tail_bound():
         br(toks, np.zeros((1, VOCAB), dtype=np.float32))
         slices += toks.slices
 
-    assert slices == 0, f"{slices} vollständige Resynchronisationen"
+    assert slices == 0, f"{slices} full resynchronisations"
     assert br._seen == len(seq) - 1
-    # Der Puffer bleibt trotzdem beschränkt.
+    # The buffer stays bounded nonetheless.
     assert len(br._tail) <= LOOP_BREAK_WINDOW + LOOP_BREAK_MAX_PERIOD
