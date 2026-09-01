@@ -11,9 +11,9 @@ audio into speaker-attributed transcripts.
 The fork's substantial addition is the **Voxtral transcription engine** (`noScribe/voxtral_engine.py`,
 documented in `VOXTRAL.md`) — an Apple-Silicon-only alternative to faster-whisper. Most other
 fork branches are small fixes intended to go back upstream as PRs. Work destined for `upstream`
-should be in English. `docs/` holds the measurement write-ups — the newer ones
-in English, `voxtral-benchmarks.md` and `voxtral-audio-vorverarbeitung.md` still
-in German. They are sorted by topic, not by date: a finding belongs in the
+should be in English, and since 2026-09-01 everything in the Voxtral set is (docs, tests,
+scripts). `docs/` holds the measurement write-ups.
+They are sorted by topic, not by date: a finding belongs in the
 write-up for its subject, or in a comment next to the constant it explains.
 
 The repo ships **two applications**. `noScribe/` is the transcriber (customtkinter/tkinter);
@@ -24,8 +24,8 @@ side rarely affect the other.
 
 Supporting code that is neither: `tools/` (model quantisation, loop-detection calibration, and
 `check_local_current.py`, which proves `local/main` still carries every line the open PR branches
-add), `docs/skripte/` (~40 one-off measurement scripts behind the write-ups in `docs/`, plus
-`docs/skripte/engines/` for scoring rival ASR engines), and
+add), `docs/scripts/` (~40 one-off measurement scripts behind the write-ups in `docs/`, plus
+`docs/scripts/engines/` for scoring rival ASR engines), and
 `benchmarks-local/`, which is excluded through `.git/info/exclude` rather than `.gitignore` and
 therefore exists only in this working copy.
 
@@ -155,21 +155,45 @@ That branch was cleanly isolated — it contained none of the other PR branches'
 this was its boundary, which is what a rebuild has to re-establish:
 
     added     VOXTRAL.md · environments/requirements_voxtral_macOS_arm64.txt
-              noScribe/{voxtral_engine,voxtral_mp_worker,transcript_corrections}.py
+              noScribe/{voxtral_engine,voxtral_mp_worker,transcript_corrections,ctc_align}.py
               tools/{quantize_voxtral,calibrate_loop_detection}.py
-              docs/voxtral-*.md · docs/skripte/*.py · tests/data/forced_align_ref.npz
-              tests/test_{voxtral_smoke,fast_generate,loop_breaker,forced_align_cap,
+              docs/{voxtral-benchmarks,voxtral-quantisation,voxtral-audio-preprocessing,
+                    voxtral-mel-clamp-floor,viterbi-numpy-brief,migration-mlx-audio,
+                    other-asr-engines}.md · docs/scripts/ (incl. engines/)
+              tests/data/forced_align_ref.npz
+              tests/test_{voxtral_smoke,voxtral_worker,voxtral_pin,voxtral_safety_guards,
+                          fast_generate,loop_breaker,forced_align_cap,forced_align_density,
                           forced_align_stability,transcript_corrections,turn_split,
-                          quant_summary}.py
-    modified  .gitignore · noScribe/main.py · noScribe/transcription.py · trans/*.yml
+                          quant_summary,quantize_group_guard,mel_floor,ctc_align,
+                          align_language,cut_and_cue_quality,lost_head_recovery,
+                          merged_embeddings,salvage_prefix_alignment,word_prob_format}.py
+    modified  noScribe/main.py · noScribe/transcription.py · trans/*.yml (four keys:
+              voxtral_path_long, voxtral_path_short, voxtral_no_disfluencies, loading_voxtral)
+              noScribe/__init__.py (one word: ctc_align in _SUBMODULES)
+              environments/requirements_macOS_arm64.txt (a two-line comment)
+              tests/test_worker_import_lightweight.py (the voxtral worker in WORKER_MODULES)
+              .gitignore (only the `models/voxtral-*` line)
 
-Since then Voxtral has also grown `noScribe/ctc_align.py`, `tests/test_mel_floor.py`,
-`tests/test_ctc_align.py`, `docs/skripte/engines/`, `docs/diarisierung.md`,
-`docs/viterbi-numpy-brief.md`, `docs/migration-mlx-audio.md`,
-`docs/voxtral-audio-vorverarbeitung.md`, `docs/andere-asr-engines.md` and
-`docs/voxtral-mel-clamp-boden.md`. Everything on `local/main` outside that set belongs to
-one of the smaller PRs and must stay out; `tools/check_local_current.py` says which branch owns
-which line.
+The full hunk-by-hunk attribution of `noScribe/main.py` was worked out on 2026-09-01: every
+Voxtral hunk there is interleaved with small-PR hunks, so the branch is best built as
+upstream/main + the ten small branches merged (tag that as the base), then `main.py` taken
+wholesale from `local/main` with the fork-only items below removed, and rebased onto
+upstream/main once the small PRs have merged. `tools/check_local_current.py` says which branch
+owns which line. Voxtral depends on `fix/lazy-main-import` (hard: `_SUBMODULES` does not exist
+upstream) and textually on `feature/speaker-names`, `fix/header-labels` and
+`fix/torch-2.13-stack`.
+
+**On `local/main` but neither Voxtral nor a small PR** — decide before the PR, and do not let
+them ride along silently:
+
+- `find_ghost_speakers` and `split_at_speaker_change` in `main.py` (with
+  `tests/test_ghost_speaker.py`, `tests/test_segment_speaker_split.py`, the `warn_ghost_speaker`
+  key in `de`/`en`, and `docs/diarization.md`). Engine-agnostic: they change Whisper users'
+  transcripts too. Either their own small PR, or gated on the Voxtral engine.
+- `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py`: the
+  diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
+- `Romy` → `Mona` in `tests/test_utils.py` and `tests/test_apostrophe_fix.py`: an edit to
+  upstream's own test data. Stays local.
 
 **These are fork-only and must never appear in that pull request**, however convenient the diff
 makes it look:
@@ -189,8 +213,13 @@ makes it look:
   (since 2026-09-01; `.gitignore` no longer excludes it). Upstream keeps the editor in
   its own repository, kaixxx/noScribeEditor, and editor changes go there as PRs from
   happyarts/noScribeEditor. `noScribeEdit/Test/` stays ignored: it holds a real recording.
-- `environments/requirements_win_cpu.txt` and `requirements_win_cuda.txt` — check which branch
-  owns them before including anything; Windows is the upstream maintainers' platform.
+- `environments/requirements_win_cpu.txt` and `requirements_win_cuda.txt` — they belong to
+  `fix/pyannote-soundfile-load`, not to Voxtral; Windows is the upstream maintainers' platform.
+- **`local_build_stamp()` in `noScribe/main.py`** and its call in the transcript header, plus
+  `tests/test_local_build_stamp.py` — stamps transcripts with the git commit and the author's
+  initials; local provenance only. The PR keeps `t('doc_header', version=app_version)`.
+- The `.gitignore` lines for `noScribeEdit/`, `Audiotest/`, `Audiotest2/` and `venv/` — local
+  environment; only `models/voxtral-*` is Voxtral's.
 
 ## Test suite character
 

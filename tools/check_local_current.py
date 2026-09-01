@@ -39,6 +39,12 @@ INTENTIONAL = {
     # nicht gibt -- die Zeile ist hier also eine echte Obermenge der PR-Zeile.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils")':
         "lokal um ctc_align erweitert",
+    # Der Voxtral-Worker ist ein drittes Spawn-Ziel und steht lokal mit in der
+    # Liste; die Branch-Zeile ist eine Teilmenge der lokalen.
+    'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker"]':
+        "lokal um voxtral_mp_worker erweitert",
+    '# Both are ctx.Process targets, so both are re-imported in a spawn child.':
+        "lokal auf drei Worker umformuliert",
 }
 
 
@@ -48,8 +54,10 @@ def sh(*args):
 
 def branches():
     out = sh("git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin")
+    # origin/voxtral ist ein Spiegel von local/main, kein PR-Branch.
     return [b for b in out.split()
-            if b not in ("origin/main", "origin/HEAD", "origin/local/main")]
+            if b not in ("origin/main", "origin/HEAD", "origin/local/main",
+                         "origin/voxtral")]
 
 
 def added_lines(branch):
