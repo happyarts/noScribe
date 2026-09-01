@@ -3206,15 +3206,6 @@ class App(ctk.CTk):
                     first_segment = True
 
                     def on_segment(seg):
-                        if job.speaker_detection == 'none' or not diarization:
-                            pieces = [seg]
-                        else:
-                            pieces = split_at_speaker_change(
-                                seg, lambda s, e: find_speaker(diarization, s, e))
-                        for piece in pieces:
-                            emit_segment(piece)
-
-                    def emit_segment(seg):
                         nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
                         # Map dict to simple object-like for existing code
                         class _Seg:
@@ -3381,12 +3372,23 @@ class App(ctk.CTk):
                             except Exception:
                                 pass
                     
+                    def on_segment_split(seg):
+                        # Cut the segment where the diarization speaker changes,
+                        # then hand each piece to the unchanged assignment above.
+                        if job.speaker_detection == 'none' or not diarization:
+                            pieces = [seg]
+                        else:
+                            pieces = split_at_speaker_change(
+                                seg, lambda s, e: find_speaker(diarization, s, e))
+                        for piece in pieces:
+                            on_segment(piece)
+
                     try:
                         if is_voxtral:
                             info = self._run_voxtral_subprocess_stream(
-                                tmp_audio_file, job, on_segment, diarization=diarization)
+                                tmp_audio_file, job, on_segment_split, diarization=diarization)
                         else:
-                            info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)
+                            info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment_split)
                         transcription_success = True
                         # if self.cancel:
                         #    raise Exception(t('err_user_cancelation')) 
