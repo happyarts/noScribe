@@ -183,13 +183,15 @@ owns which line. Voxtral depends on `fix/lazy-main-import` (hard: `_SUBMODULES` 
 upstream) and textually on `feature/speaker-names`, `fix/header-labels` and
 `fix/torch-2.13-stack`.
 
-**On `local/main` but neither Voxtral nor a small PR** — decide before the PR, and do not let
-them ride along silently:
+**On `local/main` but neither Voxtral nor one of the ten small PRs** — keep them out of the
+Voxtral PR:
 
 - `find_ghost_speakers` and `split_at_speaker_change` in `main.py` (with
-  `tests/test_ghost_speaker.py`, `tests/test_segment_speaker_split.py`, the `warn_ghost_speaker`
-  key in `de`/`en`, and `docs/diarization.md`). Engine-agnostic: they change Whisper users'
-  transcripts too. Either their own small PR, or gated on the Voxtral engine.
+  `tests/test_ghost_speaker.py`, `tests/test_segment_speaker_split.py` and the
+  `warn_ghost_speaker` key in `de`/`en`) are engine-agnostic and since 2026-09-01 have their own
+  branch, `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`; the
+  PR for it is not opened yet. `docs/diarization.md` stays local: it also documents the
+  fast-embeddings path below, and upstream has no `docs/` directory.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py`: the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
 - `Romy` → `Mona` in `tests/test_utils.py` and `tests/test_apostrophe_fix.py`: an edit to
