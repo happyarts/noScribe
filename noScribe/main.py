@@ -1169,11 +1169,6 @@ def _init_app_state(app):
     # display label on a separator (see model_key). Rebuilt whenever the dropdown
     # is populated.
     app._model_label_to_name = {}
-    # Per-job speaker-name mapping state. Reset at the start of each job in
-    # transcription_worker; declared here too so _apply_speaker_name never
-    # depends on that reset having run (avoids a latent AttributeError).
-    app._speaker_name_map = {}
-    app._speaker_name_overflow_warned = False
     app.audio_files_list = []
     app.transcript_files_list = []
     app.log_file = None
@@ -1422,7 +1417,7 @@ class App(ctk.CTk):
         self.label_speaker = ctk.CTkLabel(self.frame_options, text=t('label_speaker'))
         self.label_speaker.grid(column=0, row=5, sticky='w', pady=5)
 
-        self.option_menu_speaker = ctk.CTkOptionMenu(self.frame_options, width=100, values=['none', 'auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], command=self._on_speaker_detection_changed)
+        self.option_menu_speaker = ctk.CTkOptionMenu(self.frame_options, width=100, values=['none', 'auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
         self.option_menu_speaker.grid(column=1, row=5, sticky='e', pady=5)
         self.option_menu_speaker.set(get_config('last_speaker', 'auto'))
 
@@ -3043,7 +3038,7 @@ class App(ctk.CTk):
                             raise Exception(job.error_message)
 
                 #-------------------------------------------------------
-                # 3) Transcribe with faster-whisper
+                # 3) Transcribe with faster-whisper or Voxtral
 
                 job.status = JobStatus.TRANSCRIPTION
                 self.update_queue_table()
@@ -3210,10 +3205,6 @@ class App(ctk.CTk):
                     last_segment_end = 0
                     last_timestamp_ms = 0
                     first_segment = True
-                    # Reset the label->name map for this job (built in order of
-                    # first appearance as segments stream in).
-                    self._speaker_name_map = {}
-                    self._speaker_name_overflow_warned = False
 
                     def on_segment(seg):
                         if job.speaker_detection == 'none' or not diarization:
@@ -3710,10 +3701,9 @@ class App(ctk.CTk):
             "voxtral_repo": getattr(job.whisper_model, "repo", None),
             "chunk_sec": chunk_sec or None,
             "corrections_path": corrections_path,
-            # Forward-compat: speaker-name normalization activates only once a
-            # job actually carries speaker_names. That wiring lives in the
-            # separate speaker-names feature; on this branch job.speaker_names is
-            # never set, so apply_name_corrections stays dormant by design.
+            # None unless the job carries speaker names; the engine then
+            # normalises spoken names to those spellings (German only, see
+            # transcript_corrections.apply_name_corrections).
             "speaker_names": getattr(job, "speaker_names", None),
             # 0 -> engine default; set voxtral_ram_reserve_gb in config.yml to
             # allow longer passes when nothing else runs on the machine.

@@ -94,7 +94,8 @@ def compression_ratio(text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--logs", type=Path, default=default_log_dir())
+    ap.add_argument("--logs", type=Path, default=default_log_dir(),
+                    help="directory holding noScribe's log files (default: the app's log dir)")
     ap.add_argument("--list", action="store_true", help="one line per chunk")
     args = ap.parse_args()
 

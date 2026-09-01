@@ -86,6 +86,9 @@ for a in _it:
             overrides[a] = next(_it)
         except StopIteration:
             sys.exit(f"{a} needs a value (a bit width or 'dense')")
+    elif a in ("-h", "--help"):
+        print(__doc__.strip())
+        sys.exit(0)
     elif a.startswith("--"):
         sys.exit(f"unknown option {a}")
     else:
@@ -191,7 +194,7 @@ def mixed(path, module, *rest):
     MLP projections of the first and last two language-model layers and adapts
     group sizes per tensor. That boost was not carried over because the part
     that is worth bits is the encoder, and the sweeps that establish it are in
-    docs/voxtral-quantisierung.md. The per-tensor group adaptation was not
+    docs/voxtral-quantisation.md. The per-tensor group adaptation was not
     carried over for a different reason: it does not work. mlx_lm's
     quantize_model filters on the *global* group size before any custom
     predicate is consulted, so a
@@ -269,7 +272,7 @@ def predicate(path, module, *rest):
 # against the *global* group size -- so a tensor it does not divide is skipped
 # silently, before our predicate is ever asked, and stays bf16 with no message.
 # The build then looks finished: it loads, it transcribes, it is simply bigger
-# and slower than the tables in docs/voxtral-quantisierung.md say, and nothing
+# and slower than the tables in docs/voxtral-quantisation.md say, and nothing
 # names the layer that was left out. mlx_voxtral's own predicate has a fallback
 # to group_size 32 for exactly this case; driven through quantize_model it is
 # dead code, because the wrapper has already skipped the tensor (verified in

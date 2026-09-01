@@ -6,19 +6,24 @@ Provides an alternative to the faster-whisper backend:
 - Transcription is done by Mistral's Voxtral (via `mlx-voxtral`), which produces
   clean text but *no* timestamps.
 - When timestamps are required (subtitles, speaker assignment, pause marking),
-  word-level timestamps are recovered with CTC forced alignment against a German
-  wav2vec2 model (the same approach WhisperX uses).
+  word-level timestamps are recovered with CTC forced alignment against a
+  wav2vec2 model chosen per chunk from the transcribed text (`ALIGN_MODELS`,
+  `_AlignerPool`), the same approach WhisperX uses.
 
-The public entry point `transcribe()` returns a list of segment dicts that are
-shape-compatible with what `whisper_mp_worker` streams to the main app:
+The public entry point `transcribe()` streams segment dicts through its
+`segment_cb` and returns `(segments, info)`. The dicts are shape-compatible
+with what `whisper_mp_worker` streams to the main app:
 
     {"start": float_seconds, "end": float_seconds, "text": str,
      "words": [{"word": str, "start": float, "end": float, "prob": float}] | None}
 
-Long files are processed in chunks so memory and model context stay bounded.
+Long files are processed in passes so memory and model context stay bounded.
+
+Reading order: constants and pass sizing, chunk cutting, loop detection and
+repair, language guards, head recovery, the guarded decode, the log-Mel floor,
+the `_Voxtral` model wrapper, the aligner, segment building, `transcribe()`.
 
 Author: Markus Kämmerer <https://markus-kaemmerer.de>
-        (Instagram: https://www.instagram.com/markuskaemmerer/)
 """
 
 import functools
@@ -34,12 +39,37 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16000
 
 # Rough count of text tokens Voxtral generates per second of audio, used ONLY to
-# drive the intra-pass liveness estimate (German conversational speech ~2-2.5
-# words/s x ~1.3 tokens/word). It is intentionally a lower-ish bound: the
-# estimate is capped below 100% and snaps to the true position when a pass
-# finishes, so under-estimating just makes the bar move a touch fast, never past
-# the real chunk boundary.
+# drive the intra-pass liveness estimate. Measured German conversation runs at
+# ~4.64 text tokens/s (see _transcribe_guarded); this is deliberately set below
+# that so the estimate stays behind the real position: it is capped below 100%
+# and snaps to the true position when a pass finishes, so under-estimating just
+# makes the bar move a touch fast, never past the real chunk boundary.
 _EST_TOKENS_PER_SEC = 3.0
+
+
+def is_available():
+    """True if the Voxtral backend and its dependencies can be imported.
+
+    Deliberately NOT cached: _register_voxtral_models re-checks this on every
+    dropdown open so a backend pip-installed while the app runs appears without a
+    restart. The check is three cheap importlib.util.find_spec lookups (no heavy
+    import), so re-running it per dropdown open is negligible."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("mlx_voxtral", "transformers", "soundfile"))
+
+
+def _log(cb, level, msg):
+    if cb:
+        try:
+            cb(level, msg)
+        except Exception:
+            pass
+    else:
+        levels = {"error": logging.ERROR, "warn": logging.WARNING,
+                  "info": logging.INFO}
+        logger.log(levels.get(level, logging.DEBUG), msg)
+
 
 # --- Long-audio chunking (reference approach: one pass up to the model's
 # context, split only beyond that) -------------------------------------------
@@ -142,7 +172,9 @@ MEM_MODEL = {
 
 # Window size for the wav2vec2 alignment forward pass. Kept small so the
 # O(T^2) self-attention memory of the *aligner* stays bounded regardless of
-# chunk length (this is the aligner, not Voxtral).
+# chunk length (this is the aligner, not Voxtral). 20 s is a judgement call, not
+# a measured optimum: wav2vec2 is trained on utterances of that order, and the
+# window only has to be long enough that a word never straddles two of them.
 EMISSION_WINDOW_SEC = 20
 # Hard cap on the forced-alignment DP size, frames * (2*tokens + 1). The DP
 # (noScribe/ctc_align.py) keeps one byte per cell for its backtrace, so 2**30
@@ -164,7 +196,9 @@ SALVAGE_ALIGN_MAX_CELLS = 2**29
 # When splitting a long file, snap each cut to the longest speaker pause found
 # within a *wide* radius of the target boundary. Because the passes are long we
 # have plenty of slack to hunt far for a real pause, so a cut lands between
-# utterances and never mid-word. Widened well beyond a token's worth of audio.
+# utterances and never mid-word. 90 s is a judgement call: wide enough that a
+# 10-minute pass always finds a real pause, narrow enough that consecutive
+# passes stay roughly equal in length.
 SILENCE_SEARCH_SEC = 90
 # A frame counts as "silence" when its AMPLITUDE is at or below this fraction of
 # the window's typical (75th-percentile) speech level -- about -16.5 dB. Callers
@@ -175,16 +209,15 @@ QUIET_LEVEL = 0.15
 # Lead-in overlap (seconds) read from the previous chunk so the words right
 # after a boundary have preceding audio context; the duplicated overlap is then
 # dropped by timestamp. Combined with pause-aware cuts, seams are ~lossless.
+# 15 s is a judgement call: a few sentences of context, short against a pass.
 OVERLAP_SEC = 15
 
 # Known model repositories (MLX).
-#   mini  ~ 3B bf16  (~9 GB download, ~1.5 GB resident quantised variants exist)
-#   small ~ 24B 4-bit (~14 GB, fits 32 GB machines; runs at/above realtime on M1 Max)
 VOXTRAL_MODELS = {
     # Two builds, both quantised on Apple Silicon and published so they download
     # on first use (the picker only shows them on arm64 Macs; elsewhere MLX
     # cannot run at all). Each keeps the audio encoder in bf16 while quantising
-    # the language model and lm_head to 8 bit -- see docs/voxtral-quantisierung.md
+    # the language model and lm_head to 8 bit -- see docs/voxtral-quantisation.md
     # for why (the encoder runs once per pass, so its precision is nearly free,
     # and compressing it below 8 bit measurably costs accuracy on hard audio).
     #
@@ -303,6 +336,132 @@ def resolve_align_model(language):
     return ALIGN_MODELS.get(code, ALIGN_MODEL_MULTILINGUAL)
 
 
+def _model_kind(repo):
+    """Classify a repo id / local path into a MEM_MODEL entry.
+
+    Only the final path component (model dir / repo name) is matched, so a
+    parent directory that happens to contain "small" cannot misclassify the
+    model and shrink its passes for no reason. The bit width matters as much as
+    the parameter count: a 6-bit 24B build needs ~6 GB more than the 4-bit one,
+    and mistaking one for the other would size passes too long and exhaust RAM.
+
+    A name with no recognisable size token falls back to the most conservative
+    (highest-RAM) profile, never the cheap `mini` one, so an unrecognised build
+    is sized safely-short rather than metered too generously and swapped.
+    """
+    name = os.path.basename(os.path.normpath(str(repo))).lower()
+
+    def _has(*tokens):
+        return any(t in name for t in tokens)
+
+    eight = _has("8bit", "8-bit")
+    # The shipped builds keep the audio encoder in bf16 ("dense-encoder"); the
+    # encoder is small, so this adds well under a GB and the bit-width profile
+    # still fits (mini dense-encoder measured 6.35 GB fixed vs 6.0 for uniform
+    # 8-bit -- within the mini8 entry). Classify by parameter count and bit
+    # width; the MEM_MODEL entries already carry a safety margin.
+    if "small" in name or "24b" in name:
+        if eight:
+            return "small8"
+        if _has("6bit", "6-bit"):
+            return "small6"
+        if _has("4bit", "4-bit"):
+            return "small"
+        # A 24B build whose name carries no bit width at all. `small` is the
+        # 4-bit profile and the CHEAPEST of the three 24B entries, so metering an
+        # unquantised or 6-bit copy with it waves a several-hundred-second pass
+        # through for weights that need 25-48 GB, and the run swaps forever
+        # instead of being refused. Fall back to the hungriest 24B profile, the
+        # same direction this function's docstring promises for a name with no
+        # size token at all. (The mini branch below needs no such guard: without
+        # a bit width it already lands on `mini`, the bf16 and more expensive of
+        # the two mini entries.)
+        logger.warning(
+            "Voxtral build %r is a 24B model with no bit width in its name; "
+            "sizing passes with the conservative small8 profile. Name a local "
+            "build with its bit width (e.g. voxtral-small-8bit) to have it "
+            "sized correctly.", name)
+        return "small8"
+    if "mini" in name or "3b" in name:
+        return "mini8" if eight else "mini"
+    # Unrecognised build: the name carries no reliable size signal. Under-sizing
+    # a pass only runs slower, but over-sizing swaps forever -- so fall back to
+    # the most memory-hungry profile rather than optimistically metering an
+    # unknown model as the cheap `mini` one (which would wave a too-long pass
+    # through on a large model). The old code defaulted anything without "small"
+    # to mini; that is the direction that can swap.
+    logger.warning(
+        "Unrecognised Voxtral build %r; sizing passes with the conservative "
+        "small8 profile. Name a local build with mini/small and its bit width "
+        "(e.g. voxtral-mini-8bit) to have it sized correctly.", name)
+    return "small8"
+
+
+@functools.lru_cache(maxsize=None)
+def _total_ram_gb():
+    """Total physical RAM in GB (sysctl on macOS; psutil fallback; else 16).
+
+    Cached: total RAM is a process constant, but this is queried once per model
+    on every model-dropdown open (via App.model_label) and again during a job,
+    so without the cache each call would spawn a `sysctl` subprocess for a value
+    that never changes."""
+    try:
+        import subprocess
+        return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip()) / 1024**3
+    except Exception:
+        try:
+            import psutil
+            return psutil.virtual_memory().total / 1024**3
+        except Exception:
+            return 16.0  # conservative default
+
+
+def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
+    """Choose the per-pass length (seconds) from the machine's RAM.
+
+    Voxtral feeds the whole pass into one generate() call, whose peak
+    unified-memory is ~`fixed + slope*seconds` (MEM_MODEL). We pick the longest
+    pass whose estimated peak still fits `(total_RAM - RAM_RESERVE_GB)`, clamped
+    to [HARD_MIN_CHUNK_SEC, TRUSTED_CHUNK_SEC] and to what `max_safe_chunk_sec`
+    allows. So most files go through in a single pass on a roomy
+    machine, while low-RAM machines (or the memory-hungry 24B `small` model)
+    automatically get shorter, still-safe passes -- and a warning when RAM is the
+    limiting factor.
+    """
+    kind = _model_kind(repo)
+    m = MEM_MODEL[kind]
+    total = _total_ram_gb()
+    # Refuses outright when even the shortest pass cannot fit: proceeding would
+    # not merely run slowly -- the working set no longer fits, MLX computes on
+    # swapped-out buffers and the run stops making progress at all (observed
+    # with the 8-bit 24B build, which sat at 25 GB while the aligner pushed the
+    # machine into swap).
+    ceiling = max_safe_chunk_sec(repo)
+    reserve = RAM_RESERVE_GB if not ram_reserve_gb else float(ram_reserve_gb)
+    budget = total - reserve
+    raw = (budget - m["fixed"]) / m["slope"] if m["slope"] else MAX_CHUNK_SEC
+    # A reserve below MIN_HEADROOM_GB must not turn into a refusal (the model
+    # fits -- the *reserve* is what doesn't); it just can't buy passes beyond
+    # the hard ceiling.
+    chunk = int(max(HARD_MIN_CHUNK_SEC,
+                    min(TRUSTED_CHUNK_SEC, MAX_CHUNK_SEC, raw, ceiling)))
+    est_peak = m["fixed"] + m["slope"] * chunk
+    if raw < HARD_MIN_CHUNK_SEC:
+        _log(log_cb, "warn",
+             f"Low RAM for Voxtral {kind} ({total:.0f} GB total): chunks forced "
+             f"to {chunk}s (~{est_peak:.0f} GB peak) and may still swap. Consider "
+             f"the mini model or a machine with more RAM.")
+    elif raw < PREF_MIN_CHUNK_SEC:
+        _log(log_cb, "info",
+             f"Voxtral {kind}: {total:.0f} GB RAM -> short {chunk}s chunks "
+             f"(~{est_peak:.0f} GB peak). More RAM allows longer, higher-context chunks.")
+    else:
+        _log(log_cb, "info",
+             f"Voxtral {kind}: {total:.0f} GB RAM -> ~{chunk // 60}m{chunk % 60:02d}s "
+             f"chunks (~{est_peak:.0f} GB peak).")
+    return chunk
+
+
 # --------------------------------------------------------------------------- #
 # Text-based language detection for the aligner choice
 # --------------------------------------------------------------------------- #
@@ -411,27 +570,26 @@ class _AlignerPool:
         self._warned = False
 
     def align_for_salvage(self, words, window):
-        """Alignment für die Loop-Leiter: bildet einen sauberen Präfix auf seine
-        Audiozeit ab, damit nur der Rest neu dekodiert werden muss. Liegt hier
-        und nicht als Closure in transcribe(), weil eine Closure sich an einen
-        Variablennamen hängt -- und genau das ist schon einmal stillschweigend
-        gebrochen, als die Alignment-Architektur auf diesen Pool umgestellt
-        wurde.
+        """Alignment for the loop ladder: maps a clean prefix onto its audio
+        time so that only the remainder has to be decoded again. It lives here
+        rather than as a closure in transcribe() because a closure binds to a
+        variable name -- and exactly that broke silently once, when the
+        alignment architecture was moved onto this pool.
 
-        `remember=False`, weil dies ein *internes* Alignment eines Bruchstücks
-        eines womöglich verworfenen Durchgangs ist: durfte es den Pool-Zustand
-        bewegen, erbte der NÄCHSTE Chunk still die Sprache des Bruchstücks, und
-        die einmalige Sprachwarnung wurde an Text vergeben, den niemand je sieht.
-        `align_prefix` statt `align_words`, weil der Präfix nur den Anfang des
-        Fensters abdeckt: dort teilt sich das Audio nicht nach Zeichenanteil der
-        Wörter, sondern die Wörter werden gestückelt und jedes Stück gegen das
-        gesamte verbleibende Audio ausgerichtet."""
+        `remember=False` because this is an *internal* alignment of a fragment
+        of a pass that may yet be discarded: were it allowed to move the pool's
+        state, the NEXT chunk would silently inherit the fragment's language,
+        and the one-off language warning would be spent on text nobody ever
+        sees. `align_prefix` rather than `align_words` because the prefix covers
+        only the start of the window: there the audio is not shared out by the
+        words' character counts; instead the words are split into pieces and
+        each piece is aligned against all of the remaining audio."""
         return self.aligner_for(" ".join(words), remember=False).align_prefix(
             words, window)
 
     def aligner_for(self, text, remember=True):
-        """Aligner für `text`. `remember=False` liest nur aus: die Auswahl für
-        den nächsten Chunk und die einmalige Sprachwarnung bleiben unberührt."""
+        """The aligner for `text`. `remember=False` only reads: the choice for
+        the next chunk and the one-off language warning stay untouched."""
         detected, _ = _detect_language(text)
         if self._explicit:
             model = resolve_align_model(self._language)
@@ -487,14 +645,17 @@ class _AlignerPool:
     def _load(self, model, remember=True):
         aligner = self._cache.pop(model, None)
         if aligner is None:
-            _log(self._log_cb, "info", f"Loading alignment model: {model}")
-            aligner = _Aligner(model)
+            # Evict before loading, not after: an aligner is ~1.2 GB, and this
+            # runs right after a Voxtral pass, when headroom is tightest. Loading
+            # first would hold MAX_CACHED + 1 of them at once.
             while len(self._cache) >= self.MAX_CACHED:
                 oldest = next(iter(self._cache))
                 on_gpu = getattr(self._cache[oldest], "device", "cpu") != "cpu"
                 del self._cache[oldest]      # last reference to the evicted one
                 if on_gpu:
                     self._release_gpu_memory()
+            _log(self._log_cb, "info", f"Loading alignment model: {model}")
+            aligner = _Aligner(model)
         self._cache[model] = aligner   # re-insert = mark most recently used
         if remember:
             self._last_model = model
@@ -772,7 +933,9 @@ DEGENERATE_COMPRESSION_RATIO = 4.0
 RETRY_REPETITION_PENALTIES = (1.01, 1.1)
 # Splitting a looping pass is tried first, because the loop is a long-generation
 # effect: the pass that produced 4099 identical words at 410 s transcribed
-# cleanly as 2x205 s, with the doubled negation intact.
+# cleanly as 2x205 s, with the doubled negation intact. Depth 3 halves a
+# 600 s pass down to 75 s; a piece below 45 s would carry too little context
+# to be worth a further split. Both are judgement calls, not measured optima.
 LOOP_SPLIT_MAX_DEPTH = 3
 LOOP_SPLIT_MIN_SEC = 45
 # Gentle sampling before any penalty, Whisper's own fallback strategy: a bit
@@ -1059,6 +1222,55 @@ def _salvage_prefix(text, audio, align_cb):
 # is why this is a reason for the ladder to run rather than a repair of its own.
 
 
+def _other_language(text, want):
+    """The language `text` reads as when that is decidedly not `want`, else None.
+
+    None whenever there is nothing to compare (no expectation, or too little
+    text to judge), so an undecidable pass is never called wrong.
+    """
+    if not want:
+        return None
+    got, _ = _detect_language(text)
+    return got if got and got != want else None
+
+
+def _halves_disagree(a, b, log_cb, label, name_a, name_b):
+    """True when two halves of one window read as different languages.
+
+    Both rungs that repair a window stitch two independently produced halves --
+    the kept prefix plus its remainder, and the two sides of a split. Either
+    half can come back translated, and the seam is the one place where that is
+    visible without knowing the file's language at all: this test is
+    *relative*. Speakers who mix German and English run through this material
+    constantly, so a detector that leans the same way on both halves has to
+    stay silent; only a genuine change between the halves may fire.
+    """
+    la, _ = _detect_language(a)
+    lb, _ = _detect_language(b)
+    if la and lb and la != lb:
+        _log(log_cb, "warn",
+             f"{label}: {name_a} reads as '{la}' but {name_b} as '{lb}' -- that "
+             f"is a translated pass, not a transcript; dropping it and retrying "
+             f"the whole window.")
+        return True
+    return False
+
+
+def _file_language(tally):
+    """The file's language so far, or None while the evidence is too thin.
+
+    One chunk is never enough: if the *first* chunk is the translated one,
+    taking its language as the truth would send every later chunk to be
+    "repaired" into the wrong language -- the guard would cause exactly the
+    damage it exists to prevent. Two have to agree.
+    """
+    if not tally:
+        return None
+    best, n = max(tally.items(), key=lambda kv: kv[1])
+    runner_up = max([v for k, v in tally.items() if k != best], default=0)
+    return best if n >= 2 and n > runner_up else None
+
+
 # --------------------------------------------------------------------------- #
 # Recovering a head a long pass dropped
 # --------------------------------------------------------------------------- #
@@ -1080,6 +1292,8 @@ def _salvage_prefix(text, audio, align_cb):
 # That is the repair: decode a short head of the same audio and splice back
 # whatever the long pass is missing. The seam is found in the text rather than
 # assumed, so a pass that lost nothing (the normal case) is left untouched.
+# 60 s is a judgement call: short windows were never seen to lose their
+# opening in the sweep, and the probe costs ~10 % of a pass at this length.
 HEAD_PROBE_SEC = 60.0
 # Grown only when the seam is not in the probe at all, i.e. the pass lost more
 # than the probe covers. Past this the loss is no longer a dropped opening.
@@ -1163,55 +1377,6 @@ def _recover_lost_head(vox, audio, language, text, log_cb, label):
          f"{label}: the pass dropped its opening ({at} words); recovered from a "
          f"{sec:.0f}s head probe.")
     return f"{missing} {text.lstrip()}"
-
-
-def _other_language(text, want):
-    """The language `text` reads as when that is decidedly not `want`, else None.
-
-    None whenever there is nothing to compare (no expectation, or too little
-    text to judge), so an undecidable pass is never called wrong.
-    """
-    if not want:
-        return None
-    got, _ = _detect_language(text)
-    return got if got and got != want else None
-
-
-def _halves_disagree(a, b, log_cb, label, name_a, name_b):
-    """True when two halves of one window read as different languages.
-
-    Both rungs that repair a window stitch two independently produced halves --
-    the kept prefix plus its remainder, and the two sides of a split. Either
-    half can come back translated, and the seam is the one place where that is
-    visible without knowing the file's language at all: this test is
-    *relative*. Speakers who mix German and English run through this material
-    constantly, so a detector that leans the same way on both halves has to
-    stay silent; only a genuine change between the halves may fire.
-    """
-    la, _ = _detect_language(a)
-    lb, _ = _detect_language(b)
-    if la and lb and la != lb:
-        _log(log_cb, "warn",
-             f"{label}: {name_a} reads as '{la}' but {name_b} as '{lb}' -- that "
-             f"is a translated pass, not a transcript; dropping it and retrying "
-             f"the whole window.")
-        return True
-    return False
-
-
-def _file_language(tally):
-    """The file's language so far, or None while the evidence is too thin.
-
-    One chunk is never enough: if the *first* chunk is the translated one,
-    taking its language as the truth would send every later chunk to be
-    "repaired" into the wrong language -- the guard would cause exactly the
-    damage it exists to prevent. Two have to agree.
-    """
-    if not tally:
-        return None
-    best, n = max(tally.items(), key=lambda kv: kv[1])
-    runner_up = max([v for k, v in tally.items() if k != best], default=0)
-    return best if n >= 2 and n > runner_up else None
 
 
 def _quietest_split(audio):
@@ -1313,7 +1478,7 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
        context within a turn stays intact, across a change it matters least.
        Without a usable boundary the quietest frame near the middle is used,
        as before.
-    4. Stronger sampling, then the windowed repetition penalty as the very
+    5. Stronger sampling, then the windowed repetition penalty as the very
        last resort, because a penalty silently deletes meaningful repeated
        words (a doubled negation flips the meaning of the sentence).
 
@@ -1471,159 +1636,12 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     return best()
 
 
-def _model_kind(repo):
-    """Classify a repo id / local path into a MEM_MODEL entry.
-
-    Only the final path component (model dir / repo name) is matched, so a
-    parent directory that happens to contain "small" cannot misclassify the
-    model and shrink its passes for no reason. The bit width matters as much as
-    the parameter count: a 6-bit 24B build needs ~6 GB more than the 4-bit one,
-    and mistaking one for the other would size passes too long and exhaust RAM.
-
-    A name with no recognisable size token falls back to the most conservative
-    (highest-RAM) profile, never the cheap `mini` one, so an unrecognised build
-    is sized safely-short rather than metered too generously and swapped.
-    """
-    name = os.path.basename(os.path.normpath(str(repo))).lower()
-
-    def _has(*tokens):
-        return any(t in name for t in tokens)
-
-    eight = _has("8bit", "8-bit")
-    # The shipped builds keep the audio encoder in bf16 ("dense-encoder"); the
-    # encoder is small, so this adds well under a GB and the bit-width profile
-    # still fits (mini dense-encoder measured 6.35 GB fixed vs 6.0 for uniform
-    # 8-bit -- within the mini8 entry). Classify by parameter count and bit
-    # width; the MEM_MODEL entries already carry a safety margin.
-    if "small" in name or "24b" in name:
-        if eight:
-            return "small8"
-        if _has("6bit", "6-bit"):
-            return "small6"
-        if _has("4bit", "4-bit"):
-            return "small"
-        # A 24B build whose name carries no bit width at all. `small` is the
-        # 4-bit profile and the CHEAPEST of the three 24B entries, so metering an
-        # unquantised or 6-bit copy with it waves a several-hundred-second pass
-        # through for weights that need 25-48 GB, and the run swaps forever
-        # instead of being refused. Fall back to the hungriest 24B profile, the
-        # same direction this function's docstring promises for a name with no
-        # size token at all. (The mini branch below needs no such guard: without
-        # a bit width it already lands on `mini`, the bf16 and more expensive of
-        # the two mini entries.)
-        logger.warning(
-            "Voxtral build %r is a 24B model with no bit width in its name; "
-            "sizing passes with the conservative small8 profile. Name a local "
-            "build with its bit width (e.g. voxtral-small-8bit) to have it "
-            "sized correctly.", name)
-        return "small8"
-    if "mini" in name or "3b" in name:
-        return "mini8" if eight else "mini"
-    # Unrecognised build: the name carries no reliable size signal. Under-sizing
-    # a pass only runs slower, but over-sizing swaps forever -- so fall back to
-    # the most memory-hungry profile rather than optimistically metering an
-    # unknown model as the cheap `mini` one (which would wave a too-long pass
-    # through on a large model). The old code defaulted anything without "small"
-    # to mini; that is the direction that can swap.
-    logger.warning(
-        "Unrecognised Voxtral build %r; sizing passes with the conservative "
-        "small8 profile. Name a local build with mini/small and its bit width "
-        "(e.g. voxtral-mini-8bit) to have it sized correctly.", name)
-    return "small8"
-
-
-@functools.lru_cache(maxsize=None)
-def _total_ram_gb():
-    """Total physical RAM in GB (sysctl on macOS; psutil fallback; else 16).
-
-    Cached: total RAM is a process constant, but this is queried once per model
-    on every model-dropdown open (via App.model_label) and again during a job,
-    so without the cache each call would spawn a `sysctl` subprocess for a value
-    that never changes."""
-    try:
-        import subprocess
-        return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip()) / 1024**3
-    except Exception:
-        try:
-            import psutil
-            return psutil.virtual_memory().total / 1024**3
-        except Exception:
-            return 16.0  # conservative default
-
-
-def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
-    """Choose the per-pass length (seconds) from the machine's RAM.
-
-    Voxtral feeds the whole pass into one generate() call, whose peak
-    unified-memory is ~`fixed + slope*seconds` (MEM_MODEL). We pick the longest
-    pass whose estimated peak still fits `(total_RAM - RAM_RESERVE_GB)`, clamped
-    to [HARD_MIN, MAX]. So most files go through in a single pass on a roomy
-    machine, while low-RAM machines (or the memory-hungry 24B `small` model)
-    automatically get shorter, still-safe passes -- and a warning when RAM is the
-    limiting factor.
-    """
-    kind = _model_kind(repo)
-    m = MEM_MODEL[kind]
-    total = _total_ram_gb()
-    # Refuses outright when even the shortest pass cannot fit: proceeding would
-    # not merely run slowly -- the working set no longer fits, MLX computes on
-    # swapped-out buffers and the run stops making progress at all (observed
-    # with the 8-bit 24B build, which sat at 25 GB while the aligner pushed the
-    # machine into swap).
-    ceiling = max_safe_chunk_sec(repo)
-    reserve = RAM_RESERVE_GB if not ram_reserve_gb else float(ram_reserve_gb)
-    budget = total - reserve
-    raw = (budget - m["fixed"]) / m["slope"] if m["slope"] else MAX_CHUNK_SEC
-    # A reserve below MIN_HEADROOM_GB must not turn into a refusal (the model
-    # fits -- the *reserve* is what doesn't); it just can't buy passes beyond
-    # the hard ceiling.
-    chunk = int(max(HARD_MIN_CHUNK_SEC,
-                    min(TRUSTED_CHUNK_SEC, MAX_CHUNK_SEC, raw, ceiling)))
-    est_peak = m["fixed"] + m["slope"] * chunk
-    if raw < HARD_MIN_CHUNK_SEC:
-        _log(log_cb, "warn",
-             f"Low RAM for Voxtral {kind} ({total:.0f} GB total): chunks forced "
-             f"to {chunk}s (~{est_peak:.0f} GB peak) and may still swap. Consider "
-             f"the mini model or a machine with more RAM.")
-    elif raw < PREF_MIN_CHUNK_SEC:
-        _log(log_cb, "info",
-             f"Voxtral {kind}: {total:.0f} GB RAM -> short {chunk}s chunks "
-             f"(~{est_peak:.0f} GB peak). More RAM allows longer, higher-context chunks.")
-    else:
-        _log(log_cb, "info",
-             f"Voxtral {kind}: {total:.0f} GB RAM -> ~{chunk // 60}m{chunk % 60:02d}s "
-             f"chunks (~{est_peak:.0f} GB peak).")
-    return chunk
-
-
 # A sentence is a run up to and including terminal punctuation; the final
 # alternative captures a trailing run that has no terminal punctuation (the last
 # pass of a file, or text Voxtral emits unpunctuated) as ONE fragment. An earlier
 # `\S+$` fallback matched only the last whitespace token, silently dropping every
 # word between the last period and the end of the text.
 _SENT_SPLIT = re.compile(r"[^.!?]+[.!?]+|[^.!?]+$", re.UNICODE)
-
-
-def is_available():
-    """True if the Voxtral backend and its dependencies can be imported.
-
-    Deliberately NOT cached: _register_voxtral_models re-checks this on every
-    dropdown open so a backend pip-installed while the app runs appears without a
-    restart. The check is three cheap importlib.util.find_spec lookups (no heavy
-    import), so re-running it per dropdown open is negligible."""
-    import importlib.util
-    return all(importlib.util.find_spec(m) is not None
-               for m in ("mlx_voxtral", "transformers", "soundfile"))
-
-
-def _log(cb, level, msg):
-    if cb:
-        try:
-            cb(level, msg)
-        except Exception:
-            pass
-    else:
-        logger.log(logging.INFO if level == "info" else logging.DEBUG, msg)
 
 
 # --------------------------------------------------------------------------- #
@@ -1638,7 +1656,7 @@ def _log(cb, level, msg):
 # costs nothing on clean material (-0.12 [-0.85, +0.49], same streams,
 # paired); it can only lower the floor, never raise it. The case against --
 # the model was trained on the maximum-clamped input -- and the measurements
-# are in docs/voxtral-mel-clamp-boden.md.
+# are in docs/voxtral-mel-clamp-floor.md.
 #
 # On clean material the percentile is not a critical value: 99, 99.9 and
 # 99.99 are indistinguishable from the maximum and from each other. Under a
@@ -1664,10 +1682,10 @@ MEL_FLOOR_RANGE = 8.0
 # all four regimes and REJECTED: a cap hangs off the maximum, so a knock
 # lifts it along -- +0.81 [+0.18, +1.57] at 20 dB where the uncapped floor
 # costs +0.01 -- while buying only +0.24 -> +0.05 on half-silent streams,
-# where no interval excludes zero (docs/voxtral-mel-clamp-boden.md,
+# where no interval excludes zero (docs/voxtral-mel-clamp-floor.md,
 # section 5). None stays the
 # production value; the parameter exists so the measurement scripts can
-# drive the arm (spec `99c20` in docs/skripte).
+# drive the arm (spec `99c20` in docs/scripts).
 MEL_FLOOR_CAP = None
 
 
@@ -1769,6 +1787,11 @@ def _cap_mlx_memory():
 
 
 class _Voxtral:
+    """The loaded mlx-voxtral model, driven through `mlx_lm.generate_step`.
+
+    `transcribe_array` is the only entry point; everything else prepares the
+    prompt, resolves this build's stop tokens or consumes the token stream."""
+
     def __init__(self, repo):
         import mlx.core as mx
         import mlx.nn as nn
@@ -1991,16 +2014,9 @@ class _Voxtral:
                 info["loop_kicks"] = breaker.kicks
                 info["loop_gave_up"] = breaker.gave_up
         else:
-            # Pass the resolved stop ids rather than inheriting the library
-            # default. mlx-voxtral <= 0.0.4 defaults to [2, 4, 32000], and
-            # 32000 is the ordinary text token " Capital" -- so this branch,
-            # the penalty rung of the loop ladder, silently truncated any
-            # retry containing that word while the fast path above did not.
-            # Fixed upstream in 0.0.5, but the kwarg is not version paranoia
-            # and must not be dropped: _STOP_TOKENS is resolved from *this
-            # build's* processor, while the library hardcodes (2, 4, 11). On a
-            # build that numbers its control tokens differently, dropping it
-            # would stop this branch on different ids than the fast path.
+            # Pass the resolved stop ids explicitly so both branches stop on
+            # the ids this build's processor reports (see `_STOP_TOKENS` for
+            # the history); the library's default is hard-coded.
             out = self.model.generate(**mi, max_new_tokens=max_new_tokens,
                                       temperature=temperature,
                                       repetition_penalty=repetition_penalty,
@@ -2151,9 +2167,11 @@ class _Aligner:
         for wi, w in enumerate(words):
             for ch in w.lower():
                 if ch in self.vocab:
-                    tokens.append(self.vocab[ch]); tok_word.append(wi)
+                    tokens.append(self.vocab[ch])
+                    tok_word.append(wi)
             if self.delim is not None:
-                tokens.append(self.delim); tok_word.append(-1)
+                tokens.append(self.delim)
+                tok_word.append(-1)
         return tokens, tok_word
 
     @staticmethod
@@ -2604,8 +2622,10 @@ def _split_sentences(text):
 
 
 # Subtitle cue sizing: aim for short, readable phrases (a few words), not one
-# word per cue and not 30-second blocks — comparable to what noScribe produces
-# from Whisper's phrase-level segments.
+# word per cue and not 30-second blocks -- comparable to what noScribe produces
+# from Whisper's phrase-level segments. The limits follow common subtitle
+# practice (about one line of 42-45 characters, a few seconds on screen); they
+# are conventions, not measured optima.
 SUB_MAX_CHARS = 45
 SUB_MAX_WORDS = 12
 SUB_MAX_SEC = 6.0
@@ -2750,8 +2770,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     if not os.path.isfile(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    # bf16 mini as the bare-API default: always fetchable from the hub and its
-    # repo name classifies correctly in MEM_MODEL.
+    # The 8-bit mini build as the bare-API default: always fetchable from the
+    # hub and its repo name classifies correctly in MEM_MODEL.
     repo = voxtral_repo or VOXTRAL_MODELS["voxtral-mini-8bit"]
     # The unquantised source releases carry no bit width in their name, so
     # _model_kind would meter them with a quantised profile and wave a too-long
@@ -3006,4 +3026,6 @@ def transcribe(audio_path, language="de", need_timestamps=True,
              f"were already written out before that was known. Voxtral most "
              f"likely translated them; they are worth re-running on their own.")
 
-    return all_segments, {"duration": duration, "language": language}
+    # Report the language the file settled on, so "auto" comes back as what
+    # was actually transcribed rather than as the request.
+    return all_segments, {"duration": duration, "language": settled or language}

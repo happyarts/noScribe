@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Optional
 import importlib.resources as impres
 import logging
 from pathlib import Path
@@ -16,13 +17,14 @@ class WhisperModel:
 
     `engine` selects the backend: "whisper" (faster-whisper, the default) or
     "voxtral" (Mistral Voxtral via mlx-voxtral). For the Voxtral engine `repo`
-    holds the model repository/path and `path` is only a display placeholder.
+    holds the model repository/path and `path` is only a display placeholder
+    that no caller may read.
     """
 
     name: str
     path: Path
     engine: str = "whisper"
-    repo: str = None
+    repo: Optional[str] = None
 
 
 class WhisperModelManager:
