@@ -30,14 +30,18 @@ mlx-lm==0.31.3
 mlx-voxtral==0.0.6
 # transformers 5 is what the engine was validated against, and mlx-lm 0.31.3
 # already requires it -- a lower floor here only allowed an untested 4.x to
-# satisfy this file while pip installed 5 anyway. No upper bound: 5.16.1 warns
-# that this tokenizer carries "an incorrect regex pattern" and wants
-# fix_mistral_regex=True, but that warning is a config.json heuristic (model_type
-# mistral-family plus transformers_version < 5) and never looks at the pattern.
-# Checked: our tekken.json carries the CORRECT pattern verbatim, and both 5.15 and
-# 5.16.1 pick MistralCommonBackend for this build and encode identically -- the
-# discussion's reference case "'The'" comes out [1039, 1784, 1039], the correct
-# 3-token split, not the broken 4-token one. Do NOT set fix_mistral_regex: it
-# patches a fast-tokenizer pre-tokenizer this path does not have.
+# satisfy this file while pip installed 5 anyway. No upper bound: validated on
+# 5.16.1 (411 tests green, 2026-09-02).
+#
+# If you meet the "incorrect regex pattern / set fix_mistral_regex=True" warning,
+# it is not about this build. That check is a config.json heuristic (mistral-family
+# model_type plus transformers_version < 5.0.0; ours says 4.54.0.dev0) and never
+# reads the actual pattern. Our tekken.json carries the CORRECT pattern verbatim,
+# and the reference case from the upstream discussion encodes as
+# [1039, 1784, 1039] -- the correct 3-token "'"/"The"/"'" split, not the broken
+# 4-token one -- on 5.15 and 5.16.1 alike, both of which resolve this build to
+# MistralCommonBackend. Do NOT set fix_mistral_regex: it patches a fast-tokenizer
+# pre-tokenizer this path does not have. The warning appears only via
+# AutoProcessor, which resolves a different backend (see docs/migration-mlx-audio.md).
 transformers>=5
 soundfile

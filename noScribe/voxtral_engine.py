@@ -274,6 +274,19 @@ def has_local_build(name):
 # aligner for "auto"/"multilingual" or unmapped languages (handles code-switched
 # audio like German+English; characters outside its vocabulary are skipped and
 # their timing interpolated).
+#
+# The language-specific table is not redundant with the multilingual model, which
+# is the obvious simplification to reach for. Measured 2026-09-02: the MMS
+# forced-aligner's vocabulary is 27 characters, a-z plus apostrophe, with NO
+# umlauts at all -- it is romanised by design. The German model has a, o and u
+# umlauts. Folding German onto MMS would therefore drop a character from every
+# word containing one and interpolate its timing.
+#
+# Neither vocabulary contains the German sharp s. On the hand-corrected references
+# that is 13 of 1268 words (1.03 %) and 13 of 6064 letters (0.21 %), and each such
+# word still has every other letter aligned, so the word boundary barely moves.
+# Not worth chasing a different checkpoint over -- but it is why "native alphabet"
+# above means "nearly all of it", not "all".
 ALIGN_MODELS = {
     "de": "jonatasgrosman/wav2vec2-large-xlsr-53-german",
     "en": "jonatasgrosman/wav2vec2-large-xlsr-53-english",
