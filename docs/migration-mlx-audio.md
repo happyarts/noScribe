@@ -72,8 +72,8 @@ with no exception. Mechanism, all in `mlx_audio/utils.py`:
 
 The audio tower does match and does load, which is why a naive smoke test looks
 half-plausible. Reported as
-[Blaizzy/mlx-audio#902](https://github.com/Blaizzy/mlx-audio/issues/902) — check
-whether a warning has landed since.
+[Blaizzy/mlx-audio#902](https://github.com/Blaizzy/mlx-audio/issues/902), **still
+open and unanswered as of 2026-09-02** — check again before relying on a warning.
 
 **2. Re-quantising is format-only. It cannot change quality or speed.**
 
@@ -94,15 +94,16 @@ re-quantised build. **Do not re-run the bit sweeps.**
   sides are bfloat16 so nothing is lost — re-check on whatever build you produce,
   because the failure is invisible in the text and shows up only as different
   logits.
-* mlx-audio's `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`. 32000 is not a pad token;
-  it is the ordinary text token `" Capital"`, so stopping on it truncates any
-  transcript containing that word — silently, because what comes back is clean
-  prose that merely ends early.
-  [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) fixes it
-  and was still open at the time of writing. **Do not rely on the library default
-  either way**: resolve the ids from the processor, as `_resolve_stop_tokens`
-  already does, and pass them explicitly — the engine does this on both its decode
-  paths for exactly this reason.
+* **Stop tokens: fixed upstream, keep resolving them anyway.** mlx-audio used to
+  carry `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, where 32000 is not a pad token but
+  the ordinary text token `" Capital"` — so a transcript containing that word was
+  truncated silently, coming back as clean prose that merely ended early. Our
+  [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) **merged
+  2026-09-02** and the constant is now `[2, 4, 11]`, the same set this engine's own
+  `_STOP_TOKENS` fallback carries. **Do not start relying on the library default**:
+  resolve the ids from the processor, as `_resolve_stop_tokens` does, and pass them
+  explicitly — the engine does this on both decode paths, which is why the defect
+  never reached a transcript here.
 * mlx-audio vendors its own `generate_step` (`mlx_audio.lm.generate`) rather than
   using `mlx_lm`'s. Same chunked prefill (`prefill_step_size=2048`), so the ~18 %
   peak saving survives — but `MEM_MODEL` is calibrated against the current path and
