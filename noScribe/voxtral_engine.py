@@ -320,7 +320,11 @@ ALIGN_MODEL_MULTILINGUAL = "MahmoudAshraf/mms-300m-1130-forced-aligner"
 #   instead left a word-final /s/ unaccounted for and ended the word too early:
 #   the three such words moved +80, +100 and +160 ms later, and all 841 other
 #   words in the chunk moved by exactly 0 ms. Word-internal occurrences do not
-#   move, because the boundary comes from the letters around them.
+#   move, because the boundary comes from the letters around them -- confirmed on
+#   the second reference (hart_780-900), whose four occurrences are all internal
+#   and where nothing moved at all, in any of its 418 words. Across both
+#   references word-final is 3 of 1268 words, so this is a small and very local
+#   correction, not a broad one.
 #
 #   umlauts -> "ae"/"oe"/"ue", not "a"/"o"/"u". The multilingual MMS aligner
 #   carries a-z and an apostrophe only, and is romanised in the German manner
