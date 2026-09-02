@@ -331,6 +331,17 @@ ALIGN_MODEL_MULTILINGUAL = "MahmoudAshraf/mms-300m-1130-forced-aligner"
 #   rather than stripped -- it writes "naechste" for "nächste". With this table
 #   its mean frame score on the same audio improves from -0.278 to -0.256 while
 #   aligning 86 MORE tokens, which biases the mean the other way.
+# German only, and deliberately so. Extending the table looks free -- an entry
+# can only fire where the letter is missing anyway -- but the romanisation it
+# encodes is language-specific: "ae" is the German rule, while uroman, which the
+# multilingual model follows, gives plain "a" for Swedish. Languages without
+# their own entry in ALIGN_MODELS fall back to that same multilingual model, so
+# a table with no notion of language would apply the German rule to Swedish,
+# Czech and Turkish alike. Those characters are no longer lost either way: since
+# align_words gained its wildcard column they are placed on the audio rather
+# than dropped, which is less precise than a correct respelling and much safer
+# than a wrong one. Add a language here only after measuring it, the way these
+# two were measured -- not on the reasoning that it cannot hurt.
 _ALIGN_CHAR_FALLBACKS = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}
 
 
