@@ -123,3 +123,42 @@ def test_explicit_matching_language_does_not_warn(fake_aligner):
     pool = _AlignerPool("de", lambda lvl, m: logs.append((lvl, m)))
     assert pool.aligner_for(GERMAN).model == ALIGN_MODELS["de"]
     assert not [m for lvl, m in logs if lvl == "warn"]
+
+
+def test_missing_letters_use_the_spelling_the_model_was_trained_on():
+    """Letters outside an aligner's vocabulary are respelled, not dropped.
+
+    Dropping them silently cost real accuracy: the German model has no sharp s,
+    so a word ending in one had its closing /s/ unaccounted for and ended up to
+    160 ms too early. The models say which spelling to use -- decoded freely the
+    German aligner writes "weiss", and the romanised multilingual one writes
+    "naechste" -- so the sharp s becomes "ss" and the umlauts become "ae"/"oe"/
+    "ue". Substitution only ever applies where the letter is genuinely missing:
+    the German model carries the umlauts and must keep them.
+    """
+    class _FakeAligner:
+        _tokenize = v._Aligner._tokenize
+
+        def __init__(self, chars):
+            self.vocab = {c: i for i, c in enumerate(chars, start=1)}
+            self.delim = None
+
+    german = _FakeAligner("abcdefghijklmnopqrstuvwxyzäöü")
+    tokens, _ = german._tokenize(["weiß"])
+    assert [c for c in "weiss"] == [
+        k for t in tokens for k, i in german.vocab.items() if i == t
+    ]
+    # the umlauts it does carry stay themselves
+    tokens, _ = german._tokenize(["über"])
+    assert german.vocab["ü"] == tokens[0]
+
+    mms = _FakeAligner("abcdefghijklmnopqrstuvwxyz'")
+    tokens, tok_word = mms._tokenize(["über"])
+    assert [c for c in "ueber"] == [
+        k for t in tokens for k, i in mms.vocab.items() if i == t
+    ]
+    # every token still points at its own word
+    assert tok_word == [0] * len(tokens)
+
+    # a letter with no mapping is still dropped rather than guessed at
+    assert mms._tokenize(["café"])[0] == [mms.vocab[c] for c in "caf"]

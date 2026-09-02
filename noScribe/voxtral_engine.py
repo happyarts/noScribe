@@ -306,6 +306,29 @@ ALIGN_MODELS = {
 }
 ALIGN_MODEL_MULTILINGUAL = "MahmoudAshraf/mms-300m-1130-forced-aligner"
 
+# Letters an aligner vocabulary may not carry, spelled the way the models were
+# actually trained. Applied ONLY where the letter is missing from that model's
+# vocabulary, so a model that does carry it keeps the real one -- the German
+# model has the umlauts and must not be handed "ae" for "ä".
+#
+# Measured 2026-09-02 on the 300 s reference. Both mappings are what the models
+# themselves produce when decoded freely, which is the only evidence that settles
+# the spelling:
+#
+#   sharp s -> "ss". The German aligner writes "weiss" and "heisst" of its own
+#   accord, so its training text was normalised that way. Dropping the letter
+#   instead left a word-final /s/ unaccounted for and ended the word too early:
+#   the three such words moved +80, +100 and +160 ms later, and all 841 other
+#   words in the chunk moved by exactly 0 ms. Word-internal occurrences do not
+#   move, because the boundary comes from the letters around them.
+#
+#   umlauts -> "ae"/"oe"/"ue", not "a"/"o"/"u". The multilingual MMS aligner
+#   carries a-z and an apostrophe only, and is romanised in the German manner
+#   rather than stripped -- it writes "naechste" for "nächste". With this table
+#   its mean frame score on the same audio improves from -0.278 to -0.256 while
+#   aligning 86 MORE tokens, which biases the mean the other way.
+_ALIGN_CHAR_FALLBACKS = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}
+
 
 def min_ram_gb(repo):
     """Smallest amount of RAM in which this model can realistically run.
@@ -2182,6 +2205,11 @@ class _Aligner:
                 if ch in self.vocab:
                     tokens.append(self.vocab[ch])
                     tok_word.append(wi)
+                    continue
+                for sub in _ALIGN_CHAR_FALLBACKS.get(ch, ""):
+                    if sub in self.vocab:
+                        tokens.append(self.vocab[sub])
+                        tok_word.append(wi)
             if self.delim is not None:
                 tokens.append(self.delim)
                 tok_word.append(-1)
