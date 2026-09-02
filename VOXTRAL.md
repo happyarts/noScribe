@@ -60,8 +60,9 @@ pin ever breaks against a newer MLX, the replacement is
 [`mlx-audio`](https://github.com/Blaizzy/mlx-audio);
 [docs/migration-mlx-audio.md](docs/migration-mlx-audio.md) records what was
 verified about it (it does not load the published quantised builds, and fails
-silently doing so; it carries the same stop-token defect this engine already
-works around) and the steps and acceptance criteria for the move.
+silently doing so; it carried the same stop-token defect this engine already
+works around, fixed by this project's pull request on 2026-09-02 and not in a
+release as of 0.5.1) and the steps and acceptance criteria for the move.
 
 A frozen (PyInstaller) build does not bundle the MLX stack, so a packaged app
 shows no Voxtral models; `is_available()` checks for the packages and the
