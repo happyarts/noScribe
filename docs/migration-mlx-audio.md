@@ -100,20 +100,31 @@ re-quantised build. **Do not re-run the bit sweeps.**
   sides are bfloat16 so nothing is lost — re-check on whatever build you produce,
   because the failure is invisible in the text and shows up only as different
   logits.
-* **Stop tokens: fixed upstream, keep resolving them anyway.** mlx-audio used to
-  carry `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, where 32000 is not a pad token but
-  the ordinary text token `" Capital"` — so a transcript containing that word was
-  truncated silently, coming back as clean prose that merely ended early. Our
-  [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) **merged
-  2026-09-02** and the constant is now `[2, 4, 11]`, the same set this engine's own
-  `_STOP_TOKENS` fallback carries. **Do not start relying on the library default**:
+* **Stop tokens: fixed upstream, keep resolving them anyway.** mlx-audio carried
+  `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, where 32000 is not a pad token but the
+  ordinary text token `" Capital"`, so a transcript containing that word was
+  truncated silently — clean prose that merely ended early. Our
+  [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) fixed it to
+  `[2, 4, 11]`, merged 2026-09-02 but **not in a release yet** (0.5.1 shipped
+  2026-08-31 and still carries 32000), so set the `mlx-audio>=` floor to whatever
+  release first contains it. **Do not rely on the library default even then**:
   resolve the ids from the processor, as `_resolve_stop_tokens` does, and pass them
-  explicitly — the engine does this on both decode paths, which is why the defect
-  never reached a transcript here.
+  explicitly on both decode paths.
 * mlx-audio vendors its own `generate_step` (`mlx_audio.lm.generate`) rather than
   using `mlx_lm`'s. Same chunked prefill (`prefill_step_size=2048`), so the ~18 %
   peak saving survives — but `MEM_MODEL` is calibrated against the current path and
   **must be re-measured**.
+* **`AutoProcessor` and `AutoTokenizer` resolve different tokenizer backends for
+  this build.** On transformers 5.16.1, `AutoTokenizer.from_pretrained` picks
+  `MistralCommonBackend` and reads `tekken.json`; loading the same directory through
+  mlx-audio's `AutoProcessor` took the fast-tokenizer path instead
+  (`tokenization_auto.py` swaps the class when `_use_mistral_format` is false), which
+  announced itself only as a regex warning. A different backend means differently
+  encoded prompts, and this build ships no `tokenizer.json` for a fast backend to
+  read. **Assert the tokenizer class after loading**, the same way step 5 asserts the
+  quantised-module count. (The regex warning itself is a false positive — see the
+  comment above `transformers>=5` in
+  `environments/requirements_voxtral_macOS_arm64.txt`.)
 * Voxtral is the only STT model in mlx-audio that uses `AutoProcessor`, which
   resolves to transformers' `VoxtralProcessor` and **requires torch — which
   `pip install mlx-audio` does not install.** Confirmed on 0.5.1: a clean install
@@ -127,56 +138,6 @@ re-quantised build. **Do not re-run the bit sweeps.**
   `miniaudio` (native, PortAudio); the STT import path does not pull them, but pip
   installs them, so the frozen build likely needs excludes. **Prove that with a
   throwaway PyInstaller build — never infer frozen behaviour from source.**
-
-## Nothing in this engine can be deleted because #901 merged
-
-Asked and checked 2026-09-02. The answer is no, for three separate reasons, and it
-does not change when a fixed mlx-audio is released:
-
-* **This engine does not use mlx-audio.** It decodes through `mlx-voxtral` 0.0.6,
-  where the same defect was fixed in 0.0.5 and the pin is exact. #901 is a fix in a
-  package that is not a dependency yet.
-* **`_STOP_TOKENS` is load-bearing on our own decode path.** `_consume_tokens` reads
-  a token stream from `mlx_lm.generate_step` and has to recognise the stop ids
-  itself; no library default is consulted there at all. That stays whatever any
-  upstream does.
-* **`_resolve_stop_tokens` is not dead code.** Verified: `proc._special_token_ids` is
-  present and returns `{'bos': 1, 'eos': 2, 'inst': 3, 'inst_end': 4, 'audio': 24,
-  'begin_audio': 25, 'transcribe': 34, 'pad': 11}`, so the resolution really produces
-  `(2, 4, 11)` from the build in front of it and the class constant is only a
-  fallback. That is precisely the property that made this engine immune to the defect
-  in both libraries, and it costs nine lines.
-
-The only thing #901 could ever retire is the `stop_tokens=` keyword on the fallback
-`model.generate(...)` call — one argument, whose removal buys nothing and re-attaches
-that path to a library default. Leave it.
-
-**A tokenizer-backend difference that only shows under `AutoProcessor`.** Loading
-this build through mlx-audio on transformers 5.16.1 warns that the tokenizer has "an
-incorrect regex pattern" and wants `fix_mistral_regex=True`. Chased down 2026-09-02;
-the warning is not about us, but what it exposes might matter here:
-
-* **Our tokenisation is correct.** `tekken.json` carries the correct pattern
-  verbatim, and the reference case from
-  [the discussion](https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84)
-  encodes as `[1039, 1784, 1039]` — the correct 3-token `'` / `The` / `'` split, not
-  the broken 4-token one — with digits one token each. True on the pinned 5.15 and on
-  5.16.1 alike.
-* **The warning never inspects the pattern.** It fires off `config.json` metadata
-  alone (`model_type` in the mistral family and `transformers_version` below 5.0.0;
-  ours says 4.54.0.dev0), and it lives in the fast-tokenizer path.
-  `tokenization_mistral_common.py` contains no `fix_mistral_regex` code at all, so on
-  a `MistralCommonBackend` the flag is meaningless. **Do not set it** — it swaps in a
-  `Split` pre-tokenizer that this path does not have.
-* **But `AutoTokenizer` and `AutoProcessor` disagree on this directory.**
-  `AutoTokenizer.from_pretrained` on 5.16.1 picks `MistralCommonBackend` and stays
-  silent; the warning appeared only when mlx-audio loaded the same directory through
-  `AutoProcessor`, which therefore resolved a different backend
-  (`tokenization_auto.py` swaps `MistralCommonBackend` for `TokenizersBackend` when
-  `_use_mistral_format` is false). **Pin that down before migrating**: a different
-  backend means differently encoded prompts, and this build ships no `tokenizer.json`
-  for a fast backend to read. Assert the tokenizer class after loading, the way step
-  5 asserts the quantised-module count.
 
 ## The alignment path is not affected — but know this before you touch it
 
@@ -242,6 +203,7 @@ back to re-quantising.
   quantised-module-count assertion.
 * WER/CER on both references and FLEURS within noise of the published tables.
 * A throwaway PyInstaller build starts and transcribes.
+* The loaded processor's tokenizer class is asserted, not assumed.
 * No `mlx_voxtral` left anywhere: `grep -rn mlx_voxtral . --include="*.py"` empty.
 
 ## Traps
