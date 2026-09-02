@@ -4,7 +4,9 @@ This is a conditional work order, not a plan of record: nothing here is
 scheduled, and it only becomes relevant if one of the triggers below fires.
 
 Facts re-verified 2026-08-22 against `mlx-voxtral` 0.0.6, `mlx-audio` 0.5.0 and
-`mlx` 0.32.1. Each states how it was checked, so you can re-check rather than trust.
+`mlx` 0.32.1, and the two upstream reports re-checked 2026-09-02 against
+`mlx-audio` 0.5.1 in a throwaway venv. Each states how it was checked, so you can
+re-check rather than trust.
 
 ## When this becomes relevant
 
@@ -72,8 +74,12 @@ with no exception. Mechanism, all in `mlx_audio/utils.py`:
 
 The audio tower does match and does load, which is why a naive smoke test looks
 half-plausible. Reported as
-[Blaizzy/mlx-audio#902](https://github.com/Blaizzy/mlx-audio/issues/902), **still
-open and unanswered as of 2026-09-02** — check again before relying on a warning.
+[Blaizzy/mlx-audio#902](https://github.com/Blaizzy/mlx-audio/issues/902). **Re-tested
+on 0.5.1 (2026-09-02): reproduces unchanged and still silently.** 0 quantised
+modules, 211 dense `Linear` in the language model, and `q_proj.weight` comes back
+float32 with std 0.0104 — random initialisation, not our 8-bit weights. Nothing on
+stdout; the only thing on stderr is an unrelated transformers tokenizer notice.
+Issue still open and unanswered. Check again before relying on a warning.
 
 **2. Re-quantising is format-only. It cannot change quality or speed.**
 
@@ -109,13 +115,46 @@ re-quantised build. **Do not re-run the bit sweeps.**
   peak saving survives — but `MEM_MODEL` is calibrated against the current path and
   **must be re-measured**.
 * Voxtral is the only STT model in mlx-audio that uses `AutoProcessor`, which
-  resolves to transformers' `VoxtralProcessor` and **requires torch**. noScribe has
-  torch for the diarizer and the aligner, so this is not a blocker, but it changes
+  resolves to transformers' `VoxtralProcessor` and **requires torch — which
+  `pip install mlx-audio` does not install.** Confirmed on 0.5.1: a clean install
+  loads the module fine and then dies in `post_load_hook` with
+  `ImportError: VoxtralProcessor requires the PyTorch library`. So torch is an
+  undeclared dependency of this path and must go in the requirements explicitly.
+  noScribe has torch for the diarizer and the aligner, so this is not a blocker, but
+  it changes
   the worker's import graph — re-check `tests/test_worker_import_lightweight.py`
   and the PyInstaller specs. mlx-audio also hard-requires `sounddevice` and
   `miniaudio` (native, PortAudio); the STT import path does not pull them, but pip
   installs them, so the frozen build likely needs excludes. **Prove that with a
   throwaway PyInstaller build — never infer frozen behaviour from source.**
+
+## Nothing in this engine can be deleted because #901 merged
+
+Asked and checked 2026-09-02. The answer is no, for three separate reasons, and it
+does not change when a fixed mlx-audio is released:
+
+* **This engine does not use mlx-audio.** It decodes through `mlx-voxtral` 0.0.6,
+  where the same defect was fixed in 0.0.5 and the pin is exact. #901 is a fix in a
+  package that is not a dependency yet.
+* **`_STOP_TOKENS` is load-bearing on our own decode path.** `_consume_tokens` reads
+  a token stream from `mlx_lm.generate_step` and has to recognise the stop ids
+  itself; no library default is consulted there at all. That stays whatever any
+  upstream does.
+* **`_resolve_stop_tokens` is not dead code.** Verified: `proc._special_token_ids` is
+  present and returns `{'bos': 1, 'eos': 2, 'inst': 3, 'inst_end': 4, 'audio': 24,
+  'begin_audio': 25, 'transcribe': 34, 'pad': 11}`, so the resolution really produces
+  `(2, 4, 11)` from the build in front of it and the class constant is only a
+  fallback. That is precisely the property that made this engine immune to the defect
+  in both libraries, and it costs nine lines.
+
+The only thing #901 could ever retire is the `stop_tokens=` keyword on the fallback
+`model.generate(...)` call — one argument, whose removal buys nothing and re-attaches
+that path to a library default. Leave it.
+
+Unrelated, found while testing and worth knowing before any transformers bump:
+transformers 5.16.1 warns that this tokenizer is loaded "with an incorrect regex
+pattern" and suggests `fix_mistral_regex=True`. The pinned 5.15.0.dev0 does not warn.
+Investigate before raising that pin — it is a tokenisation claim, not cosmetics.
 
 ## The alignment path is not affected — but know this before you touch it
 
