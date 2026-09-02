@@ -2098,6 +2098,11 @@ def _align_device():
 
 
 class _Aligner:
+    # Set from the model's vocabulary size once one is loaded. None means the
+    # emission has no room for a wildcard column, so `_tokenize` falls back to
+    # dropping what it cannot spell -- which is also what a hand-built _Aligner
+    # in the tests gets.
+    wild = None
     # Recursion cap for the oversized-window split. Deep enough that halving
     # brings a genuinely too-big window under FORCED_ALIGN_MAX_CELLS (the cell
     # count shrinks ~4x per level), while still terminating.
@@ -2149,6 +2154,8 @@ class _Aligner:
         if self.blank is None:
             self.blank = self.vocab.get("<blank>", self.vocab.get("<pad>", 0))
         self.delim = self.vocab.get("|", None)
+        # One column past the model's own vocabulary; see the class attribute.
+        self.wild = int(getattr(self.model.config, "vocab_size", 0) or 0) or None
 
     def _emission(self, audio):
         """Windowed wav2vec2 log-prob emissions [T, vocab] (bounded memory),
@@ -2202,7 +2209,10 @@ class _Aligner:
                 parts.append(torch.log_softmax(lg, dim=-1).cpu())
         return parts
 
-    def _tokenize(self, words):
+    def _tokenize(self, words, wildcard=False):
+        """Characters -> target ids. With `wildcard`, a character the model
+        cannot spell becomes `self.wild` instead of vanishing; the caller must
+        then have extended the emission with that column."""
         tokens, tok_word = [], []
         for wi, w in enumerate(words):
             for ch in w.lower():
@@ -2210,10 +2220,15 @@ class _Aligner:
                     tokens.append(self.vocab[ch])
                     tok_word.append(wi)
                     continue
-                for sub in _ALIGN_CHAR_FALLBACKS.get(ch, ""):
-                    if sub in self.vocab:
-                        tokens.append(self.vocab[sub])
-                        tok_word.append(wi)
+                sub = _ALIGN_CHAR_FALLBACKS.get(ch, "")
+                if sub:
+                    for c in sub:
+                        if c in self.vocab:
+                            tokens.append(self.vocab[c])
+                            tok_word.append(wi)
+                elif wildcard and self.wild is not None and ch.isalnum():
+                    tokens.append(self.wild)
+                    tok_word.append(wi)
             if self.delim is not None:
                 tokens.append(self.delim)
                 tok_word.append(-1)
@@ -2393,7 +2408,7 @@ class _Aligner:
         if len(audio) < int(0.1 * SAMPLE_RATE):
             return self._spread(words, audio, t_offset)
 
-        tokens, tok_word = self._tokenize(words)
+        tokens, tok_word = self._tokenize(words, wildcard=True)
         if not tokens:
             return self._spread(words, audio, t_offset)
 
@@ -2431,6 +2446,26 @@ class _Aligner:
             if emission is None:
                 return self._spread_loudly("produced no emission", words, audio,
                                            t_offset, tokens, 0)
+            if self.wild is not None and self.wild in tokens:
+                import numpy as np
+                # A character the model has no letter for -- a digit, a symbol,
+                # a foreign script. Dropping it left the whole word without an
+                # anchor, so `_stamps_from_spans` interpolated its time across
+                # the gap between its neighbours and the word came out too wide.
+                # One extra column, as good as the best real token at every
+                # frame, lets the DP place it on the audio instead. Measured on
+                # the 300 s reference, where "10", "20" and "50" are the only
+                # such words: identical to the nearest alternative (spelling the
+                # number out in German) to the millisecond on all three, 80 ms
+                # from the interpolation on average and 160 ms at worst, and not
+                # one of the other 847 words moved. The wildcard wins on cost:
+                # spelling out needs a number speller per language, this needs
+                # none. `align_prefix` deliberately does NOT use it -- its own
+                # trailing star is a sentinel it searches the spans for, and a
+                # second star-like column would make that search ambiguous.
+                nb = [i for i in range(emission.shape[1]) if i != self.blank]
+                emission = np.concatenate(
+                    [emission, emission[:, nb].max(1, keepdims=True)], axis=1)
             n_real = emission.shape[0]
             fps = n_real / (len(audio) / SAMPLE_RATE)
             # The prediction only routed us here; the real frame count decides

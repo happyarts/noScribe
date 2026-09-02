@@ -162,3 +162,33 @@ def test_missing_letters_use_the_spelling_the_model_was_trained_on():
 
     # a letter with no mapping is still dropped rather than guessed at
     assert mms._tokenize(["café"])[0] == [mms.vocab[c] for c in "caf"]
+
+
+def test_unspellable_characters_become_a_wildcard_not_a_hole():
+    """A word the model has no letters for still gets tokens of its own.
+
+    Digits are the common case: "20 Sitzungen a 50 Minuten" gave the aligner
+    nothing to place, so `_stamps_from_spans` interpolated those words across
+    the gap between their neighbours and they came out too wide, carrying the
+    prob 0.0 that means "not actually aligned". With the wildcard the DP places
+    them on the audio -- measured identical, to the millisecond, to spelling the
+    numbers out in German, and 80 ms from the interpolation on average.
+    """
+    class _FakeAligner:
+        _tokenize = v._Aligner._tokenize
+
+        def __init__(self):
+            self.vocab = {c: i for i, c in enumerate("abcdefghijklmnopqrstuvwxyz", 1)}
+            self.delim = None
+            self.wild = 99
+
+    al = _FakeAligner()
+    # off by default, so the prefix-salvage path keeps its unambiguous star
+    assert al._tokenize(["20"])[0] == []
+    tokens, tok_word = al._tokenize(["20"], wildcard=True)
+    assert tokens == [99, 99] and tok_word == [0, 0]
+    # punctuation is not audible and must not claim frames
+    assert al._tokenize(["!?"], wildcard=True)[0] == []
+    # a model without the extra column never emits one
+    al.wild = None
+    assert al._tokenize(["20"], wildcard=True)[0] == []
