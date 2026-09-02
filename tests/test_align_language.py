@@ -192,3 +192,30 @@ def test_unspellable_characters_become_a_wildcard_not_a_hole():
     # a model without the extra column never emits one
     al.wild = None
     assert al._tokenize(["20"], wildcard=True)[0] == []
+
+
+def test_an_unusable_respelling_still_reaches_the_wildcard():
+    """A mapping that exists but cannot be spelled must not swallow the letter.
+
+    `_tokenize` used to treat "a fallback entry exists" as "the fallback
+    worked", so a vocabulary missing one of the replacement letters dropped the
+    character silently -- the word lost an anchor and fell back to interpolation
+    with nothing in the log. Both shipped models carry a-z so no current entry
+    hits this, which is exactly why it needs a test.
+    """
+    class _FakeAligner:
+        _tokenize = v._Aligner._tokenize
+
+        def __init__(self, chars):
+            self.vocab = {c: i for i, c in enumerate(chars, start=1)}
+            self.delim = None
+            self.wild = 99
+
+    without_s = _FakeAligner("abcdefghijklmnopqrtuvwxyz")   # no "s" for "ss"
+    assert without_s._tokenize(["weiß"], wildcard=True)[0][-1] == 99
+    with_s = _FakeAligner("abcdefghijklmnopqrstuvwxyz")
+    assert 99 not in with_s._tokenize(["weiß"], wildcard=True)[0]
+    # without the wildcard the old behaviour stands: the letter is dropped
+    assert without_s._tokenize(["weiß"])[0] == [
+        without_s.vocab[c] for c in "wei"
+    ]

@@ -2231,12 +2231,16 @@ class _Aligner:
                     tokens.append(self.vocab[ch])
                     tok_word.append(wi)
                     continue
-                sub = _ALIGN_CHAR_FALLBACKS.get(ch, "")
-                if sub:
-                    for c in sub:
-                        if c in self.vocab:
-                            tokens.append(self.vocab[c])
-                            tok_word.append(wi)
+                # A mapping that exists but cannot be spelled in THIS vocabulary
+                # must fall through to the wildcard rather than be treated as
+                # handled -- otherwise the character vanishes silently and the
+                # word loses an anchor with nothing in the log to say so.
+                spelled = [self.vocab[c]
+                           for c in _ALIGN_CHAR_FALLBACKS.get(ch, "")
+                           if c in self.vocab]
+                if spelled:
+                    tokens.extend(spelled)
+                    tok_word.extend([wi] * len(spelled))
                 elif wildcard and self.wild is not None and ch.isalnum():
                     tokens.append(self.wild)
                     tok_word.append(wi)
@@ -2474,6 +2478,29 @@ class _Aligner:
                 # none. `align_prefix` deliberately does NOT use it -- its own
                 # trailing star is a sentinel it searches the spans for, and a
                 # second star-like column would make that search ambiguous.
+                #
+                # The column scores at least as high as any real token at every
+                # frame, so it does take some frames from its neighbours, and
+                # where it takes them from is a guess -- the aligner does not
+                # know what the word sounds like. Measured adversarially by
+                # replacing every 20th word of the reference with digits, then
+                # comparing the untouched words against their true times:
+                #
+                #   distance to the nearest wildcard word   mean      worst
+                #     1 (immediately beside)              31.1 ms   1061 ms
+                #     2                                    4.2 ms    300 ms
+                #     3-4                                  0.4 ms     40 ms
+                #     5 and beyond                         0.0 ms      0 ms
+                #
+                # So it is a seam, not a drift: it decays to exactly nothing
+                # within five words and never accumulates. Dropping the word
+                # instead keeps that one neighbour closer (worst 480 ms) but is
+                # worse on average at every density tested (4.6 vs 3.8 ms here,
+                # 22.3 vs 13.5 at 20 %, 48.1 vs 30.2 at 50 %). Penalising the
+                # column was measured as the obvious cure and is not one: at
+                # -0.25 through -2.0 nats nothing changes at all, and at -4.0
+                # the number words break (160 ms off) while the worst neighbour
+                # stays at 1061 ms. There is nothing here to tune.
                 nb = [i for i in range(emission.shape[1]) if i != self.blank]
                 emission = np.concatenate(
                     [emission, emission[:, nb].max(1, keepdims=True)], axis=1)
