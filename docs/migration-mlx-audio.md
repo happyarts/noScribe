@@ -151,10 +151,32 @@ The only thing #901 could ever retire is the `stop_tokens=` keyword on the fallb
 `model.generate(...)` call — one argument, whose removal buys nothing and re-attaches
 that path to a library default. Leave it.
 
-Unrelated, found while testing and worth knowing before any transformers bump:
-transformers 5.16.1 warns that this tokenizer is loaded "with an incorrect regex
-pattern" and suggests `fix_mistral_regex=True`. The pinned 5.15.0.dev0 does not warn.
-Investigate before raising that pin — it is a tokenisation claim, not cosmetics.
+**A tokenizer-backend difference that only shows under `AutoProcessor`.** Loading
+this build through mlx-audio on transformers 5.16.1 warns that the tokenizer has "an
+incorrect regex pattern" and wants `fix_mistral_regex=True`. Chased down 2026-09-02;
+the warning is not about us, but what it exposes might matter here:
+
+* **Our tokenisation is correct.** `tekken.json` carries the correct pattern
+  verbatim, and the reference case from
+  [the discussion](https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84)
+  encodes as `[1039, 1784, 1039]` — the correct 3-token `'` / `The` / `'` split, not
+  the broken 4-token one — with digits one token each. True on the pinned 5.15 and on
+  5.16.1 alike.
+* **The warning never inspects the pattern.** It fires off `config.json` metadata
+  alone (`model_type` in the mistral family and `transformers_version` below 5.0.0;
+  ours says 4.54.0.dev0), and it lives in the fast-tokenizer path.
+  `tokenization_mistral_common.py` contains no `fix_mistral_regex` code at all, so on
+  a `MistralCommonBackend` the flag is meaningless. **Do not set it** — it swaps in a
+  `Split` pre-tokenizer that this path does not have.
+* **But `AutoTokenizer` and `AutoProcessor` disagree on this directory.**
+  `AutoTokenizer.from_pretrained` on 5.16.1 picks `MistralCommonBackend` and stays
+  silent; the warning appeared only when mlx-audio loaded the same directory through
+  `AutoProcessor`, which therefore resolved a different backend
+  (`tokenization_auto.py` swaps `MistralCommonBackend` for `TokenizersBackend` when
+  `_use_mistral_format` is false). **Pin that down before migrating**: a different
+  backend means differently encoded prompts, and this build ships no `tokenizer.json`
+  for a fast backend to read. Assert the tokenizer class after loading, the way step
+  5 asserts the quantised-module count.
 
 ## The alignment path is not affected — but know this before you touch it
 
