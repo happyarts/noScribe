@@ -174,16 +174,15 @@ this was its boundary, which is what a rebuild has to re-establish:
               tests/test_worker_import_lightweight.py (the voxtral worker in WORKER_MODULES)
               .gitignore (only the `models/voxtral-*` line)
 
-The full hunk-by-hunk attribution of `noScribe/main.py` was worked out on 2026-09-01: every
-Voxtral hunk there is interleaved with small-PR hunks, so the branch is best built as
-upstream/main + the ten small branches merged (tag that as the base), then `main.py` taken
-wholesale from `local/main` with the fork-only items below removed, and rebased onto
-upstream/main once the small PRs have merged. `tools/check_local_current.py` says which branch
-owns which line. Voxtral depends on `fix/lazy-main-import` (hard: `_SUBMODULES` does not exist
-upstream) and textually on `feature/speaker-names`, `fix/header-labels` and
-`fix/torch-2.13-stack`.
+Every Voxtral hunk in `noScribe/main.py` is interleaved with small-PR hunks, so build the
+branch as upstream/main + the still-open small branches merged (tag that as the base), take
+`main.py` wholesale from `local/main` with the fork-only items below removed, and rebase onto
+upstream/main as the small PRs land. `tools/check_local_current.py` says which branch owns
+which line. `fix/lazy-main-import` is the one hard dependency (`_SUBMODULES` does not exist
+upstream); the three Voxtral depended on only textually — speaker-names, header-labels,
+torch-2.13-stack — merged upstream on 2026-09-08 and are now part of the base.
 
-**On `local/main` but neither Voxtral nor one of the ten small PRs** — keep them out of the
+**On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
 
 - `find_ghost_speakers` and `split_at_speaker_change` in `main.py` (with
