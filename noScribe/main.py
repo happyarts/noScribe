@@ -842,7 +842,8 @@ def create_transcription_job(audio_file=None, transcript_file=None, start_time=N
     
     # Processing options with defaults
     job.speaker_detection = speaker_detection if speaker_detection is not None else 'auto'
-    job.speaker_names = parse_speaker_names(speaker_names)
+    # Hidden GUI names must not appear in job metadata when detection is off.
+    job.speaker_names = parse_speaker_names(speaker_names) if job.speaker_detection != 'none' else []
     job.overlapping = overlapping if overlapping is not None else True
     job.timestamps = timestamps if timestamps is not None else False
     job.disfluencies = disfluencies if disfluencies is not None else True
@@ -1427,7 +1428,6 @@ class App(ctk.CTk):
 
         self.entry_speaker_names = ctk.CTkEntry(self.frame_options, width=100)
         self.entry_speaker_names.grid(column=1, row=6, sticky='e', pady=5)
-        self.entry_speaker_names.insert(0, get_config('last_speaker_names', ''))
         CTkToolTip(self.entry_speaker_names, text=t('tooltip_speaker_names'))
         # Wire the dropdown only now that the widgets it toggles exist, and run
         # it once to hide the names field if detection is off.
@@ -2415,6 +2415,8 @@ class App(ctk.CTk):
                                            initialfile=" ".join(f'"{os.path.basename(path)}"' for path in self.audio_files_list),  
                                            multiple=True)
         if fn and len(fn) > 0:
+            if tuple(fn) != tuple(self.audio_files_list):
+                self.entry_speaker_names.delete(0, 'end')
             self.audio_files_list = fn
             msg = t('log_audio_file_selected')
             for f in fn:
@@ -2591,7 +2593,8 @@ class App(ctk.CTk):
         """Remember the current option settings for the next run."""
         config['last_language'] = self.option_menu_language.get()
         config['last_speaker'] = self.option_menu_speaker.get()
-        config['last_speaker_names'] = self.entry_speaker_names.get()
+        # Names belong to the selected recording, not to future sessions.
+        config.pop('last_speaker_names', None)
         # model_key(): the picker shows "name   ·   N GB RAM", but startup looks
         # the remembered value up in whisper_models by plain name -- storing the
         # decorated label would silently forget the choice on the next start.
@@ -2630,7 +2633,7 @@ class App(ctk.CTk):
         if sel_whisper_model not in self.whisper_models:
             raise FileNotFoundError(f"The whisper model '{sel_whisper_model}' does not exist.")
         # Persist the options the moment they are actually used. Saving only in
-        # on_closing loses the last change -- including a cleared names field --
+        # on_closing loses the last change
         # whenever the shutdown path bails early or is bypassed (Cmd+Q).
         self.save_ui_state()
 
@@ -3170,6 +3173,8 @@ class App(ctk.CTk):
                                                     onset=job.vad_threshold,
                                                     speech_pad_ms=0)
                     speech_chunks = get_speech_timestamps(audio_array, vad_parameters)
+                    # Pause adjustment only needs timestamps and duration from here on.
+                    del audio_array
 
                     def adjust_for_pause(segment):
                         """Adjusts start and end of segment if it falls into a pause

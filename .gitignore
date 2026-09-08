@@ -45,6 +45,7 @@ diarize_x86_64_mod_unsigned
 .python-version
 /pyinstaller/win_installer
 /.history-memo
+AGENTS.md
 
 # Voxtral: local model builds/quantised weights (tens of GB, rebuilt in seconds
 # with tools/quantize_voxtral.py), private test material, and the local venv.
