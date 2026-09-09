@@ -45,6 +45,10 @@ INTENTIONAL = {
         "lokal um voxtral_mp_worker erweitert",
     '# Both are ctx.Process targets, so both are re-imported in a spawn child.':
         "lokal auf drei Worker umformuliert",
+    # Der Rueckgabewert der Pump-Funktion war tot und ist lokal entfernt (013a0e7);
+    # der Branch traegt die Zeile noch mit der Zuweisung.
+    'info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment_split)':
+        "lokal ohne die tote info-Zuweisung",
 }
 
 
