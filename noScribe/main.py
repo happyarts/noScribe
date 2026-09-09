@@ -3060,7 +3060,6 @@ class App(ctk.CTk):
                 else:
                     self.logn(t('loading_whisper'))
 
-                info = None
                 transcription_success = False
                 while True:
                     retry_cuda = False
@@ -3393,10 +3392,10 @@ class App(ctk.CTk):
 
                     try:
                         if is_voxtral:
-                            info = self._run_voxtral_subprocess_stream(
+                            self._run_voxtral_subprocess_stream(
                                 tmp_audio_file, job, on_segment_split, diarization=diarization)
                         else:
-                            info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment_split)
+                            self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment_split)
                         transcription_success = True
                         # if self.cancel:
                         #    raise Exception(t('err_user_cancelation')) 
@@ -3544,8 +3543,8 @@ class App(ctk.CTk):
         """Spawn a transcription worker subprocess and pump its message queue.
 
         Shared by the Whisper and Voxtral engines: streams log/progress/segment
-        messages back to the GUI, honors cancel, tears the child down reliably
-        and returns a simple info object (duration at least).
+        messages back to the GUI, honors cancel, and tears the child down
+        reliably.
         """
         ctx = mp.get_context("spawn")
         q = ctx.Queue()
@@ -3555,7 +3554,6 @@ class App(ctk.CTk):
         self._mp_proc = proc
         self._mp_queue = q
 
-        info = None
         try:
             while True:
                 try:
@@ -3607,9 +3605,7 @@ class App(ctk.CTk):
                             pass
                         raise
                 elif mtype == "result":
-                    if msg.get("ok"):
-                        info = msg.get("info", {})
-                    else:
+                    if not msg.get("ok"):
                         err = msg.get('error', 'Transcription failed')
                         trc = msg.get('trace')
                         self.logn(f"Transcription failed: {err}", 'error')
@@ -3640,12 +3636,6 @@ class App(ctk.CTk):
             # Clear exposed handles
             self._mp_proc = None
             self._mp_queue = None
-
-        class _Info:
-            __slots__ = ("duration",)
-            def __init__(self, d):
-                self.duration = d.get('duration')
-        return _Info(info or {})
 
     @staticmethod
     def _job_language_code(job):
@@ -3729,12 +3719,11 @@ class App(ctk.CTk):
         }
 
         from .voxtral_mp_worker import voxtral_proc_entrypoint
-        return self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)
+        self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)
 
     def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
         """Spawn a subprocess to run Faster-Whisper and stream segments.
         Calls on_segment(dict) for each segment streamed by the child.
-        Returns a simple info object (duration at least).
         """
         global force_whisper_cpu
         # Language code for non-auto/multilingual
@@ -3764,7 +3753,7 @@ class App(ctk.CTk):
         }
 
         from .whisper_mp_worker import whisper_proc_entrypoint
-        return self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)
+        self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)
 
     def _run_diarize_subprocess(self, tmp_audio_file: str, job):
         """Spawn a subprocess to run diarization and return list of segments.
