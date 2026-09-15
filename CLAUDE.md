@@ -11,8 +11,7 @@ audio into speaker-attributed transcripts.
 The fork's substantial addition is the **Voxtral transcription engine** (`noScribe/voxtral_engine.py`,
 documented in `VOXTRAL.md`) — an Apple-Silicon-only alternative to faster-whisper. Most other
 fork branches are small fixes intended to go back upstream as PRs. Work destined for `upstream`
-should be in English, and since 2026-09-01 everything in the Voxtral set is (docs, tests,
-scripts). `docs/` holds the measurement write-ups.
+should be in English, and everything in the Voxtral set is (docs, tests, scripts). `docs/` holds the measurement write-ups.
 They are sorted by topic, not by date: a finding belongs in the
 write-up for its subject, or in a comment next to the constant it explains.
 
@@ -24,7 +23,7 @@ side rarely affect the other.
 
 Supporting code that is neither: `tools/` (model quantisation, loop-detection calibration, and
 `check_local_current.py`, which proves `local/main` still carries every line the open PR branches
-add), `docs/scripts/` (~40 one-off measurement scripts behind the write-ups in `docs/`, plus
+add), `docs/scripts/` (one-off measurement scripts behind the write-ups in `docs/`, plus
 `docs/scripts/engines/` for scoring rival ASR engines), and
 `benchmarks-local/`, which is excluded through `.git/info/exclude` rather than `.gitignore` and
 therefore exists only in this working copy.
@@ -32,7 +31,7 @@ therefore exists only in this working copy.
 ## Commands
 
 ```bash
-venv/bin/python3 -m pytest tests/ -q          # full suite (~420 tests)
+venv/bin/python3 -m pytest tests/ -q          # full suite
 venv/bin/python3 -m pytest tests/test_loop_breaker.py -q
 venv/bin/python3 -m pytest tests/ -q -k ghost_speaker
 venv/bin/python3 -m noScribe                  # launch the GUI
@@ -104,12 +103,12 @@ and defer heavy imports into the entrypoint.
 Which engine runs is decided by the `engine` field on the `WhisperModel` dataclass in
 `transcription.py` (`"whisper"` or `"voxtral"`).
 
-`main.py` is ~4200 lines and mixes GUI, queue management and pipeline orchestration; expect to
+`main.py` is large and mixes GUI, queue management and pipeline orchestration; expect to
 search rather than read it.
 
 ### voxtral_engine.py
 
-The fork's own ~3000-line module. Beyond decoding it owns: chunking with pause-aware cut points,
+The fork's own module, and a large one. Beyond decoding it owns: chunking with pause-aware cut points,
 repetition-loop detection and a temperature ladder, per-chunk aligner-language selection, word
 timestamps via CTC forced alignment (emissions from transformers, the Viterbi DP in
 `noScribe/ctc_align.py` — numpy, torchaudio's kernel is not used; `docs/viterbi-numpy-brief.md`
@@ -134,6 +133,10 @@ changing a number, and check whether a test in `tests/` pins it.
   `main`, which stays a clean mirror of upstream. `tools/check_local_current.py` exists because
   a merge can drop a branch's improvement while `git merge` still says "Already up to date";
   its `INTENTIONAL` table records the lines local/main deliberately differs on.
+- **`origin/voxtral` is the fork's default branch** and a pure mirror of `local/main`: every push of
+  `local/main` is followed by `git push origin local/main:voxtral`.
+- **Never write `kaixxx/noScribe#N` in a pull request or issue on the fork.** GitHub turns it into
+  a permanent cross-reference on the upstream PR that cannot be edited away.
 - **No real names.** No real file, person or brand name appears in the repo, in commit messages
   or in issues — the write-ups use a fictional set (Mona, Lena, Muster, VitaFlor, Sonvita) even
   when quoting a real measurement.
@@ -148,7 +151,7 @@ changing a number, and check whether a test in `tests/` pins it.
 Voxtral goes upstream as **one** feature PR, deliberately not split, and **after** the smaller
 PRs have merged. It therefore has to be built from `local/main` minus everything the other PR
 branches carry. The branch that used to hold it (`feature/voxtral-engine`, tip `8f132bc`) was
-deleted once it had fallen 161 commits behind: opening a PR from it would have shipped errors
+deleted once it had fallen far behind: opening a PR from it would have shipped errors
 that have since been corrected. Rebuild it from today's `local/main` instead.
 
 That branch was cleanly isolated — it contained none of the other PR branches' commits — and
@@ -180,31 +183,15 @@ branch as upstream/main + the still-open small branches merged (tag that as the 
 `main.py` wholesale from `local/main` with the fork-only items below removed, and rebase onto
 upstream/main as the small PRs land. `tools/check_local_current.py` says which branch owns
 which line. Every branch Voxtral depended on is now part of the base: the three it touched
-only textually (speaker-names, header-labels, torch-2.13-stack) merged upstream on
-2026-09-08, and the one hard dependency, `fix/lazy-main-import` (`_SUBMODULES`), on
-2026-09-15 together with clear-queue and the CI fix.
-
-The small PRs still open, each cut from `main` and merged into `local/main` (the branches
-`tools/check_local_current.py` walks are the authoritative list; merge-tree finds no conflict
-between any two of them):
-
-- #338 `fix/cancel-log-traceback`: a user cancel no longer logs a traceback (`main.py` only).
-- #341 `feature/ghost-speaker-turn-split`: see the ghost-speaker entry below.
-- #342 `fix/output-dir-dialog`: one folder dialog for a batch, transcript names logged once
-  (`button_transcript_file_event`).
-- #344 `fix/linux-audio-dialog-duplicates`: `button_audio_file_event` pre-selects the current
-  files only on Windows, plus `tests/test_audio_dialog_preselect.py`. Tk's own X11 dialog
-  appended every confirmed file to the pre-selection, so it grew on each reopening, and the
-  macOS panel read the quoted list as a path and ignored `initialdir`. Tk fixed its side the
-  same day (Tk ticket 56eec524d7, all three branches), but not in a release yet, so the
-  guard stays.
+only textually (speaker-names, header-labels, torch-2.13-stack) and the one hard dependency,
+`fix/lazy-main-import` (`_SUBMODULES`), have merged upstream.
 
 **On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
 
 - `find_ghost_speakers` and `split_at_speaker_change` in `main.py` (with
   `tests/test_ghost_speaker.py`, `tests/test_segment_speaker_split.py` and the
-  `warn_ghost_speaker` key in `de`/`en`) are engine-agnostic and since 2026-09-01 have their own
+  `warn_ghost_speaker` key in `de`/`en`) are engine-agnostic and have their own
   branch, `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`:
   upstream PR #341. The wrapper `on_segment_split` sits after `on_segment` rather than renaming
   it, so the branch merges cleanly with the other open PRs. `docs/diarization.md` stays local: it also documents the
@@ -235,7 +222,7 @@ makes it look:
   maintainers' own staging area (created 2025-05-29, and the name says they mean to remove it
   themselves). Removing it for them is not this fork's call, so the deletion stays local.
 - **`noScribeEdit/`** — the editor source is tracked in this fork for local work only
-  (since 2026-09-01; `.gitignore` no longer excludes it). Upstream keeps the editor in
+  (`.gitignore` no longer excludes it). Upstream keeps the editor in
   its own repository, kaixxx/noScribeEditor, and editor changes go there as PRs from
   happyarts/noScribeEditor. `noScribeEdit/Test/` stays ignored: it holds a real recording.
 - **`local_build_stamp()` in `noScribe/main.py`** and its call in the transcript header, plus
