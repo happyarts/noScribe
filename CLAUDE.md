@@ -178,9 +178,10 @@ Every Voxtral hunk in `noScribe/main.py` is interleaved with small-PR hunks, so 
 branch as upstream/main + the still-open small branches merged (tag that as the base), take
 `main.py` wholesale from `local/main` with the fork-only items below removed, and rebase onto
 upstream/main as the small PRs land. `tools/check_local_current.py` says which branch owns
-which line. `fix/lazy-main-import` is the one hard dependency (`_SUBMODULES` does not exist
-upstream); the three Voxtral depended on only textually — speaker-names, header-labels,
-torch-2.13-stack — merged upstream on 2026-09-08 and are now part of the base.
+which line. Every branch Voxtral depended on is now part of the base: the three it touched
+only textually (speaker-names, header-labels, torch-2.13-stack) merged upstream on
+2026-09-08, and the one hard dependency, `fix/lazy-main-import` (`_SUBMODULES`), on
+2026-09-15 together with clear-queue and the CI fix.
 
 **On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
@@ -213,14 +214,10 @@ makes it look:
 - **The deletion of `environments/marked_for_deletion/`** — that directory is the upstream
   maintainers' own staging area (created 2025-05-29, and the name says they mean to remove it
   themselves). Removing it for them is not this fork's call, so the deletion stays local.
-- **`.github/workflows/pyinstaller.yml`** — that change belongs to the CI pull request, not to
-  Voxtral.
 - **`noScribeEdit/`** — the editor source is tracked in this fork for local work only
   (since 2026-09-01; `.gitignore` no longer excludes it). Upstream keeps the editor in
   its own repository, kaixxx/noScribeEditor, and editor changes go there as PRs from
   happyarts/noScribeEditor. `noScribeEdit/Test/` stays ignored: it holds a real recording.
-- `environments/requirements_win_cpu.txt` and `requirements_win_cuda.txt` — they belong to
-  `fix/pyannote-soundfile-load`, not to Voxtral; Windows is the upstream maintainers' platform.
 - **`local_build_stamp()` in `noScribe/main.py`** and its call in the transcript header, plus
   `tests/test_local_build_stamp.py` — stamps transcripts with the git commit and the author's
   initials; local provenance only. The PR keeps `t('doc_header', version=app_version)`.
