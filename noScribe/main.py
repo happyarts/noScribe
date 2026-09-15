@@ -18,7 +18,6 @@
 import argparse
 import datetime
 import html
-import importlib.resources as impres
 import json
 import locale
 import logging
@@ -39,6 +38,11 @@ from subprocess import Popen, run
 from tempfile import TemporaryDirectory
 from threading import Thread
 from typing import Optional
+
+if sys.version_info >= (3, 12):
+    import importlib.resources as impres
+else:
+    import importlib_resources as impres
 
 import AdvancedHTMLParser
 import appdirs
@@ -3154,7 +3158,8 @@ class App(ctk.CTk):
                             self.logn(t('rescue_saving', file=job.transcript_file), 'error', link=f'file://{job.transcript_file}')
                             last_auto_save = datetime.datetime.now()
 
-                    # Prepare VAD data locally for pause adjustment (audio is 16kHz mono after ffmpeg conversion)
+                    # Prepare VAD data locally for pause adjustment (audio is
+                    # 16 kHz mono after conversion by PyAV).
                     try:
                         job.vad_threshold = float(config['voice_activity_detection_threshold'])
                     except Exception:
