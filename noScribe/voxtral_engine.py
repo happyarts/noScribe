@@ -1947,7 +1947,9 @@ class _Voxtral:
         model, so CI covers it where the model-gated smoke test cannot.
 
         The dtype promotion is load-bearing. `embed_tokens` returns bf16 while
-        the projector returns float32; scattering into the bf16 array would
+        the projector returns float32 -- its weights are bf16, but the log-Mel
+        features are float32 and MLX promotes the output to the input's dtype
+        (measured on voxtral-mini-8bit). Scattering into the bf16 array would
         silently round every audio embedding away -- a change that looks like
         nothing and shows up only as different logits.
         """

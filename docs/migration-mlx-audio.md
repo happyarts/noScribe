@@ -127,18 +127,22 @@ re-quantised build. **Do not re-run the bit sweeps.**
 **3. What could change output, and therefore must be checked:**
 
 * mlx-audio's `_merge_input_embeddings` scatters without promoting dtype, where
-  `_merged_embeddings` promotes deliberately. Measured on the current build both
-  sides are bfloat16 so nothing is lost — re-check on whatever build you produce,
-  because the failure is invisible in the text and shows up only as different
+  `_merged_embeddings` promotes deliberately — and on the current build that
+  promotion is needed. Measured on `voxtral-mini-8bit`: `embed_tokens` returns
+  bfloat16, but the projector returns float32, because the log-Mel features are
+  float32 (transformers' processor, which mlx-audio uses, returns them as float32
+  too, and mlx-audio does not cast them) and MLX promotes the bf16 weights'
+  output to the input's dtype. Scattering float32 into the bf16 array rounds
+  every audio embedding to bf16 (1.0001 → 1.0). Keep the promotion in any
+  migration; the failure is invisible in the text and shows up only as different
   logits.
 * **Stop tokens: fixed upstream, keep resolving them anyway.** mlx-audio carried
   `_VOXTRAL_EOS_TOKEN_IDS = [2, 4, 32000]`, where 32000 is not a pad token but the
   ordinary text token `" Capital"`, so a transcript containing that word was
   truncated silently — clean prose that merely ended early. Our
   [Blaizzy/mlx-audio#901](https://github.com/Blaizzy/mlx-audio/pull/901) fixed it to
-  `[2, 4, 11]`, merged 2026-09-02 but **not in a release yet** (0.5.1 shipped
-  2026-08-31 and still carries 32000), so set the `mlx-audio>=` floor to whatever
-  release first contains it. **Do not rely on the library default even then**:
+  `[2, 4, 11]`, merged 2026-09-02 and **first released in 0.5.2** (2026-09-07;
+  0.5.1 of 2026-08-31 still carries 32000), so the `mlx-audio>=` floor is 0.5.2. **Do not rely on the library default even then**:
   resolve the ids from the processor, as `_resolve_stop_tokens` does, and pass them
   explicitly on both decode paths.
 * mlx-audio vendors its own `generate_step` (`mlx_audio.lm.generate`) rather than
