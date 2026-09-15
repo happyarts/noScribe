@@ -45,7 +45,8 @@ pytest with no fixtures directory. The editor is a separate app with separate de
 **Git LFS is what ships the large model files, but nothing is LFS-tracked in this working copy**
 (`git lfs ls-files` is empty). The `post-commit`, `post-checkout`, `post-merge` and `pre-push`
 hooks still run on every operation and have stalled commits and cherry-picks here with no LFS
-work to do. Prefix git commands with `git -c core.hooksPath=/dev/null` when one hangs.
+work to do. Prefix git commands with `git -c core.hooksPath=/dev/null` when one hangs;
+`--no-verify` does not help, it skips only the pre-commit and commit-msg hooks.
 
 CI (`.github/workflows/pytest.yml`) runs the suite on Linux against
 `environments/requirements_linux.txt` on Python 3.10 and 3.13, so anything added must import
@@ -73,7 +74,8 @@ conspire here. Get any of them wrong and the test suite stays green while the fr
 
 `tests/test_worker_import_lightweight.py` guards all three — including a walk over
 `pyinstaller/*.spec` for point 2. Claims about frozen behaviour cannot
-be derived from source — prove them with a throwaway PyInstaller build.
+be derived from source — prove them with a throwaway PyInstaller build (a minimal package that
+reproduces the structure freezes in about a minute and needs no models).
 
 ### Worker protocol
 
@@ -133,6 +135,9 @@ changing a number, and check whether a test in `tests/` pins it.
   `main`, which stays a clean mirror of upstream. `tools/check_local_current.py` exists because
   a merge can drop a branch's improvement while `git merge` still says "Already up to date";
   its `INTENTIONAL` table records the lines local/main deliberately differs on.
+- **Stage explicit paths on branches cut from `main`.** They carry upstream's `.gitignore`, which
+  does not exclude `Audiotest/`, `Audiotest2/` (private recordings), `models/voxtral-*` or
+  `venv/`, so `git add -A` there would stage them.
 - **`origin/voxtral` is the fork's default branch** and a pure mirror of `local/main`: every push of
   `local/main` is followed by `git push origin local/main:voxtral`.
 - **Never write `kaixxx/noScribe#N` in a pull request or issue on the fork.** GitHub turns it into
