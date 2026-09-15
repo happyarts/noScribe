@@ -32,7 +32,7 @@ therefore exists only in this working copy.
 ## Commands
 
 ```bash
-venv/bin/python3 -m pytest tests/ -q          # full suite (~396 tests)
+venv/bin/python3 -m pytest tests/ -q          # full suite (~420 tests)
 venv/bin/python3 -m pytest tests/test_loop_breaker.py -q
 venv/bin/python3 -m pytest tests/ -q -k ghost_speaker
 venv/bin/python3 -m noScribe                  # launch the GUI
@@ -99,7 +99,7 @@ and defer heavy imports into the entrypoint.
 
 ### Pipeline
 
-`main.py` drives: convert to WAV (`noScribe/audio/convert.py`, ffmpeg) → diarize
+`main.py` drives: convert to WAV (`noScribe/audio/convert.py`, PyAV) → diarize
 (`pyannote_mp_worker`) → transcribe (whisper or voxtral worker) → merge and write the transcript.
 Which engine runs is decided by the `engine` field on the `WhisperModel` dataclass in
 `transcription.py` (`"whisper"` or `"voxtral"`).
@@ -171,7 +171,8 @@ this was its boundary, which is what a rebuild has to re-establish:
               voxtral_path_long, voxtral_path_short, voxtral_no_disfluencies, loading_voxtral)
               noScribe/__init__.py (one word: ctc_align in _SUBMODULES)
               environments/requirements_macOS_arm64.txt (a two-line comment)
-              tests/test_worker_import_lightweight.py (the voxtral worker in WORKER_MODULES)
+              tests/test_worker_import_lightweight.py (the voxtral worker in WORKER_MODULES and the
+                                                      comment above it)
               .gitignore (only the `models/voxtral-*` line)
 
 Every Voxtral hunk in `noScribe/main.py` is interleaved with small-PR hunks, so build the
@@ -183,6 +184,21 @@ only textually (speaker-names, header-labels, torch-2.13-stack) merged upstream 
 2026-09-08, and the one hard dependency, `fix/lazy-main-import` (`_SUBMODULES`), on
 2026-09-15 together with clear-queue and the CI fix.
 
+The small PRs still open, each cut from `main` and merged into `local/main` (the branches
+`tools/check_local_current.py` walks are the authoritative list; merge-tree finds no conflict
+between any two of them):
+
+- #338 `fix/cancel-log-traceback`: a user cancel no longer logs a traceback (`main.py` only).
+- #341 `feature/ghost-speaker-turn-split`: see the ghost-speaker entry below.
+- #342 `fix/output-dir-dialog`: one folder dialog for a batch, transcript names logged once
+  (`button_transcript_file_event`).
+- #344 `fix/linux-audio-dialog-duplicates`: `button_audio_file_event` pre-selects the current
+  files only on Windows, plus `tests/test_audio_dialog_preselect.py`. Tk's own X11 dialog
+  appended every confirmed file to the pre-selection, so it grew on each reopening, and the
+  macOS panel read the quoted list as a path and ignored `initialdir`. Tk fixed its side the
+  same day (Tk ticket 56eec524d7, all three branches), but not in a release yet, so the
+  guard stays.
+
 **On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
 
@@ -192,8 +208,12 @@ Voxtral PR:
   branch, `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`:
   upstream PR #341. The wrapper `on_segment_split` sits after `on_segment` rather than renaming
   it, so the branch merges cleanly with the other open PRs. `docs/diarization.md` stays local: it also documents the
-  fast-embeddings path below, and upstream has no `docs/` directory.
-- `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py`: the
+  fast-embeddings path below, and upstream has no `docs/` directory. Voxtral depends on this
+  branch in practice: its call in `main.py` passes `on_segment_split`, and the cut repairs a
+  misattribution that Voxtral's own short-cue merge causes (`voxtral_engine.py`), so the Voxtral
+  PR should follow #341 rather than drop the wrapper.
+- `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
+  `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
 - `Romy` → `Mona` in `tests/test_utils.py` and `tests/test_apostrophe_fix.py`: an edit to
   upstream's own test data. Stays local.
@@ -221,7 +241,8 @@ makes it look:
 - **`local_build_stamp()` in `noScribe/main.py`** and its call in the transcript header, plus
   `tests/test_local_build_stamp.py` — stamps transcripts with the git commit and the author's
   initials; local provenance only. The PR keeps `t('doc_header', version=app_version)`.
-- The `.gitignore` lines for `noScribeEdit/`, `Audiotest/`, `Audiotest2/` and `venv/` — local
+- The `.gitignore` changes for `noScribeEdit/` (upstream ignores the whole directory, the fork
+  only its `Test/`, `build/` and `dist/`), `Audiotest/`, `Audiotest2/` and `venv/` — local
   environment; only `models/voxtral-*` is Voxtral's.
 
 ## Test suite character
