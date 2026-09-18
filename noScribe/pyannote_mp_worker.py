@@ -4,6 +4,7 @@ import os
 import platform
 import sys
 import traceback
+from pathlib import Path
 
 if platform.system() == "Darwin" and platform.machine() == "x86_64":
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -49,6 +50,21 @@ def load_waveform(audio_file):
     # .contiguous() is a no-op for mono (the (frames, 1) transpose is already
     # contiguous); it only copies in the hypothetical multichannel case.
     return torch.from_numpy(data.T).contiguous(), sample_rate  # (ch, frames)
+
+
+def bundled_pipeline_dir():
+    """The folder holding noScribe's diarization pipeline (config.yaml and the
+    models it names).
+
+    That folder is the top-level ``pyannote/``, which shares the ``pyannote``
+    namespace with the installed library, so ``impres.files("pyannote")`` is a
+    view over both directories rather than a path. ``impres.as_file`` can only
+    hand out such a directory from Python 3.12 on -- on 3.10 and 3.11 it raised
+    FileNotFoundError and diarization never started -- and even there it
+    copies the whole merged tree, library included, on every run. The config
+    file inside it resolves to its real location on every version.
+    """
+    return Path(impres.files("pyannote") / "config.yaml").parent
 
 
 @contextlib.contextmanager
@@ -140,8 +156,8 @@ def pyannote_proc_entrypoint(args: dict, q):
             else:
                 raise Exception('Platform not supported yet.')
 
-        with impres.as_file(impres.files("pyannote")) as mypath, hide_speechbrain():
-            pipeline = Pipeline.from_pretrained(mypath)
+        with hide_speechbrain():
+            pipeline = Pipeline.from_pretrained(bundled_pipeline_dir())
         waveform, sample_rate = load_waveform(audio_file)
         pipeline.to(torch.device(device))
 
