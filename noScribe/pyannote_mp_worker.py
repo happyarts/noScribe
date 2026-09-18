@@ -83,7 +83,8 @@ def hide_speechbrain():
 
 
 # The shortest stretch of audio an embedding is taken from: a shorter span is
-# widened evenly to this. 1.0 s scored worse -- it reaches into the neighbour.
+# widened evenly to this. 1.0 s reaches into the neighbour: on the unseen pool it
+# broke 237 words instead of 146 (faster-whisper, 93.6 % right instead of 95.9 %).
 EMBED_MIN_S = 0.5
 
 
@@ -110,9 +111,15 @@ def _centroids(diarization):
 def _embed_spans(pipeline, waveform, sample_rate, spans, q):
     """One embedding per [start_s, end_s] span, None where it cannot be had."""
     import numpy as np
-    model = pipeline._embedding
+    # pyannote has no public accessor; without the attribute the check has
+    # nothing to go on and leaves every passage where it is.
+    model = getattr(pipeline, "_embedding", None)
+    # The crops below bypass the pipeline's own resampling, so they are only
+    # valid at the model's rate -- which is what audio.convert.ToWav writes.
+    if model is None or getattr(model, "sample_rate", sample_rate) != sample_rate:
+        return [None] * len(spans)
     frames = waveform.shape[1]
-    shortest = max(int(EMBED_MIN_S * sample_rate), int(getattr(model, "min_num_samples", 0) or 0))
+    shortest = int(EMBED_MIN_S * sample_rate)
     out, last_pct = [], -1
     for i, (start_s, end_s) in enumerate(spans):
         a, b = int(start_s * sample_rate), int(end_s * sample_rate)
@@ -122,9 +129,12 @@ def _embed_spans(pipeline, waveform, sample_rate, spans, q):
             b += missing - missing // 2
         a, b = max(0, a), min(frames, b)
         vector = None
-        if b - a >= shortest // 2:
-            vector = np.asarray(model(waveform[:1, a:b][None]))[0]
-            vector = vector.tolist() if np.all(np.isfinite(vector)) else None
+        if b - a >= shortest // 2:  # less is left only at the very edge of the file
+            try:
+                vector = np.asarray(model(waveform[:1, a:b][None]))[0]
+                vector = vector.tolist() if np.all(np.isfinite(vector)) else None
+            except Exception:
+                vector = None  # one span the model rejects must not cost all the others
         out.append(vector)
         pct = int((i + 1) / len(spans) * 100)
         if pct != last_pct:
@@ -223,6 +233,17 @@ def pyannote_proc_entrypoint(args: dict, q):
             else:
                 raise Exception('Platform not supported yet.')
 
+        # Every unit is embedded at its own length, and MPS compiles and keeps one
+        # graph per distinct input length. On a 44-minute meeting (996 units, 214
+        # lengths) the embed call peaked at 3.1 GB on MPS against 1.6 GB on the
+        # CPU and was no faster (35 s against 33 s); at 15 000 units MPS levels off
+        # at 4.8 GB against a flat 1.5 GB and is ahead by then (4.3 against 7.7
+        # min), which does not pay for 3 GB on a small machine.
+        # torch.mps.empty_cache() holds the memory down but makes every call
+        # slower than the CPU. The embeddings are the same either way.
+        if args.get("embed_spans") is not None and device == 'mps':
+            device = 'cpu'
+
         with impres.as_file(impres.files("pyannote")) as mypath, hide_speechbrain():
             pipeline = Pipeline.from_pretrained(mypath)
         # One embedding-model call per chunk instead of one per speaker slot;
@@ -264,8 +285,12 @@ def pyannote_proc_entrypoint(args: dict, q):
             })
 
         try:
-            q.put({"type": "result", "ok": True, "segments": seg_list,
-                   "centroids": _centroids(diarization)})
+            centroids = _centroids(diarization)
+        except Exception as e:  # optional: never let them cost the diarization
+            plog("warn", f"No speaker centroids: {e}")
+            centroids = {}
+        try:
+            q.put({"type": "result", "ok": True, "segments": seg_list, "centroids": centroids})
         except Exception:
             pass
 
