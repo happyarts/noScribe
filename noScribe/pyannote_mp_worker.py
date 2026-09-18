@@ -50,6 +50,21 @@ def load_waveform(audio_file):
     return torch.from_numpy(data.T).contiguous(), sample_rate  # (ch, frames)
 
 
+def in_order_of_appearance(segments):
+    """{label: label} that numbers the speakers in the order they are first heard.
+
+    pyannote's labels are cluster numbers, so the person who opens the recording
+    is as likely SPEAKER_01 as SPEAKER_00 -- and a transcript that starts with
+    "S01" reads as if somebody were missing.
+    """
+    order = {}
+    for segment in sorted(segments, key=lambda seg: seg['start']):
+        label = segment['label']
+        if label not in order:
+            order[label] = f'SPEAKER_{len(order):02d}'
+    return order
+
+
 def pyannote_proc_entrypoint(args: dict, q):
     """Runs diarization in a child process and streams progress/logs.
     Messages:
@@ -162,6 +177,10 @@ def pyannote_proc_entrypoint(args: dict, q):
                 'end': int(turn.end * 1000),
                 'label': speaker,
             })
+
+        order = in_order_of_appearance(seg_list)
+        for seg in seg_list:
+            seg['label'] = order[seg['label']]
 
         try:
             q.put({"type": "result", "ok": True, "segments": seg_list})
