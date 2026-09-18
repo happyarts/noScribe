@@ -212,6 +212,11 @@ Voxtral PR:
   `NOSCRIBE_VOICE_CHECK=0` switches it off. Voxtral depends on it in practice: the check
   repairs a misattribution that Voxtral's own short-cue merge causes (`voxtral_engine.py`), so
   the Voxtral PR should follow this one.
+- `in_order_of_appearance` in `pyannote_mp_worker.py` (with `tests/test_speaker_order.py`) numbers
+  the speakers in the order they are first heard instead of by pyannote's cluster number. Own
+  branch `feature/speakers-in-order-of-appearance`, cut from `main`. On `local/main` the same
+  mapping also renames the centroids the voice check uses — a line that exists only where both
+  branches meet, so whichever of the two goes upstream second has to carry it.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
   `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
