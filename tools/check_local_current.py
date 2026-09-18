@@ -53,10 +53,6 @@ INTENTIONAL = {
     # die Stelle on_segment_split und daneben den Voxtral-Pfad auf.
     'self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)':
         "lokal mit on_segment_split und Voxtral-Zweig",
-    # fix/pyannote-config-path baut auf fix/speechbrain-guard auf und ersetzt
-    # dessen as_file-Zeile; local/main traegt schon den Nachfolger.
-    'with impres.as_file(impres.files("pyannote")) as mypath, hide_speechbrain():':
-        "lokal durch bundled_pipeline_dir() ersetzt (fix/pyannote-config-path)",
 }
 
 
