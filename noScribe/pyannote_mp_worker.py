@@ -1,10 +1,13 @@
 import contextlib
-import importlib.resources as impres
 import os
 import platform
 import sys
 import traceback
-from pathlib import Path
+
+if sys.version_info >= (3, 12):
+    import importlib.resources as impres
+else:
+    import importlib_resources as impres
 
 if platform.system() == "Darwin" and platform.machine() == "x86_64":
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -50,21 +53,6 @@ def load_waveform(audio_file):
     # .contiguous() is a no-op for mono (the (frames, 1) transpose is already
     # contiguous); it only copies in the hypothetical multichannel case.
     return torch.from_numpy(data.T).contiguous(), sample_rate  # (ch, frames)
-
-
-def bundled_pipeline_dir():
-    """The folder holding noScribe's diarization pipeline (config.yaml and the
-    models it names).
-
-    That folder is the top-level ``pyannote/``, which shares the ``pyannote``
-    namespace with the installed library, so ``impres.files("pyannote")`` is a
-    view over both directories rather than a path. ``impres.as_file`` can only
-    hand out such a directory from Python 3.12 on -- on 3.10 and 3.11 it raised
-    FileNotFoundError and diarization never started -- and even there it
-    copies the whole merged tree, library included, on every run. The config
-    file inside it resolves to its real location on every version.
-    """
-    return Path(impres.files("pyannote") / "config.yaml").parent
 
 
 @contextlib.contextmanager
@@ -174,8 +162,8 @@ def pyannote_proc_entrypoint(args: dict, q):
             else:
                 raise Exception('Platform not supported yet.')
 
-        with hide_speechbrain():
-            pipeline = Pipeline.from_pretrained(bundled_pipeline_dir())
+        with impres.as_file(impres.files("pyannote")) as mypath, hide_speechbrain():
+            pipeline = Pipeline.from_pretrained(mypath)
         # One embedding-model call per chunk instead of one per speaker slot;
         # noScribe/pyannote_fast_embeddings.py carries the measurement and
         # the safety gate. An optimization must never break diarization, so
