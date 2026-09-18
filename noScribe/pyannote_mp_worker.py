@@ -82,13 +82,73 @@ def hide_speechbrain():
             sys.modules["speechbrain"] = previous_speechbrain
 
 
+# The shortest stretch of audio an embedding is taken from: a shorter span is
+# widened evenly to this. 1.0 s scored worse -- it reaches into the neighbour.
+EMBED_MIN_S = 0.5
+
+
+def _centroids(diarization):
+    """The pipeline's own speaker centroids as {label: [float]}, or {}.
+
+    They come for free with the diarization (rows follow ``labels()``). A label
+    can lack one -- more labels than clusters pads the matrix with zeros -- and a
+    recording without speech has none at all; both simply leave voice_check
+    with nothing to compare against.
+    """
+    import numpy as np
+    matrix = getattr(diarization, "speaker_embeddings", None)
+    if matrix is None:
+        return {}
+    out = {}
+    for label, row in zip(diarization.speaker_diarization.labels(), matrix):
+        row = np.asarray(row, dtype="float32")
+        if np.all(np.isfinite(row)) and np.any(row):
+            out[str(label)] = row.tolist()
+    return out
+
+
+def _embed_spans(pipeline, waveform, sample_rate, spans, q):
+    """One embedding per [start_s, end_s] span, None where it cannot be had."""
+    import numpy as np
+    model = pipeline._embedding
+    frames = waveform.shape[1]
+    shortest = max(int(EMBED_MIN_S * sample_rate), int(getattr(model, "min_num_samples", 0) or 0))
+    out, last_pct = [], -1
+    for i, (start_s, end_s) in enumerate(spans):
+        a, b = int(start_s * sample_rate), int(end_s * sample_rate)
+        missing = shortest - (b - a)
+        if missing > 0:
+            a -= missing // 2
+            b += missing - missing // 2
+        a, b = max(0, a), min(frames, b)
+        vector = None
+        if b - a >= shortest // 2:
+            vector = np.asarray(model(waveform[:1, a:b][None]))[0]
+            vector = vector.tolist() if np.all(np.isfinite(vector)) else None
+        out.append(vector)
+        pct = int((i + 1) / len(spans) * 100)
+        if pct != last_pct:
+            last_pct = pct
+            try:
+                q.put({"type": "progress", "step": "voice_check", "pct": pct})
+            except Exception:
+                pass
+    return out
+
+
 def pyannote_proc_entrypoint(args: dict, q):
     """Runs diarization in a child process and streams progress/logs.
     Messages:
       {"type":"log","level":"info|warn|error|debug","msg":str}
       {"type":"progress","step":str,"pct":int}
-      {"type":"result","ok":True,"segments":[{"start":ms,"end":ms,"label":str}]}
+      {"type":"result","ok":True,"segments":[{"start":ms,"end":ms,"label":str}],
+                                 "centroids":{label:[float]}}
       {"type":"result","ok":False,"error":str,"trace":str}
+
+    With ``args["embed_spans"]`` (a list of ``[start_s, end_s]``) the call does
+    not diarize: it returns one speaker embedding per span, from the pipeline's
+    own embedding model, for noScribe.voice_check:
+      {"type":"result","ok":True,"embeddings":[[float]|None]}
     """
     device = ''
     try:
@@ -178,6 +238,11 @@ def pyannote_proc_entrypoint(args: dict, q):
         waveform, sample_rate = load_waveform(audio_file)
         pipeline.to(torch.device(device))
 
+        if args.get("embed_spans") is not None:
+            q.put({"type": "result", "ok": True, "embeddings": _embed_spans(
+                pipeline, waveform, sample_rate, args["embed_spans"], q)})
+            return
+
         seg_list = []
         # A fixed count is an algorithm change, not just a constraint: when the
         # requested number differs from the one VBx would have found, pyannote
@@ -199,7 +264,8 @@ def pyannote_proc_entrypoint(args: dict, q):
             })
 
         try:
-            q.put({"type": "result", "ok": True, "segments": seg_list})
+            q.put({"type": "result", "ok": True, "segments": seg_list,
+                   "centroids": _centroids(diarization)})
         except Exception:
             pass
 
