@@ -39,6 +39,10 @@ INTENTIONAL = {
     # nicht gibt -- die Zeile ist hier also eine echte Obermenge der PR-Zeile.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils")':
         "lokal um ctc_align erweitert",
+    # feature/voice-verified-speakers fuegt voice_check an; lokal steht ctc_align
+    # mit in derselben Zeile.
+    '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils", "voice_check")':
+        "lokal um ctc_align erweitert",
     # Der Voxtral-Worker ist ein drittes Spawn-Ziel und steht lokal mit in der
     # Liste; die Branch-Zeile ist eine Teilmenge der lokalen.
     'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker"]':
@@ -49,10 +53,10 @@ INTENTIONAL = {
     # der Branch traegt die Zeile noch mit der Zuweisung.
     'info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment_split)':
         "lokal ohne die tote info-Zuweisung",
-    # Upstream-PR fix/whisper-dead-info entfernt dieselbe Zuweisung; lokal ruft
-    # die Stelle on_segment_split und daneben den Voxtral-Pfad auf.
+    # Upstream-PR fix/whisper-dead-info entfernt dieselbe Zuweisung; lokal steht
+    # der Aufruf eingerueckt im else-Zweig neben dem Voxtral-Pfad.
     'self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)':
-        "lokal mit on_segment_split und Voxtral-Zweig",
+        "lokal im else-Zweig neben dem Voxtral-Pfad",
 }
 
 

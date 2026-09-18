@@ -194,16 +194,24 @@ only textually (speaker-names, header-labels, torch-2.13-stack) and the one hard
 **On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
 
-- `find_ghost_speakers` and `split_at_speaker_change` in `main.py` (with
-  `tests/test_ghost_speaker.py`, `tests/test_segment_speaker_split.py` and the
-  `warn_ghost_speaker` key in `de`/`en`) are engine-agnostic and have their own
-  branch, `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`:
-  upstream PR #341. The wrapper `on_segment_split` sits after `on_segment` rather than renaming
-  it, so the branch merges cleanly with the other open PRs. `docs/diarization.md` stays local: it also documents the
-  fast-embeddings path below, and upstream has no `docs/` directory. Voxtral depends on this
-  branch in practice: its call in `main.py` passes `on_segment_split`, and the cut repairs a
-  misattribution that Voxtral's own short-cue merge causes (`voxtral_engine.py`), so the Voxtral
-  PR should follow #341 rather than drop the wrapper.
+- `find_ghost_speakers` in `main.py` (with `tests/test_ghost_speaker.py` and the
+  `warn_ghost_speaker` key in `de`/`en`) is engine-agnostic and has its own branch,
+  `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`: upstream
+  PR #341. The branch name is historical — it once also cut segments at speaker changes; that
+  part was withdrawn after measuring it (see the next item). `docs/diarization.md` stays
+  local: it also documents the fast-embeddings path below, and upstream has no `docs/` directory.
+- `noScribe/voice_check.py`, its second call to the diarization worker
+  (`_run_voice_embeddings`, the `embed_spans` mode and `_centroids` in `pyannote_mp_worker.py`),
+  `check_voices` in `main.py`, `tests/test_voice_check.py` and the `voice_check_*` keys in
+  `de`/`en` are engine-agnostic and have their own branch, `feature/voice-verified-speakers`,
+  cut from `main` and merged into `local/main`. It checks each passage's speaker against the
+  voice and replaced the sentence split (`split_at_speaker_change`), which broke about as many
+  words as it repaired on Whisper segments. The module docstring carries the measurement and
+  everything that was tried and left out; the scripts and data behind it are in
+  `benchmarks-local/whisper-split-ab/`, `benchmarks-local/ami/` and `benchmarks-local/callhome/`.
+  `NOSCRIBE_VOICE_CHECK=0` switches it off. Voxtral depends on it in practice: the check
+  repairs a misattribution that Voxtral's own short-cue merge causes (`voxtral_engine.py`), so
+  the Voxtral PR should follow this one.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
   `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
