@@ -212,6 +212,15 @@ Voxtral PR:
   `NOSCRIBE_VOICE_CHECK=0` switches it off. Voxtral depends on it in practice: the check
   repairs a misattribution that Voxtral's own short-cue merge causes (`voxtral_engine.py`), so
   the Voxtral PR should follow this one.
+- Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`, the
+  reworded `warn_speaker_names_more_speakers` in all nine languages, tests in
+  `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
+  from `main`. It numbers where a speaker is first *written*; numbering the diarization instead
+  missed 17 of 132 recordings (the docstring has the measurement). Because a label named before
+  the transcript exists no longer says who is meant, `local/main` reports ghost speakers and the
+  voice check's moved passages only after the transcription, under the written names — lines that
+  exist only where these branches meet (`tools/check_local_current.py` lists them), so whichever
+  of them goes upstream later has to bring its half.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
   `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
