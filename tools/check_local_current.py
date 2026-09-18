@@ -49,6 +49,10 @@ INTENTIONAL = {
     # der Branch traegt die Zeile noch mit der Zuweisung.
     'info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment_split)':
         "lokal ohne die tote info-Zuweisung",
+    # Upstream-PR fix/whisper-dead-info entfernt dieselbe Zuweisung; lokal ruft
+    # die Stelle on_segment_split und daneben den Voxtral-Pfad auf.
+    'self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)':
+        "lokal mit on_segment_split und Voxtral-Zweig",
 }
 
 
