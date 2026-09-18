@@ -161,21 +161,6 @@ def _embed_spans(pipeline, waveform, sample_rate, spans, q):
     return out
 
 
-def in_order_of_appearance(segments):
-    """{label: label} that numbers the speakers in the order they are first heard.
-
-    pyannote's labels are cluster numbers, so the person who opens the recording
-    is as likely SPEAKER_01 as SPEAKER_00 -- and a transcript that starts with
-    "S01" reads as if somebody were missing.
-    """
-    order = {}
-    for segment in sorted(segments, key=lambda seg: seg['start']):
-        label = segment['label']
-        if label not in order:
-            order[label] = f'SPEAKER_{len(order):02d}'
-    return order
-
-
 def pyannote_proc_entrypoint(args: dict, q):
     """Runs diarization in a child process and streams progress/logs.
     Messages:
@@ -314,13 +299,8 @@ def pyannote_proc_entrypoint(args: dict, q):
                 'label': speaker,
             })
 
-        order = in_order_of_appearance(seg_list)
-        for seg in seg_list:
-            seg['label'] = order[seg['label']]
-
         try:
-            centroids = {order.get(label, label): centroid  # under the same new names as the turns
-                         for label, centroid in _centroids(diarization).items()}
+            centroids = _centroids(diarization)
         except Exception as e:  # optional: never let them cost the diarization
             plog("warn", f"No speaker centroids: {e}")
             centroids = {}
