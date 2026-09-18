@@ -43,6 +43,11 @@ INTENTIONAL = {
     # mit in derselben Zeile.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils", "voice_check")':
         "lokal um ctc_align erweitert",
+    # feature/voice-verified-speakers liest die Zentroiden direkt; lokal werden sie
+    # zusaetzlich nach der Reihenfolge des Auftretens umbenannt
+    # (feature/speakers-in-order-of-appearance), damit sie zu den Turns passen.
+    'centroids = _centroids(diarization)':
+        "lokal mit der Umbenennung nach Reihenfolge des Auftretens",
     # Der Voxtral-Worker ist ein drittes Spawn-Ziel und steht lokal mit in der
     # Liste; die Branch-Zeile ist eine Teilmenge der lokalen.
     'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker"]':
