@@ -56,7 +56,7 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 from i18n import t
 from PIL import Image
 
-from . import audio, exception, transcription, utils
+from . import audio, exception, transcription, utils, voice_check
 from .CTkToolTips import CTkToolTip
 from .tkHyperlinkManager import HyperlinkManager
 
@@ -363,6 +363,7 @@ class TranscriptionJob:
         # Processing options
         self.speaker_detection: str = 'auto'
         self.speaker_names: list = []  # real names, mapped in order of first appearance
+        self.speaker_centroids: dict = {}  # diarization label -> voice centroid, for voice_check
         # Built while this job's segments stream in: diarization label -> name.
         # Lives on the job, so mappings can never leak between queued jobs, and
         # is rebuilt by set_running() so a repeated job starts from scratch too.
@@ -2992,9 +2993,23 @@ class App(ctk.CTk):
                     last_segment_end = 0
                     last_timestamp_ms = 0
                     first_segment = True
+                    # For noScribe.voice_check: every segment as streamed, with the
+                    # speaker it was given. `rewriting` silences log, autosave and
+                    # progress while the transcript is written a second time.
+                    voice_segments = []
+                    rewriting = False
 
-                    def on_segment(seg):
+                    def on_segment(seg, forced_speaker=None, fallback_speaker=''):
                         nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
+
+                        def say(*args, **kwargs):
+                            if not rewriting:
+                                self.log(*args, **kwargs)
+
+                        def sayn(*args, **kwargs):
+                            if not rewriting:
+                                self.logn(*args, **kwargs)
+
                         # Map dict to simple object-like for existing code
                         class _Seg:
                             __slots__ = ("start", "end", "text", "words")
@@ -3037,10 +3052,10 @@ class App(ctk.CTk):
                             a.name = f'ts_{orig_audio_start_pause}_{orig_audio_end_pause}_{speaker_disp}'
                             a.appendText(pause_str)
                             p.appendChild(a)
-                            self.log(pause_str)
+                            say(pause_str)
                             if first_segment:
-                                self.logn()
-                                self.logn()
+                                sayn()
+                                sayn()
                         last_segment_end = end
 
                         # write text to the doc
@@ -3055,7 +3070,7 @@ class App(ctk.CTk):
                             # means two speakers who were given the same name still
                             # start separate paragraphs, and a name that happens to
                             # begin with "//" is not mistaken for the overlap marker.
-                            new_speaker = find_speaker(diarization, start, end)
+                            new_speaker = forced_speaker or find_speaker(diarization, start, end) or fallback_speaker
                             new_speaker_disp = self._apply_speaker_name(new_speaker, job)
                             if (speaker != new_speaker) and (new_speaker != ''): # speaker change
                                 if new_speaker[:2] == '//': # is overlapping speech, create no new paragraph
@@ -3076,12 +3091,12 @@ class App(ctk.CTk):
                                             last_elem.appendText('//')
                                         else:
                                             p.appendText('//')
-                                        self.log('//')
+                                        say('//')
                                     p = d.createElement('p')
                                     main_body.appendChild(p)
                                     if not first_segment:
-                                        self.logn()
-                                        self.logn()
+                                        sayn()
+                                        sayn()
                                     speaker = new_speaker
                                     speaker_disp = new_speaker_disp
                                     # add timestamp
@@ -3123,9 +3138,12 @@ class App(ctk.CTk):
                         a = d.createElementFromHTML(a_html)
                         p.appendChild(a)
 
-                        self.log(seg_text)
+                        say(seg_text)
                         
                         first_segment = False
+                        if rewriting:
+                            return
+                        voice_segments.append((seg, speaker.lstrip('/')))
 
                         # auto save periodically
                         nonlocal last_auto_save
@@ -3141,8 +3159,62 @@ class App(ctk.CTk):
                         except Exception:
                             pass
                     
+                    def check_voices():
+                        """Second look at every passage's speaker (noScribe.voice_check).
+
+                        Runs when the transcript is complete, so nothing here can
+                        cost a finished job: on any failure the transcript stays
+                        as the diarization alone had it.
+                        """
+                        nonlocal rewriting, first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
+                        short = lambda label: f'S{label[8:]}'  # as find_speaker spells it
+                        centroids = {short(k): v for k, v in (job.speaker_centroids or {}).items()}
+                        if len(centroids) < 2 or not voice_segments:
+                            return
+                        save_doc()  # the transcript as it stands, before anything is touched
+                        self.logn()
+                        self.logn()
+                        self.logn(t('voice_check_start'))
+                        turns = [dict(turn, label=short(turn['label'])) for turn in diarization]
+                        passages, changed = voice_check.relabel(
+                            voice_segments, turns, centroids,
+                            lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans))
+                        if changed:
+                            # Write the transcript again from the top, header kept.
+                            written = list(main_body.children)[2:]
+                            for node in written:
+                                main_body.removeChild(node)
+                            p = d.createElement('p')
+                            main_body.appendChild(p)
+                            speaker = speaker_disp = prev_speaker = ''
+                            last_segment_end = last_timestamp_ms = 0
+                            first_segment = True
+                            rewriting = True
+                            try:
+                                for passage, label, given in passages:
+                                    on_segment(passage, label, given)
+                            except Exception:
+                                # Half a rewrite is worse than none: put back what was there.
+                                for node in list(main_body.children)[2:]:
+                                    main_body.removeChild(node)
+                                for node in written:
+                                    main_body.appendChild(node)
+                                first_segment = False
+                                raise
+                            finally:
+                                rewriting = False
+                        self.logn()
+                        self.logn(t('voice_check_done', count=changed))
+
                     try:
                         info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)
+                        if diarization and voice_check.enabled():
+                            try:
+                                check_voices()
+                            except Exception as err:
+                                if self.cancel:
+                                    raise
+                                self.logn(f'Voice check skipped: {err}', where='file')
                         transcription_success = True
                         # if self.cancel:
                         #    raise Exception(t('err_user_cancelation')) 
@@ -3421,6 +3493,23 @@ class App(ctk.CTk):
         """Spawn a subprocess to run diarization and return list of segments.
         Streams child logs/progress back to GUI and honors cancel.
         """
+        result = self._run_pyannote_worker(tmp_audio_file, job, {
+            "num_speakers": (int(job.speaker_detection) if str(job.speaker_detection).isdigit() else None),
+        })
+        job.speaker_centroids = result.get("centroids") or {}
+        return result.get("segments") or []
+
+    def _run_voice_embeddings(self, tmp_audio_file: str, job, spans):
+        """One speaker embedding per [start_s, end_s] span, for noScribe.voice_check.
+
+        A second, short call to the diarization worker: the embedding model lives
+        there, and the spans only exist once the transcript does.
+        """
+        result = self._run_pyannote_worker(tmp_audio_file, job, {"embed_spans": spans})
+        return result.get("embeddings") or []
+
+    def _run_pyannote_worker(self, tmp_audio_file: str, job, extra_args: dict) -> dict:
+        """Run pyannote_mp_worker once and return its result message."""
         global force_pyannote_cpu
         ctx = mp.get_context("spawn")
         q = ctx.Queue()
@@ -3428,7 +3517,7 @@ class App(ctk.CTk):
         args = {
             "device": 'cpu' if force_pyannote_cpu else '',
             "audio_path": tmp_audio_file,
-            "num_speakers": (int(job.speaker_detection) if str(job.speaker_detection).isdigit() else None),
+            **extra_args,
         }
         proc = ctx.Process(target=pyannote_proc_entrypoint, args=(args, q))
         proc.start()
@@ -3436,7 +3525,7 @@ class App(ctk.CTk):
         self._mp_proc = proc
         self._mp_queue = q
 
-        diarization = None
+        result = None
         try:
             while True:
                 try:
@@ -3468,7 +3557,7 @@ class App(ctk.CTk):
                         self.set_progress(2, 30 + (progress_percent * 0.7), job.speaker_detection)
                 elif mtype == "result":
                     if msg.get("ok"):
-                        diarization = msg.get("segments", [])
+                        result = msg
                     else:
                         err = msg.get('error', 'Diarization failed')
                         trc = msg.get('trace')
@@ -3500,7 +3589,7 @@ class App(ctk.CTk):
             self._mp_proc = None
             self._mp_queue = None
 
-        return diarization or []
+        return result or {}
     
     def on_closing(self):
         # (see: https://stackoverflow.com/questions/111155/how-do-i-handle-the-window-close-event-in-tkinter)
