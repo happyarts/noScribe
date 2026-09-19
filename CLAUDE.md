@@ -228,10 +228,11 @@ Voxtral PR:
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
 - `Romy` → `Mona` in `tests/test_utils.py` and `tests/test_apostrophe_fix.py`: an edit to
   upstream's own test data. Stays local.
-- The removal of the `_Info` object that `_run_engine_subprocess_stream` used to return:
-  upstream carries the same dead value (`info_obj` in `_run_whisper_subprocess_stream`), so
-  this is a candidate for its own small PR, written against upstream's shape rather than
-  cherry-picked — the fork's shared pump does not exist there. Not part of Voxtral.
+- The removal of the `_Info` object that `_run_engine_subprocess_stream` used to return.
+  Upstream declined the same removal (PR #349, closed 2026-09-19): the maintainer means to
+  use `info_obj` from `_run_whisper_subprocess_stream` in a coming change. So the Voxtral PR
+  must not carry this removal — its shared pump returns the `_Info` again, as upstream's
+  does, and whatever upstream then reads from it has to work for Voxtral's result too.
 
 **These are fork-only and must never appear in that pull request**, however convenient the diff
 makes it look:
