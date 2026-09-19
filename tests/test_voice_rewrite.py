@@ -108,7 +108,8 @@ def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True):
     app = FakeApp(voice_at)
     scope = {'datetime': datetime, 'html': html, 'utils': utils, 'voice_check': voice_check,
              't': lambda key, **kwargs: f'{key}{kwargs or ""}', 'duration': 3600.0, 'sampling_rate': 16000,
-             'speech_chunks': []}
+             'speech_chunks': [],
+             'is_voxtral': False}  # local/main only: on_segment reads it, upstream's does not
     exec(compile(_lift(), str(MAIN), 'exec'), scope)
     on_segment, check_voices, voice_segments, first_segment = scope['build'](app, job, d, main_body, diarization, 'audio.wav')
     return types.SimpleNamespace(app=app, job=job, d=d, scope=scope, on_segment=on_segment,

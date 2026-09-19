@@ -202,11 +202,13 @@ Voxtral PR:
   local: it also documents the fast-embeddings path below, and upstream has no `docs/` directory.
 - `noScribe/voice_check.py`, its second call to the diarization worker
   (`_run_voice_embeddings`, the `embed_spans` mode and `_centroids` in `pyannote_mp_worker.py`),
-  `check_voices` in `main.py`, `tests/test_voice_check.py` and the `voice_check_*` keys in
-  `de`/`en` are engine-agnostic and have their own branch, `feature/voice-verified-speakers`,
-  cut from `main` and merged into `local/main`. It checks each passage's speaker against the
-  voice and replaced the sentence split (`split_at_speaker_change`), which broke about as many
-  words as it repaired on Whisper segments. The module docstring carries the measurement and
+  `check_voices` in `main.py`, `tests/test_voice_{check,rewrite,embeddings}.py` and the
+  `voice_check_*` keys in all nine languages are engine-agnostic and have their own branch,
+  `feature/voice-verified-speakers`, cut from `main` and merged into `local/main`: upstream
+  PR #351. It checks each passage's speaker against the voice and replaced the sentence
+  split (`split_at_speaker_change`), which moved 83 of 100 words rightly on Whisper segments
+  overall but did net harm on some corpora. Its margins are chosen for the fewest wrong words
+  afterwards, whichever side caused them -- not for rare broken ones. The module docstring carries the measurement and
   everything that was tried and left out; the scripts and data behind it are in
   `benchmarks-local/whisper-split-ab/`, `benchmarks-local/ami/` and `benchmarks-local/callhome/`.
   `NOSCRIBE_VOICE_CHECK=0` switches it off. Voxtral depends on it in practice: the check

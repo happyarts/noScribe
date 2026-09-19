@@ -43,6 +43,10 @@ INTENTIONAL = {
     # mit in derselben Zeile.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils", "voice_check")':
         "lokal um ctc_align erweitert",
+    # Der Schreib-Test hebt on_segment aus main.py; lokal liest es is_voxtral,
+    # also steht die Variable im Test-Scope und die Zeile endet anders.
+    "'speech_chunks': []}":
+        "lokal um is_voxtral ergaenzt (on_segment liest es nur hier)",
     # Wo die Nummerierung nach Auftreten (feature/speakers-in-order-of-appearance),
     # die Stimmpruefung (warn-Parameter) und die Geister-Meldung zusammentreffen,
     # lauten fuenf Zeilen lokal anders: die Warnbedingung traegt beide Zusaetze,
