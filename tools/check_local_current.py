@@ -47,19 +47,15 @@ INTENTIONAL = {
     # also steht die Variable im Test-Scope und die Zeile endet anders.
     "'speech_chunks': []}":
         "lokal um is_voxtral ergaenzt (on_segment liest es nur hier)",
-    # Wo die Nummerierung nach Auftreten (feature/speakers-in-order-of-appearance),
-    # die Stimmpruefung (warn-Parameter) und die Geister-Meldung zusammentreffen,
-    # lauten fuenf Zeilen lokal anders: die Warnbedingung traegt beide Zusaetze,
-    # und Geister-Meldung wie Bewegungsprotokoll nennen den Sprecher unter dem
-    # Namen, unter dem er geschrieben wurde -- deshalb erst nach der Transkription.
+    # Wo die Nummerierung nach Auftreten (feature/speakers-in-order-of-appearance)
+    # und die Stimmpruefung (warn-Parameter) zusammentreffen, lauten drei Zeilen
+    # lokal anders: die Warnbedingung traegt beide Zusaetze, und das Bewegungs-
+    # protokoll nennt den Sprecher unter dem Namen, unter dem er geschrieben
+    # wurde -- deshalb erst nach der Transkription.
     'if names and idx == len(names):':
         "lokal zusaetzlich mit 'and warn' (Stimmpruefung schreibt still neu)",
     'if idx == len(names) and warn:':
         "lokal zusaetzlich mit 'names and' (Nummerierung nach Auftreten)",
-    'for label, share, longest in find_ghost_speakers(diarization):':
-        "lokal erst nach der Transkription gemeldet, unter dem geschriebenen Namen",
-    "speaker=f'S{label[8:]}',":
-        "lokal speaker=written_as (Name/Nummer aus job.speaker_name_map)",
     "f\"{before} -> {after}:{passage['text'][:60]}\", where='file')":
         "lokal unter den geschriebenen Namen (shown(...)) und nach dem Neuschreiben",
     # Der Voxtral-Worker ist ein drittes Spawn-Ziel und steht lokal mit in der

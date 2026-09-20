@@ -33,7 +33,7 @@ therefore exists only in this working copy.
 ```bash
 venv/bin/python3 -m pytest tests/ -q          # full suite
 venv/bin/python3 -m pytest tests/test_loop_breaker.py -q
-venv/bin/python3 -m pytest tests/ -q -k ghost_speaker
+venv/bin/python3 -m pytest tests/ -q -k voice_check
 venv/bin/python3 -m noScribe                  # launch the GUI
 ```
 
@@ -194,15 +194,6 @@ only textually (speaker-names, header-labels, torch-2.13-stack) and the one hard
 **On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
 
-- `find_ghost_speakers` in `main.py` (with `tests/test_ghost_speaker.py` and the
-  `warn_ghost_speaker` key in `de`/`en`) is engine-agnostic and has its own branch,
-  `feature/ghost-speaker-turn-split`, cut from `main` and merged into `local/main`. Upstream
-  PR #341 was closed on 2026-09-19 by agreement: two right reports in three, and only one
-  surplus label in eight found, so silence misleads. It stays fork-only; a replacement that
-  tests a label's voice against the other speakers' centroids (the voice check's data) is
-  being measured and would be its own PR after #351. The branch name is historical — it once also cut segments at speaker changes; that
-  part was withdrawn after measuring it (see the next item). `docs/diarization.md` stays
-  local: it also documents the fast-embeddings path below, and upstream has no `docs/` directory.
 - `noScribe/voice_check.py`, its second call to the diarization worker
   (`_run_voice_embeddings`, the `embed_spans` mode and `_centroids` in `pyannote_mp_worker.py`),
   `check_voices` in `main.py`, `tests/test_voice_{check,rewrite,embeddings}.py` and the
@@ -222,8 +213,8 @@ Voxtral PR:
   `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
   from `main`. It numbers where a speaker is first *written*; numbering the diarization instead
   missed 17 of 132 recordings (the docstring has the measurement). Because a label named before
-  the transcript exists no longer says who is meant, `local/main` reports ghost speakers and the
-  voice check's moved passages only after the transcription, under the written names — lines that
+  the transcript exists no longer says who is meant, `local/main` reports the voice check's
+  moved passages only after the transcription, under the written names — lines that
   exist only where these branches meet (`tools/check_local_current.py` lists them), so whichever
   of them goes upstream later has to bring its half.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
@@ -263,8 +254,8 @@ makes it look:
 ## Test suite character
 
 Many tests are regression guards for defects found in production or in upstream libraries rather
-than unit tests of new code — forced-align caps and density, loop breaking, ghost speakers, lost
-head recovery, prefix-salvage alignment. Their docstrings explain the failure they prevent. When a
+than unit tests of new code — forced-align caps and density, loop breaking, lost head
+recovery, prefix-salvage alignment. Their docstrings explain the failure they prevent. When a
 test looks arbitrary, read its docstring before changing it: several encode a bug that was
 expensive to find, and one (`test_forced_align_stability.py`) pins the numpy forced-alignment DP
 (`noScribe/ctc_align.py`) to a reference recorded from torchaudio in `tests/data/`.

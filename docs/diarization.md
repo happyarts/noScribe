@@ -2,12 +2,13 @@
 
 Written after a run with automatic speaker counting invented a third speaker on
 a two-person recording and put a word from the middle of a sentence under it.
-What shipped in the end is documented where it lives — the surplus-label report
-in the comment above `GHOST_SPEAKER_MAX_SHARE` in `noScribe/main.py`, the cue fix
-in `_segments_from_words` in `noScribe/voxtral_engine.py`, both pinned by
-`tests/test_ghost_speaker.py` and `tests/test_cut_and_cue_quality.py`. This file
-keeps only what the code cannot carry: the baseline that licenses those numbers,
-and the approaches that were measured and rejected, so they are not re-had.
+What shipped in the end is the cue fix in `_segments_from_words` in
+`noScribe/voxtral_engine.py`, pinned by `tests/test_cut_and_cue_quality.py`. The
+surplus label itself is not reported any more: a detector for it was built,
+measured on far more material and removed again — `docs/surplus-speaker-labels.md`
+has that study. This file keeps only what the code cannot carry: the baseline that
+licenses those numbers, and the approaches that were measured and rejected, so
+they are not re-had.
 
 ## Does our setup reproduce the published numbers?
 
@@ -61,9 +62,9 @@ report rather than a repair.
   cos(segment, own centroid) = 0.93/0.96 — the speaker axis is buried in the
   content, which is what an ASR encoder is trained for.
 
-Rejected for the same reason but documented in the code, because the numbers
-belong next to the decision: **relabelling the spurious cluster in noScribe**
-(see the comment above `GHOST_SPEAKER_MAX_SHARE` in `noScribe/main.py`).
+Rejected for the same reason: **relabelling the spurious cluster in noScribe**.
+Folding each of its turns into the nearest neighbour placed 10 of 56 wrong, and a
+later attempt with voice embeddings did no better (`docs/surplus-speaker-labels.md`).
 
 ## Two MLX candidates, surveyed and not pursued
 
