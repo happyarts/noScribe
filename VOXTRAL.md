@@ -9,9 +9,9 @@ where Whisper mis-hears them (e.g. *Wortfindungsstörungen*, not
 *Gottfindungsstörungen*), spells consistently, and produces fluent, readable
 sentences instead of literal disfluent strings. With the 3B model it runs
 several times **faster than realtime**; the 24B build is slower than the
-recording (see the table below). It loops on hard audio far less than Whisper
-does — and where it does, the engine detects the loop and repairs the pass
-instead of shipping the damage.
+recording (see the table below). Left to itself it falls into repetition loops
+on hard audio more often than Whisper does, which is why the engine detects a
+loop and repairs the pass instead of shipping the damage.
 
 ## Install (macOS, Apple Silicon)
 
