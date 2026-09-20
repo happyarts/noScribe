@@ -286,10 +286,12 @@ def pyannote_proc_entrypoint(args: dict, q):
         seg_list = []
         # A fixed count is an algorithm change, not just a constraint: when the
         # requested number differs from the one VBx would have found, pyannote
-        # falls back from VBxClustering to KMeans. Worth knowing before adding
-        # min_speakers/max_speakers, which the pipeline does accept and which
-        # would be the more useful knob -- automatic counting guesses too few
-        # three to four times more often than too many (docs/diarization.md).
+        # falls back from VBxClustering to KMeans. Measured on VoxConverse dev: it
+        # helps where the automatic count is too high and the speakers are few
+        # (9 of 11 files better), and more than doubles the DER where the count was
+        # too low -- KMeans splits a large speaker instead of finding the missed
+        # one. That is why min_speakers/max_speakers, which the pipeline accepts,
+        # are not surfaced (docs/surplus-speaker-labels.md).
         with SimpleProgressHook() as hook:
             if num_speakers is not None:
                 diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, hook=hook, num_speakers=num_speakers)

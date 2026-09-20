@@ -104,9 +104,9 @@ one of them merge, `pyannote_fast_embeddings` reduces to a version gate.
 
 ## Open
 
-Surface `min_speakers` / `max_speakers` — pyannote accepts both, noScribe offers
-only "auto" or an exact number. By the counts above, the **lower** bound is the
-more valuable half. The caveat is noted at the call site in
-`noScribe/pyannote_mp_worker.py`: a requested count that differs from the
-automatically found one drops `VBxClustering` into KMeans, so this is an
-algorithm change and not a pure win.
+Nothing at present. Surfacing `min_speakers` / `max_speakers` was measured and
+dropped: forcing the true number where the automatic count is too low more than
+doubles the DER (KMeans splits a large speaker instead of finding the missed one),
+and an upper bound does nothing the exact number does not already do. The table,
+and the study of how well surplus labels can be recognised after the fact, are in
+`docs/surplus-speaker-labels.md`.
