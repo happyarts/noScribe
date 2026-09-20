@@ -151,16 +151,26 @@ changing a number, and check whether a test in `tests/` pins it.
 - **A measurement lives next to what it justifies**: a tuning constant carries it in the comment
   above it, a regression guard in its test docstring, and only what fits neither goes to `docs/`.
 
-## The Voxtral pull request, when it happens
+## The Voxtral pull request
 
-Voxtral goes upstream as **one** feature PR, deliberately not split, and **after** the smaller
-PRs have merged. It therefore has to be built from `local/main` minus everything the other PR
-branches carry. The branch that used to hold it (`feature/voxtral-engine`, tip `8f132bc`) was
-deleted once it had fallen far behind: opening a PR from it would have shipped errors
-that have since been corrected. Rebuild it from today's `local/main` instead.
+Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
+`feature/voxtral-engine`, rebuilt on 2026-09-20 from `upstream/main` plus `local/main`'s
+Voxtral set (the earlier branch of that name, tip `8f132bc`, was deleted once it had fallen far
+behind). It is cut from `main` and carries **neither of the still-open small PRs**, so its diff
+is Voxtral alone; it overlaps with both textually in `noScribe/main.py`, and whichever merges
+first, the rest is rebased. It is five commits (engine, integration, tests, tools, docs); keep
+that shape when rebuilding. `docs/scripts/` needs `git add -f` there -- upstream's `.gitignore`
+has a `scripts/` entry. The PR text lives in `benchmarks-local/voxtral-pr-description.md`.
 
-That branch was cleanly isolated — it contained none of the other PR branches' commits — and
-this was its boundary, which is what a rebuild has to re-establish:
+To refresh the branch after `local/main` moved: check the Voxtral-only files out of
+`local/main` wholesale, and carry `main.py` changes over by hand -- its Voxtral hunks sit
+between the other branches' hunks but share only two with them (`diarization = None`, which the
+voice check adds identically, and the `try:` block that dispatches on the engine).
+`tools/check_local_current.py` must stay green for the branch; its `INTENTIONAL` table lists the
+lines the branch deliberately differs on. In the branch's copy of `docs/migration-mlx-audio.md`
+three references to files outside the PR (`docs/diarization.md`, `benchmarks-local/`) are removed.
+
+This is its boundary:
 
     added     VOXTRAL.md · environments/requirements_voxtral_macOS_arm64.txt
               noScribe/{voxtral_engine,voxtral_mp_worker,transcript_corrections,ctc_align}.py
@@ -183,13 +193,9 @@ this was its boundary, which is what a rebuild has to re-establish:
                                                       comment above it)
               .gitignore (only the `models/voxtral-*` line)
 
-Every Voxtral hunk in `noScribe/main.py` is interleaved with small-PR hunks, so build the
-branch as upstream/main + the still-open small branches merged (tag that as the base), take
-`main.py` wholesale from `local/main` with the fork-only items below removed, and rebase onto
-upstream/main as the small PRs land. `tools/check_local_current.py` says which branch owns
-which line. Every branch Voxtral depended on is now part of the base: the three it touched
-only textually (speaker-names, header-labels, torch-2.13-stack) and the one hard dependency,
-`fix/lazy-main-import` (`_SUBMODULES`), have merged upstream.
+Every branch Voxtral depended on is part of upstream: the three it touched only textually
+(speaker-names, header-labels, torch-2.13-stack) and the one hard dependency,
+`fix/lazy-main-import` (`_SUBMODULES`).
 
 **On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:

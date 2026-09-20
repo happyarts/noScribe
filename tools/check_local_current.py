@@ -64,6 +64,26 @@ INTENTIONAL = {
         "lokal um voxtral_mp_worker erweitert",
     '# Both are ctx.Process targets, so both are re-imported in a spawn child.':
         "lokal auf drei Worker umformuliert",
+    # feature/voxtral-engine gibt das _Info-Objekt wieder zurueck, wie upstream es
+    # tut (die Entfernung wurde dort abgelehnt und bleibt lokal); lokal geben die
+    # drei Funktionen nichts zurueck.
+    'info = self._run_voxtral_subprocess_stream(':
+        "lokal ohne Zuweisung (_Info lokal entfernt)",
+    'info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)':
+        "lokal ohne Zuweisung (_Info lokal entfernt)",
+    'reliably. Returns a simple info object (duration at least).':
+        "lokal ohne Rueckgabe (_Info lokal entfernt)",
+    'Returns a simple info object (duration at least).':
+        "lokal ohne Rueckgabe (_Info lokal entfernt)",
+    'return self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)':
+        "lokal ohne return (_Info lokal entfernt)",
+    'return self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)':
+        "lokal ohne return (_Info lokal entfernt)",
+    # Der Branch traegt weder voice_check noch die lokalen .gitignore-Eintraege.
+    '_SUBMODULES = ("main", "audio", "ctc_align", "exception", "transcription", "utils")':
+        "lokal zusaetzlich mit voice_check",
+    '# with tools/quantize_voxtral.py).':
+        "lokal geht der Kommentar mit Audiotest/ und venv/ weiter",
 }
 
 
