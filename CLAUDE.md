@@ -185,7 +185,7 @@ This is its boundary:
                           quant_summary,quantize_group_guard,mel_floor,ctc_align,
                           align_language,cut_and_cue_quality,lost_head_recovery,
                           merged_embeddings,salvage_prefix_alignment,word_prob_format,
-                          voxtral_transcribe_guards}.py
+                          voxtral_transcribe_guards,align_input_level}.py
     modified  noScribe/main.py · noScribe/transcription.py · trans/*.yml (four keys:
               voxtral_path_long, voxtral_path_short, voxtral_no_disfluencies, loading_voxtral)
               noScribe/__init__.py (one word: ctc_align in _SUBMODULES)
