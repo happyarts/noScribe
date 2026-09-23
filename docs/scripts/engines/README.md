@@ -1,6 +1,6 @@
 # Scoring other people's ASR engines
 
-Five throwaway-shaped scripts that turned out to be worth keeping, because the
+Six throwaway-shaped scripts that turned out to be worth keeping, because the
 question "is there something better than Voxtral for German interviews yet?"
 keeps coming back and rebuilding the harness each time is the expensive part.
 
@@ -30,6 +30,7 @@ scripts to find candidates, never to decide.
 | script | model | needs |
 |---|---|---|
 | `parakeet_wer.py` | `nvidia/parakeet-tdt-0.6b-v3` | `pip install parakeet-mlx` |
+| `nemotron_asr_wer.py` | `nvidia/nemotron-3.5-asr-streaming-0.6b` | mlx-audio from git main, in a throwaway venv |
 | `qwen_asr_wer.py` | `Qwen/Qwen3-ASR-1.7B-hf` | nothing |
 | `vibevoice_wer.py` | `microsoft/VibeVoice-ASR-HF` | nothing |
 | `cohere_asr_wer.py` | `CohereLabs/cohere-transcribe-03-2026` | nothing (gated repo — accept on the model page first) |
@@ -55,12 +56,12 @@ venv/bin/python3 docs/scripts/engines/<script> fleurs 100 [arm]
 ```
 
 The `arm` argument differs per engine, because the interesting knob does:
-Parakeet takes a beam width, Qwen takes `de` / `auto` / `chunkN` / `vocab:…`,
-Cohere takes its decoder-prompt toggles (`plain`, `nopnc`, `itn`, `timestamp`,
+Parakeet takes a beam width, Nemotron takes `language[@right_context]`, Qwen
+takes `de` / `auto` / `chunkN` / `vocab:…`, Cohere takes its decoder-prompt toggles (`plain`, `nopnc`, `itn`, `timestamp`,
 `diarize`) and has a `tokens` mode that reports which of them the tokenizer
 actually knows. VibeVoice needs no arm; it emits speaker, time and text anyway.
 
-## Adding a sixth
+## Adding a seventh
 
 Copy the closest script and keep three things:
 

@@ -1,6 +1,6 @@
 # Other ASR engines, measured against Voxtral
 
-Is anything else better for German interview audio yet? Six engines have been
+Is anything else better for German interview audio yet? Seven engines have been
 measured against the shipped `voxtral-mini-8bit` build, and none has replaced
 it. This file is the record, so the same candidate is not re-evaluated from
 scratch every time it trends. Which *Voxtral* build to ship is a different
@@ -50,6 +50,7 @@ measured on MPS are indicative only — the same clip has measured 2.04x cold an
 | qwen3-asr-1.7b, one pass | 11.14 % | 4.08 % | 31 | 4 | 12 | — | 0 |
 | qwen3-asr-1.7b, auto language | 11.85 % | 4.33 % | 32 | 5 | 13 | — | — |
 | vibevoice-asr | 13.03 % | 6.98 % | 34 | 2 | 19 | 0.66x | **11.34** |
+| nemotron-3.5-asr, `de-DE` | 14.45 % | 6.54 % | 47 | 3 | 11 | 5.15x | 8.60 |
 | parakeet-tdt-0.6b-v3, beam 5 | 14.69 % | 6.49 % | 49 | 6 | 7 | 9.13x | — |
 | parakeet-tdt-0.6b-v3, greedy | 18.01 % | 9.88 % | 49 | 20 | 7 | 26.47x | — |
 
@@ -65,6 +66,7 @@ measured on MPS are indicative only — the same clip has measured 2.04x cold an
 | qwen3-asr-1.7b, 60 s chunks | 10.83 % | 6.69 % | 36 | 16 | 41 | — |
 | qwen3-asr-1.7b, one pass | 12.11 % | 7.01 % | 43 | 17 | 44 | — |
 | vibevoice-asr | 12.34 % | 7.58 % | 35 | 10 | 61 | 0.87x |
+| nemotron-3.5-asr, `de-DE` | 17.69 % | 9.28 % | 63 | 20 | 69 | 7.69x |
 
 **FLEURS German, 100 recordings.** The ranking inverts almost completely.
 
@@ -76,6 +78,7 @@ measured on MPS are indicative only — the same clip has measured 2.04x cold an
 | voxtral-mini-8bit | 4.81 % | 1.44 % | 7.64x |
 | parakeet-tdt-0.6b-v3, greedy | 4.81 % | 2.15 % | **44.45x** |
 | vibevoice-asr | 8.26 % | 5.84 % | — |
+| nemotron-3.5-asr, `de-DE` | 11.00 % | 5.80 % | 7.95x |
 
 Read the three together and the pattern is the whole point: on FLEURS the field
 is separated by tenths of a point and Voxtral is mid-table; on real conversation
@@ -144,6 +147,34 @@ survives proof-reading in a way a missing one does not — the same argument tha
 decided against `whisper-precise`. Beam search (width 5) is worth having if the
 model is ever revisited: it cuts deletions from 20 to 6 and roughly 3 WER
 points, for two thirds of the throughput.
+
+## Nemotron 3.5 ASR — the language prompt works, the recognition does not
+
+`nvidia/nemotron-3.5-asr-streaming-0.6b` (2026-09): a cache-aware streaming
+FastConformer-RNNT, 0.6B parameters, OpenMDW-1.1, 40 language-locales — the
+multilingual successor in Parakeet's line, with the one thing Parakeet lacked: a
+language prompt, a one-hot vector joined to every encoder frame. Measured via
+mlx-audio (`stt/models/nemotron_asr`, `mlx-community/nemotron-3.5-asr-streaming-0.6b`,
+bf16) at its largest chunk, 1120 ms; 560 ms and automatic language detection land
+within a point either way.
+
+**The prompt cures the code-switching.** Zero English function words on either
+reference (Parakeet: 14 in 407 on the hard passage), and it demonstrably reaches
+the model — prompted `en-US`, the hard passage collapses to 51 % WER with 163
+deletions.
+
+**What is left is Parakeet's error profile without the English.** 47
+substitutions against 3 deletions on the hard passage: wrong inflections
+(`isst` → `ist`, `die` → `der`), split or misheard compounds and brand names,
+invented replacement words. It writes no digits and assembles numbers wrongly
+(1940 as "eintausend hundertvierzig"), keeps fillers and stutters (15 `äh`/`ähm`
+on the second reference; without them it would score 16.2 % instead of 17.7 %),
+and sets a third fewer commas than Whisper or Voxtral. On conversation it ends
+level with Parakeet on the hard passage and last on the second reference, and it
+is also last on FLEURS — the model card's 8.31 % there uses a normalisation that
+maps number words to digits, ours does not. Discussion #11 on the model page
+reports the same for German; NVIDIA points to word boosting, LM fusion or
+fine-tuning. Worth a second look only if a German fine-tune appears.
 
 ## Qwen3-ASR-1.7B — wins the benchmark, loses the job
 
@@ -342,11 +373,11 @@ so it gives back the structural guarantees that made the family interesting, and
 `OpenMOSS-Team/MOSS-Transcribe-Diarize` does VibeVoice's joint trick and is more
 popular, but supports only Chinese and English.
 
-Inside mlx-audio, three German-capable ASR models are unmeasured: `canary`,
-`granite_speech` and `nemotron_asr`. The rest of its `stt/models/` carry no
-German at all, and `mega_asr` is a router over Qwen3-ASR rather than a model.
-After six comparisons the pattern is stable enough to predict the outcome:
-these models tie on FLEURS and lose on real conversation.
+Inside mlx-audio, two German-capable ASR models are unmeasured: `canary` and
+`granite_speech` (`nemotron_asr` is measured above). The rest of its
+`stt/models/` carry no German at all, and `mega_asr` is a router over Qwen3-ASR
+rather than a model. After seven comparisons the pattern is stable enough to
+predict the outcome: these models tie on FLEURS and lose on real conversation.
 
 ## Reproducing
 
@@ -359,6 +390,15 @@ python docs/scripts/engines/parakeet_wer.py ref \
     Audiotest2/referenz/hart_780-900_REFERENZ.txt \
     Audiotest2/referenz/hart_780-900.wav 5      # trailing 5 = beam width
 python docs/scripts/engines/parakeet_wer.py fleurs 100
+
+# Nemotron 3.5 ASR (needs mlx-audio from git main -- nemotron_asr came after the
+# 0.5.5 release -- and mlx-audio wants mlx 0.32.2 over the pinned 0.32.1, so use
+# a throwaway venv, not this one). arm = language[@right context]: de-DE is
+# 1120 ms chunks, de-DE@6 560 ms; auto and en-US for the cross-checks
+python docs/scripts/engines/nemotron_asr_wer.py ref \
+    Audiotest2/referenz/hart_780-900_REFERENZ.txt \
+    Audiotest2/referenz/hart_780-900.wav de-DE
+python docs/scripts/engines/nemotron_asr_wer.py fleurs 100 de-DE
 
 # Qwen3-ASR (no extra dependency -- transformers 5.13+ has it)
 python docs/scripts/engines/qwen_asr_wer.py ref \
