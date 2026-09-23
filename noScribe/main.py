@@ -401,6 +401,7 @@ class TranscriptionJob:
         self.speaker_detection: str = 'auto'
         self.speaker_names: list = []  # real names, mapped in order of first appearance
         self.speaker_centroids: dict = {}  # diarization label -> voice centroid, for voice_check
+        self.speaker_probabilities: dict = {}  # path, columns, frame_s of a diarization's own, for voice_check
         # Built while this job's segments stream in: diarization label -> name.
         # Lives on the job, so mappings can never leak between queued jobs, and
         # is rebuilt by set_running() so a repeated job starts from scratch too.
@@ -2988,12 +2989,13 @@ class App(ctk.CTk):
 
                         self.logn()
                         self.logn(t('start_identifying_speakers'), 'highlight')
-                        self.logn(t('loading_pyannote'))
+                        diarization_engine = self._diarization_engine(job)
+                        self.logn(t('loading_nemotron' if diarization_engine == 'nemotron' else 'loading_pyannote'))
                         # self.set_progress(1, 100, job.speaker_detection)
 
                         while True:
                             try:
-                                diarization = self._run_diarize_subprocess(tmp_audio_file, job)
+                                diarization = self._run_diarize_subprocess(tmp_audio_file, job, diarization_engine)
                                 break
                             except Exception as err:
                                 if self._handle_cuda_fallback('pyannote', err):
@@ -3373,8 +3375,23 @@ class App(ctk.CTk):
                         as the diarization alone had it.
                         """
                         nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
-                        centroids = {short_label(k): v for k, v in (job.speaker_centroids or {}).items()}
-                        if len(centroids) < 2 or not voice_segments:
+                        turns = [dict(turn, label=short_label(turn['label'])) for turn in diarization]
+                        # A diarization that reports its own speaker probabilities
+                        # is its own second opinion; otherwise the voice is asked.
+                        probabilities = job.speaker_probabilities
+                        if probabilities:
+                            import numpy as np
+                            named = {turn['label'] for turn in turns}
+                            evidence = voice_check.Probabilities(
+                                np.load(probabilities['path']),
+                                {short_label(label): column for column, label in enumerate(probabilities['columns'])
+                                 if short_label(label) in named},
+                                probabilities['frame_s'])
+                        else:
+                            evidence = voice_check.Voice(
+                                {short_label(k): v for k, v in (job.speaker_centroids or {}).items()},
+                                lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans))
+                        if len(evidence.labels) < 2 or not voice_segments:
                             return
                         if self.cancel:  # Stop came just before: start nothing
                             raise Exception(t('err_user_cancelation'))
@@ -3382,9 +3399,7 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn()
                         self.logn(t('voice_check_start'))
-                        turns = [dict(turn, label=short_label(turn['label'])) for turn in diarization]
-                        passages, moves = voice_check.relabel(voice_segments, turns, voice_check.Voice(
-                            centroids, lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans)))
+                        passages, moves = voice_check.relabel(voice_segments, turns, evidence)
                         if moves:
                             # Write the transcript again from the top, header kept.
                             written = list(main_body.children)[header_nodes:]
@@ -3840,15 +3855,34 @@ class App(ctk.CTk):
         from .whisper_mp_worker import whisper_proc_entrypoint
         self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)
 
-    def _run_diarize_subprocess(self, tmp_audio_file: str, job):
+    def _run_diarize_subprocess(self, tmp_audio_file: str, job, engine='pyannote'):
         """Spawn a subprocess to run diarization and return list of segments.
         Streams child logs/progress back to GUI and honors cancel.
         """
-        result = self._run_pyannote_worker(tmp_audio_file, job, {
+        entry, name = None, 'PyAnnote'
+        if engine == 'nemotron':
+            from .nemotron_mp_worker import nemotron_proc_entrypoint
+            entry, name = nemotron_proc_entrypoint, 'Nemotron'
+        result = self._run_diarization_worker(tmp_audio_file, job, {
             "num_speakers": (int(job.speaker_detection) if str(job.speaker_detection).isdigit() else None),
-        })
+        }, entry=entry, name=name)
+        # Whichever second opinion the worker brought: pyannote its centroids,
+        # a model with its own speaker probabilities those.
         job.speaker_centroids = result.get("centroids") or {}
+        job.speaker_probabilities = result.get("probabilities") or {}
         return result.get("segments") or []
+
+    def _diarization_engine(self, job) -> str:
+        """'nemotron' when config.yml asks for it (diarization_engine: nemotron), else
+        'pyannote'. Nemotron finds the number of speakers itself and cannot be held to
+        one, so a job with a fixed number of speakers stays with pyannote."""
+        if get_config('diarization_engine', 'pyannote') != 'nemotron':
+            return 'pyannote'
+        if str(job.speaker_detection).isdigit():
+            self.logn(f'Nemotron cannot be held to {job.speaker_detection} speakers: diarizing with pyannote',
+                      where='file')
+            return 'pyannote'
+        return 'nemotron'
 
     def _run_voice_embeddings(self, tmp_audio_file: str, job, spans):
         """One speaker embedding per [start_s, end_s] span, for noScribe.voice_check.
@@ -3856,22 +3890,26 @@ class App(ctk.CTk):
         A second, short call to the diarization worker: the embedding model lives
         there, and the spans only exist once the transcript does.
         """
-        result = self._run_pyannote_worker(tmp_audio_file, job, {"embed_spans": spans}, errors_to='file')
+        result = self._run_diarization_worker(tmp_audio_file, job, {"embed_spans": spans}, errors_to='file')
         return result.get("embeddings") or []
 
-    def _run_pyannote_worker(self, tmp_audio_file: str, job, extra_args: dict, errors_to='both') -> dict:
-        """Run pyannote_mp_worker once and return its result message. errors_to='file'
-        keeps a failure off the screen, for a call the job can do without."""
+    def _run_diarization_worker(self, tmp_audio_file: str, job, extra_args: dict, errors_to='both',
+                                entry=None, name='PyAnnote') -> dict:
+        """Run a diarization worker once and return its result message: pyannote_mp_worker,
+        or `entry`, another that speaks the same messages (nemotron_mp_worker); `name`
+        starts its log lines. errors_to='file' keeps a failure off the screen, for a
+        call the job can do without."""
         global force_pyannote_cpu
         ctx = mp.get_context("spawn")
         q = ctx.Queue()
         from .pyannote_mp_worker import pyannote_proc_entrypoint
+        entry = entry or pyannote_proc_entrypoint
         args = {
             "device": 'cpu' if force_pyannote_cpu else '',
             "audio_path": tmp_audio_file,
             **extra_args,
         }
-        proc = ctx.Process(target=pyannote_proc_entrypoint, args=(args, q))
+        proc = ctx.Process(target=entry, args=(args, q))
         proc.start()
         # Keep handles for cancel
         self._mp_proc = proc
@@ -3909,9 +3947,9 @@ class App(ctk.CTk):
                 if mtype == "log":
                     txt = msg.get("msg", "")
                     close_progress()
-                    self.logn('PyAnnote ' + txt, where='file')
+                    self.logn(f'{name} ' + txt, where='file')
                 elif mtype == "progress":
-                    step_name = str(msg.get("step", ""))
+                    step_name = str(msg.get("step", name))
                     progress_percent = int(msg.get("pct", 0))
                     self.logr(f'{step_name}: {progress_percent}%')
                     progress_open = True
@@ -3919,6 +3957,8 @@ class App(ctk.CTk):
                         self.set_progress(2, progress_percent * 0.3, job.speaker_detection)
                     elif step_name == 'embeddings':
                         self.set_progress(2, 30 + (progress_percent * 0.7), job.speaker_detection)
+                    elif "step" not in msg:  # a worker without steps reports the whole
+                        self.set_progress(2, progress_percent, job.speaker_detection)
                 elif mtype == "result":
                     close_progress()
                     if msg.get("ok"):
@@ -3926,7 +3966,7 @@ class App(ctk.CTk):
                     else:
                         err = msg.get('error', 'Diarization failed')
                         trc = msg.get('trace')
-                        self.logn(f"PyAnnote error: {err}", 'error', where=errors_to)
+                        self.logn(f"{name} error: {err}", 'error', where=errors_to)
                         if trc:
                             self.logn(trc, where='file')
                         raise Exception(err)

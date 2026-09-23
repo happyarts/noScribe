@@ -15,9 +15,9 @@ import pytest
 
 REPO = str(Path(__file__).resolve().parent.parent)
 
-# All three are ctx.Process targets, so all are re-imported in a spawn child.
+# All are ctx.Process targets, so all are re-imported in a spawn child.
 WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker",
-                  "noScribe.voxtral_mp_worker"]
+                  "noScribe.voxtral_mp_worker", "noScribe.nemotron_mp_worker"]
 
 
 def _without_comments(text):
