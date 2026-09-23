@@ -2454,6 +2454,26 @@ class _Aligner:
                 seg = wav[i:i + win]
                 if seg.numel() < min_win:
                     continue
+                # Zero mean, unit variance per window: what the aligners were
+                # trained on (do_normalize in the preprocessor config of all four
+                # checked -- MMS and the English, German and Spanish xlsr-53 -- done
+                # by Wav2Vec2FeatureExtractor, which we bypass). On the raw signal the
+                # model scales with the recording level, and a quiet voice gets
+                # emissions too weak to hold its own words -- the DP, which must
+                # place every character, then crowds them into the louder
+                # speaker's time. Measured by realigning the same Voxtral text over
+                # 23 AMI meetings and 64 CallHome calls: words more than 0.5 s off
+                # AMI's manual stamps 7.1 % -> 3.1 %, words under the wrong
+                # speaker after the voice check 2.65 % -> 2.24 % (70 of 82 files
+                # better). It does not reach a voice 15-20 dB below one that talks
+                # through the whole window: the window's variance is the loud
+                # voice's, whatever its gain. Population variance and 1e-7, as the
+                # extractor has them. A window shorter than `win` -- the rest at
+                # the end of a pass -- takes its statistics from the `win` samples
+                # that end with it: on its own, a few hundred ms of room tone
+                # after the last word would be lifted to speech level.
+                ref = wav[max(0, i + seg.numel() - win):i + seg.numel()]
+                seg = (seg - ref.mean()) / torch.sqrt(ref.var(correction=0) + 1e-7)
                 if self.device != "cpu":
                     seg = seg.to(self.device)
                 lg = self.model(seg.unsqueeze(0)).logits[0]
