@@ -154,7 +154,7 @@ changing a number, and check whether a test in `tests/` pins it.
 ## The Voxtral pull request
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
-`feature/voxtral-engine`, rebuilt on 2026-09-20 from `upstream/main` plus `local/main`'s
+`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review) from `upstream/main` plus `local/main`'s
 Voxtral set (the earlier branch of that name, tip `8f132bc`, was deleted once it had fallen far
 behind). It is cut from `main` and carries **neither of the still-open small PRs**, so its diff
 is Voxtral alone; it overlaps with both textually in `noScribe/main.py`, and whichever merges

@@ -81,13 +81,10 @@ class FakeApp:
     def __init__(self, voice_at):
         from noScribe.main import App
         self._apply_speaker_name = types.MethodType(App._apply_speaker_name, self)
-        self.end_open_line = types.MethodType(App.end_open_line, self)
         self.voice_at, self.logged, self.saved = voice_at, [], []
 
     def log(self, txt='', *args, **kwargs):
         self.logged.append(txt)
-        if txt:
-            self._log_line_open = not txt.endswith('\n')
 
     def logn(self, txt='', *args, **kwargs):
         self.log(f'{txt}\n')
