@@ -86,6 +86,58 @@ INTENTIONAL = {
         "lokal geht der Kommentar mit Audiotest/ und venv/ weiter",
 }
 
+# local/main bietet als 24B-Build voxtral-small-4bit an, der PR noch
+# voxtral-small-8bit (Markus beobachtet 4 bit erst lokal, bevor der PR es
+# bekommt). Diese Zeilen des PR-Branches fehlen lokal deshalb mit Absicht; kommt
+# die Umstellung in den PR, faellt der Block weg.
+_SMALL_4BIT_ONLY_LOCAL = [
+    'The models `voxtral-mini-8bit` and `voxtral-small-8bit` then appear in the',
+    '| `voxtral-small-8bit` (24B) | 25 GB | ~34 GB | quality ceiling for clean, read-aloud audio on 48 GB+; slower than realtime |',
+    '**Which of the two?** It depends on the recording, not on a ranking: on clean,',
+    'read-aloud speech the 24B model is clearly better (2.8 % against 4.8 % word',
+    'error), on hard conversational German with crosstalk and brand names the 3B',
+    'model is (4.3 % against 7.8 %). Both 24B figures are the best 24B configuration',
+    'measured, which is a locally built 4-bit variant; the shipped 8-bit build scores',
+    '8.3 % on the hard passage. And read the inversion with care: by *character*',
+    'error the 24B model is the better half of it — it hears more and spells worse.',
+    'For interviews and podcasts, pick mini — it is also the only one that runs on a',
+    '32 GB or smaller machine. The measurements, including the',
+    'comparison against Whisper, are in',
+    'and `lm_head` to 8 bit. The encoder runs once per pass, so its precision costs no',
+    'speed, but compressing it below 8 bit measurably costs accuracy on difficult',
+    'audio. `lm_head` runs once per generated token and is left quantised for that',
+    '[small](https://huggingface.co/MarkusKaemmerer/Voxtral-Small-24B-2507-8bit-dense-encoder));',
+    'GB/min, small ≈ 27 GB + ~0.8 GB/min. Rough per-pass lengths:',
+    '| RAM | mini-8bit | small-8bit |',
+    "| 16 GB | ~7 min | won't run |",
+    "| 24 GB | 10 min | won't run |",
+    "| 32 GB | 10 min | won't run (refused) |",
+    '| 48 GB+ | 10 min | 10 min |',
+    '# "voxtral-mini-8bit" and "voxtral-small-8bit" models in the backend:',
+    '#   small: 4-bit 24B; measured 30 s = 15.6 GB and 120 s = 17.0 GB, i.e. the same',
+    '#          ~linear slope as mini but a ~15 GB fixed offset from its weights, so it',
+    '#          needs shorter passes / more RAM for the same length.',
+    '#          only binds at 16 GB and for the small builds. small/small6/small8 below',
+    '#          are still on old-path numbers (no local build to re-measure) -- safe,',
+    '#          just conservative, and they target 48 GB+ machines regardless.',
+    '#   small8: the shipped 24B build (8-bit LM + lm_head, bf16 encoder). Needs',
+    '"small":  {"fixed": 15.2, "slope": 0.017},',
+    '# cannot run at all). Each keeps the audio encoder in bf16 while quantising',
+    '# the language model and lm_head to 8 bit -- see docs/voxtral-quantisation.md',
+    '# for why (the encoder runs once per pass, so its precision is nearly free,',
+    '# and compressing it below 8 bit measurably costs accuracy on hard audio).',
+    '# mini (3B): the everyday build. Reproduces the bf16 transcript word for',
+    '# word on our hard-German reference at ~4.5x the speed, runs on any Mac with',
+    '# 16 GB, and beats the 24B model on difficult conversational audio.',
+    '# small (24B): a quality ceiling for clean, read-aloud audio on machines',
+    '# with 48 GB+. Better than mini on clean speech but slower than realtime, and',
+    '# refused below ~34 GB (it would swap forever). See MEM_MODEL / min_ram_gb.',
+    '"voxtral-small-8bit": "MarkusKaemmerer/Voxtral-Small-24B-2507-8bit-dense-encoder",',
+    'assert v.has_local_build("voxtral-small-8bit")',
+]
+INTENTIONAL.update(dict.fromkeys(
+    _SMALL_4BIT_ONLY_LOCAL, "lokal voxtral-small-4bit statt voxtral-small-8bit"))
+
 
 def sh(*args):
     return subprocess.run(args, capture_output=True, text=True).stdout

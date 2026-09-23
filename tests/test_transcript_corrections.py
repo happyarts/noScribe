@@ -436,6 +436,7 @@ def test_dense_encoder_builds_classify_by_bit_width():
 
     assert v._model_kind("models/voxtral-mini-8bit") == "mini8"
     assert v._model_kind("MarkusKaemmerer/Voxtral-Mini-3B-2507-8bit-dense-encoder") == "mini8"
+    assert v._model_kind("MarkusKaemmerer/Voxtral-Small-24B-2507-4bit-dense-encoder") == "small"
     assert v._model_kind("MarkusKaemmerer/Voxtral-Small-24B-2507-8bit-dense-encoder") == "small8"
     # older uniform names still map correctly
     assert v._model_kind("models/voxtral-small-6bit") == "small6"
@@ -455,7 +456,7 @@ def test_published_builds_are_offered(monkeypatch):
 
     monkeypatch.setattr(v, "_local_copy", lambda name: None)
     assert v.has_local_build("voxtral-mini-8bit")
-    assert v.has_local_build("voxtral-small-8bit")
+    assert v.has_local_build("voxtral-small-4bit")
     assert not v.has_local_build("some-unbuilt-experiment")
 
     monkeypatch.setattr(v, "_local_copy", lambda name: f"models/{name}")

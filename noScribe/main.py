@@ -1055,6 +1055,12 @@ def _init_app_state(app):
     _register_voxtral_models(app)
 
 
+# Model names that were published under another name before: a choice saved
+# under the old one (config.yml, a script's --model) means the new one, and was
+# otherwise silently replaced by the first Whisper model.
+RENAMED_MODELS = {'voxtral-small-8bit': 'voxtral-small-4bit'}
+
+
 def _register_voxtral_models(app):
     """Add the Voxtral engine as additional model choices (Apple Silicon only,
     where mlx-voxtral runs on the GPU). Called at startup and again when the
@@ -1266,6 +1272,7 @@ class App(ctk.CTk):
                                                        dynamic_resizing=False)
         self.option_menu_whisper_model.grid(column=1, row=3, sticky='e', pady=5)
         last_whisper_model = get_config('last_whisper_model', 'precise')
+        last_whisper_model = RENAMED_MODELS.get(last_whisper_model, last_whisper_model)
         if last_whisper_model in self.whisper_models:
             self.option_menu_whisper_model.set(last_whisper_model)
         elif len(self.whisper_models) > 0:
@@ -4015,6 +4022,7 @@ def run_cli_mode(args):
         
         # Validate and set the whisper model
         if args.model:
+            args.model = RENAMED_MODELS.get(args.model, args.model)
             if args.model not in app.whisper_models:
                 print(f"Error: Model '{args.model}' not found.")
                 print(f"Available models: {', '.join(app.whisper_models.keys())}")
@@ -4206,6 +4214,7 @@ def noScribeMain():
         # Prefill selected model if provided
         desired_model_name = None
         if getattr(args, 'model', None):
+            args.model = RENAMED_MODELS.get(args.model, args.model)
             if args.model in app.whisper_models:
                 desired_model_name = args.model
             else:

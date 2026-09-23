@@ -269,12 +269,47 @@ whole-file property therefore no longer hangs on the pin; what the pin on
 our own computation against `VoxtralFeatureExtractor`. A fallback to 0.0.5
 showed up as a **failing test**, not as a changed transcript.
 
-## 9. Tools and a citation trap
+## 9. The 24B build, and both models on more material (2026-09)
+
+Everything above was measured on the 3B build. When the 24B model came back as
+`voxtral-small-4bit`, the floor was re-measured on both, max against
+percentile 99, on four hand-corrected passages, FLEURS and the VoxPopuli
+transient streams. Per-passage figures are in `voxtral-quantisation.md`
+("The re-run on four passages"); here only what bears on the floor.
+
+**The 3B build confirms the choice, and more strongly than before.** On the
+VoxPopuli streams (attenuated as `voxpopuli_spike.py` does) the percentile floor
+is better even without a transient, paired dWER −0.60 [−1.38, −0.01], and with
+one −2.11 [−2.93, −1.40]; the transient figures reproduce section 6 to the
+second decimal. On the hand-corrected passages no cell is demonstrably worse
+under the percentile floor and one is better (podcast A, −0.82 [−1.62, −0.18]);
+FLEURS moves by 0.08 points, inside its noise.
+
+**On the 24B build the transient protection holds** — the bang costs +1.51
+[+0.92, +2.13] under the max floor and exactly nothing under the percentile —
+**but the comparison is dominated by loops, under either floor.** The 24B model
+runs away on inputs the 3B model handles, and the floor only moves *which*
+inputs: under the max floor a hand-corrected podcast passage came back with
+122 inserted words, which the percentile floor cleared (dCER −7.67); under the
+percentile floor one VoxPopuli stream of 300 s came back with 5468 words where
+the max floor produced 724 and the 3B build 722. Leaving that stream out, the
+two floors score alike on VoxPopuli (10.62 % against 10.39 %); on FLEURS the
+percentile floor is ahead (2.78 % / 0.75 % against 2.99 % / 0.88 %), on the
+video call too (dWER −1.16 [−2.79, −0.12]), on the hard passage it is behind
+without the difference being demonstrable (dCER +1.62 [−0.25, +4.78]).
+
+So **the floor stays the same for both models**; a per-model floor would trade
+one set of loops for another. The engine's loop ladder catches the runaways in
+production — the 5468-word stream came back with 721 words through
+`transcribe()` — but it took twenty minutes for five of audio, splitting the
+pass twice. Loops, not the floor, are the 24B build's weak point.
+
+## 10. Tools and a citation trap
 
 | Script | for |
 |---|---|
 | `voxpopuli_floor.py` | floors on clean material, paired; `load_clips` (VoxPopuli, `VOXPOPULI_PARQUET` for the local file) and the arm shorthand `floor_arm` (`max`, `99`, `99c20`) |
-| `voxpopuli_spike.py` | transient damage over many streams; `pair()` guarantees the dose |
+| `voxpopuli_spike.py` | transient damage over many streams; `pair()` guarantees the dose; `VOX_BUILD` picks the build, two arms are also paired against each other |
 | `voxpopuli_sparse.py` | the same on mostly silent streams (speech share selectable) |
 | `mel_outlier_gap.py` | distance from maximum to percentile in real material, without a model |
 | `mel_stream.py` | per block against whole file, paired over long streams |

@@ -203,7 +203,8 @@ All five are decided; the list stays so that nobody opens them a second time.
   the recommendation.
 - **small 8-bit** — built and registered as `voxtral-small-8bit`. The question
   "does it run on 32 GB?" is answered: no, it needs ~34 GB for its shortest
-  pass and is rejected before starting below that.
+  pass and is rejected before starting below that. Since replaced by
+  `voxtral-small-4bit`, which does (`voxtral-quantisation.md`).
 - **Language pinning across several passes** — built, see §3. Remaining gap:
   chunks that were already written before the file language was settled only
   get a warning with their number.

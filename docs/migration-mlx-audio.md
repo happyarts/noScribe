@@ -257,7 +257,7 @@ re-publishing.
    carries what `tools/quantize_voxtral.py` exists for — the group-size guard
    (`weight.shape[-1] % 64`) and the `not audio_tower` predicate are built into
    its `build_quant_predicate` — so try it before rewriting the tool, and keep
-   only what it cannot do. Rebuild `voxtral-mini-8bit` and `voxtral-small-8bit`,
+   only what it cannot do. Rebuild `voxtral-mini-8bit` and `voxtral-small-4bit`,
    re-publish, update the model URLs.
 5. **Equality check before anything else is believed:** the same audio through the
    old and new paths must produce the same transcript, **with the percentile

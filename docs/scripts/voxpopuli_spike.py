@@ -16,12 +16,17 @@ so that all streams see the same dose.
 
     python docs/scripts/voxpopuli_spike.py [n_streams] [seconds] [dB_above_speech] [floors]
 
+`VOX_BUILD=models/voxtral-small-4bit` measures another build than the 3B one.
+With exactly two floor arms the run also pairs the floors against each other,
+on clean audio and with the bang.
+
 `floors` is the arm list in the short form of `voxpopuli_floor.floor_arm`
 (`max,99.9,99c20`); clean is compared against bang per arm, so a max arm is
 not mandatory. The max floor comes explicitly from the library, the percentile
 floors from the production code (`_PercentileFloorFeatures`), because since it
 went in the extractor on `vox.proc` is already the percentile path.
 """
+import os
 import pathlib
 import sys
 import time
@@ -80,7 +85,7 @@ def main():
           f"{total/60:.1f} min total")
     print(f"# Transient: {db_over:+.0f} dB above the speech peak, 100 ms, at 45 %")
 
-    vox = _Voxtral(str(REPO / "models" / "voxtral-mini-8bit"))
+    vox = _Voxtral(os.environ.get("VOX_BUILD") or str(REPO / "models" / "voxtral-mini-8bit"))
     arms = [floor_arm(s) for s in specs]
 
     def rate(rows, num, den):
@@ -127,6 +132,17 @@ def main():
         print(f"  {name:16s} dWER {dW:+.2f} [{lo_w:+.2f}, {hi_w:+.2f}]{star}"
               f"   dCER {dC:+.2f} [{lo_c:+.2f}, {hi_c:+.2f}]")
     print("  (positive = the bang hurts)")
+    if len(arms) == 2:
+        (n0, _), (n1, _) = arms
+        print(f"\n{n1} against {n0}, paired (negative = {n1} better):")
+        for au in ("clean", "with bang"):
+            a, b = store[(n0, au)], store[(n1, au)]
+            lo_w, hi_w = paired(a, b, "w", "ref_w")
+            lo_c, hi_c = paired(a, b, "c", "ref_c")
+            dW = rate(b, "w", "ref_w") - rate(a, "w", "ref_w")
+            dC = rate(b, "c", "ref_c") - rate(a, "c", "ref_c")
+            print(f"  {au:10s} dWER {dW:+.2f} [{lo_w:+.2f}, {hi_w:+.2f}]"
+                  f"   dCER {dC:+.2f} [{lo_c:+.2f}, {hi_c:+.2f}]")
 
 
 if __name__ == "__main__":

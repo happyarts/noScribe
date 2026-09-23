@@ -19,7 +19,7 @@ loop and repairs the pass instead of shipping the damage.
 pip install -r environments/requirements_voxtral_macOS_arm64.txt
 ```
 
-The models `voxtral-mini-8bit` and `voxtral-small-8bit` then appear in the
+The models `voxtral-mini-8bit` and `voxtral-small-4bit` then appear in the
 model dropdown, each with the RAM it needs. They are downloaded on first use.
 
 ### A note on the pinned dependencies
@@ -98,29 +98,27 @@ making progress. Builds that cannot fit are refused before a run starts.
 | Build | Size | Needs | Notes |
 |---|---:|---:|---|
 | `voxtral-mini-8bit` (3B) | 6 GB | ~13 GB | **recommended** — runs on a 16 GB Mac, faster than realtime, reproduces the bf16 transcript at ~4.5× the speed |
-| `voxtral-small-8bit` (24B) | 25 GB | ~34 GB | quality ceiling for clean, read-aloud audio on 48 GB+; slower than realtime |
+| `voxtral-small-4bit` (24B) | 15 GB | ~23 GB | for clean, read-aloud audio and material heavy with names; ~2× realtime, runs on a 32 GB Mac |
 
-**Which of the two?** It depends on the recording, not on a ranking: on clean,
-read-aloud speech the 24B model is clearly better (2.8 % against 4.8 % word
-error), on hard conversational German with crosstalk and brand names the 3B
-model is (4.3 % against 7.8 %). Both 24B figures are the best 24B configuration
-measured, which is a locally built 4-bit variant; the shipped 8-bit build scores
-8.3 % on the hard passage. And read the inversion with care: by *character*
-error the 24B model is the better half of it — it hears more and spells worse.
-For interviews and podcasts, pick mini — it is also the only one that runs on a
-32 GB or smaller machine. The measurements, including the
-comparison against Whisper, are in
+**Which of the two?** It depends on the recording. On clean, read-aloud speech
+the 24B model is clearly better (FLEURS German 2.8 % against 4.9 % word error).
+On conversation — four hand-corrected passages of interview, podcast and video
+call — Mini was as good or better on every one, and the 24B model looped where
+Mini did not. For interviews and podcasts, pick Mini: it is also four times
+faster and runs on a 16 GB Mac. The measurements, including the comparison
+against Whisper, are in
 [docs/voxtral-quantisation.md](docs/voxtral-quantisation.md).
 
 Both builds keep the **audio encoder in bf16** and quantise the language model
-and `lm_head` to 8 bit. The encoder runs once per pass, so its precision costs no
-speed, but compressing it below 8 bit measurably costs accuracy on difficult
-audio. `lm_head` runs once per generated token and is left quantised for that
-reason.
+and `lm_head` — Mini to 8 bit, Small to 4. The encoder runs once per pass, so its
+precision costs no speed, but compressing it measurably costs accuracy on
+difficult audio. `lm_head` runs once per generated token and is left quantised
+for that reason. Small ships its body at 4 bit so that it fits in 32 GB; a 6-bit body measured no
+better, and an 8-bit one (~34 GB) was not measured.
 
 They download on first use from Hugging Face
 ([mini](https://huggingface.co/MarkusKaemmerer/Voxtral-Mini-3B-2507-8bit-dense-encoder),
-[small](https://huggingface.co/MarkusKaemmerer/Voxtral-Small-24B-2507-8bit-dense-encoder));
+[small](https://huggingface.co/MarkusKaemmerer/Voxtral-Small-24B-2507-4bit-dense-encoder));
 the weights are Apache-2.0. Other bit widths (4/5/6-bit, or a bf16 encoder on a
 lower-bit body) can be made locally in a few seconds with
 `tools/quantize_voxtral.py` — see the script's header and
@@ -165,15 +163,15 @@ for either (both are near-ties that a slightly shorter window would not dodge).
 Below the cap the per-pass length is chosen from installed RAM so the estimated
 generate peak stays within physical memory (compute on swapped-out MLX buffers
 would thrash and never finish). The one-off model-load spike is allowed to swap
-— it frees before transcription starts. Measured peaks: mini ≈ 6.5 GB + ~0.4
-GB/min, small ≈ 27 GB + ~0.8 GB/min. Rough per-pass lengths:
+— it frees before transcription starts. The sizing, a little above the measured
+peaks: mini ≈ 6.5 GB + ~0.4 GB/min, small ≈ 16.5 GB + ~0.4 GB/min. Rough
+per-pass lengths:
 
-| RAM | mini-8bit | small-8bit |
+| RAM | mini-8bit | small-4bit |
 |----:|:---------:|:----------:|
-| 16 GB | ~7 min | won't run |
-| 24 GB | 10 min | won't run |
-| 32 GB | 10 min | won't run (refused) |
-| 48 GB+ | 10 min | 10 min |
+| 16 GB | ~7 min | won't run (refused) |
+| 24 GB | 10 min | ~1 min |
+| 32 GB+ | 10 min | 10 min |
 
 When a file is longer than one pass it is split into **equal, pause-aligned
 passes**: each cut is snapped to a real speaker pause found in a wide window

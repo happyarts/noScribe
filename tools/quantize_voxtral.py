@@ -56,9 +56,9 @@ Examples (from the repository root, with the venv active):
     python tools/quantize_voxtral.py mistralai/Voxtral-Small-24B-2507 \
         models/voxtral-small-6bit 6
 
-    # 24B, 4-bit body, bf16 ear, lm_head kept at the reference build's 6 bit
+    # 24B as shipped (voxtral-small-4bit): 4-bit body and lm_head, bf16 ear
     python tools/quantize_voxtral.py mistralai/Voxtral-Small-24B-2507 \
-        models/voxtral-small-4bit-denc 4 64 dense-encoder --lm-head-bits 6
+        models/voxtral-small-4bit 4 64 dense-encoder --lm-head-bits 4
 
 The source weights are downloaded to the Hugging Face cache on first use
 (3B: ~9 GB, 24B: ~48 GB). Conversion itself is quick and memory-light --

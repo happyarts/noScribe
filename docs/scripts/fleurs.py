@@ -18,10 +18,8 @@ import numpy as np
 import pathlib
 REPO = pathlib.Path(__file__).resolve().parents[2]  # docs/scripts/x.py -> repo root
 sys.path.insert(0, str(REPO))
-_src = open(REPO / 'docs/scripts/wer.py').read().split('raw = open')[0]
-_ns = {'__file__': str(REPO / 'docs/scripts/wer.py')}
-exec(_src, _ns)
-norm, wer = _ns['norm'], _ns['wer']
+sys.path.insert(0, str(REPO / 'docs' / 'scripts'))
+from wer import norm, wer
 
 N = int(sys.argv[1])
 BUILDS = sys.argv[2:]

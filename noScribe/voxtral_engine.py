@@ -125,9 +125,16 @@ MIN_HEADROOM_GB = 6
 # Measured peak unified-memory model per pass:  peak_GB ~= fixed + slope*seconds.
 #   mini : anchored on a real measurement (600 s single pass = 17.4 GB peak on
 #          an M1 Max; the full 1143 s pass exhausted 32 GB -> unsafe).
-#   small: 4-bit 24B; measured 30 s = 15.6 GB and 120 s = 17.0 GB, i.e. the same
-#          ~linear slope as mini but a ~15 GB fixed offset from its weights, so it
-#          needs shorter passes / more RAM for the same length.
+#   small: the shipped 24B build, voxtral-small-4bit (4-bit LM + lm_head, bf16
+#          encoder, 15 GB of weights). Calibrated on the generate_step path:
+#          fresh-process full-pass peaks on an M1 Max were 16.65 / 17.25 / 18.53
+#          / 19.99 / 21.36 GB at 180 / 300 / 600 / 900 / 1200 s of a podcast and
+#          17.35 / 18.99 / 22.54 GB at 300 / 600 / 1200 s of an interview, a line
+#          peak ~= 15.71 + 0.0051*s. The entry over-predicts every point by
+#          7-17% (7-12% up to the 600 s cap passes can reach), a thinner
+#          cushion than mini8's because most of this peak is weights, which do
+#          not vary. On 32 GB the 600 s cap binds; on 24 GB it allows short
+#          passes (~70 s auto, up to ~210 s pinned).
 #   mini8 : the 3B weights at 8 bit with the audio encoder left in bf16
 #          (tools/quantize_voxtral.py, mode dense-encoder). RECALIBRATED for the
 #          generate_step decode path (which chunks the prompt): fresh-process
@@ -137,13 +144,13 @@ MIN_HEADROOM_GB = 6
 #          measured ~2.5x that slope (120 s = 7.7, 1100 s = 18.7 GB); switching to
 #          generate_step genuinely lowered it. The entry below keeps a safety
 #          margin over the fit (6.5 + 0.0060*s over-predicts every point by
-#          15-25%): the slope is dominated by the audio prompt-token rate (~12.5
+#          11-23%): the slope is dominated by the audio prompt-token rate (~12.5
 #          tok/s, fixed by the recording), so speech density moves it only ~6%,
 #          but machine/version variance warrants the cushion. From 24 GB up,
 #          mini8 is capped by TRUSTED_CHUNK_SEC anyway, so the recalibration now
-#          only binds at 16 GB and for the small builds. small/small6/small8 below
-#          are still on old-path numbers (no local build to re-measure) -- safe,
-#          just conservative, and they target 48 GB+ machines regardless.
+#          only binds at 16 GB. small6/small8 below are still on old-path
+#          numbers (local-only builds, not re-measured) -- safe, just
+#          conservative.
 #          Why the encoder stays dense: measured against a hand-corrected
 #          German reference, quantising it costs real accuracy while costing
 #          nothing to keep -- the encoder runs ONCE per pass, so its precision
@@ -152,7 +159,12 @@ MIN_HEADROOM_GB = 6
 #          at 4.5x the speed. lm_head, by contrast, runs once per generated
 #          token: leaving it dense costs 27% throughput and measured no better,
 #          so it stays quantised.
-#   small8: the shipped 24B build (8-bit LM + lm_head, bf16 encoder). Needs
+#   small8: the 8-bit build of the same layout, shipped until voxtral-small-4bit
+#          replaced it so the 24B model fits 32 GB (a 6-bit body measured no
+#          better than 4; 8 bit itself is unmeasured). Now only for a build of
+#          your own passed as transcribe(voxtral_repo=...); the model menu offers
+#          VOXTRAL_MODELS alone, and main.RENAMED_MODELS points the old name at
+#          voxtral-small-4bit. Needs
 #          ~34 GB minimum, so it is refused below that and wants 48 GB+. Even
 #          when it fits it runs at ~0.80x realtime -- slower than the recording.
 #          On a 32 GB machine the 25 GB of weights cannot stay resident: a
@@ -165,7 +177,7 @@ MIN_HEADROOM_GB = 6
 MEM_MODEL = {
     "mini":   {"fixed": 7.9, "slope": 0.016},
     "mini8":  {"fixed": 6.5, "slope": 0.0060},   # generate_step path; see note above
-    "small":  {"fixed": 15.2, "slope": 0.017},
+    "small":  {"fixed": 16.5, "slope": 0.0070},  # generate_step path; see note above
     "small6": {"fixed": 20.9, "slope": 0.0135},
     "small8": {"fixed": 27.4, "slope": 0.0135},
 }
@@ -216,19 +228,21 @@ OVERLAP_SEC = 15
 VOXTRAL_MODELS = {
     # Two builds, both quantised on Apple Silicon and published so they download
     # on first use (the picker only shows them on arm64 Macs; elsewhere MLX
-    # cannot run at all). Each keeps the audio encoder in bf16 while quantising
-    # the language model and lm_head to 8 bit -- see docs/voxtral-quantisation.md
-    # for why (the encoder runs once per pass, so its precision is nearly free,
-    # and compressing it below 8 bit measurably costs accuracy on hard audio).
+    # cannot run at all). Each keeps the audio encoder in bf16, because the
+    # encoder runs once per pass, so its precision is nearly free, and
+    # compressing it measurably costs accuracy on hard audio; the language
+    # model and lm_head are quantised (docs/voxtral-quantisation.md).
     #
-    # mini (3B): the everyday build. Reproduces the bf16 transcript word for
-    # word on our hard-German reference at ~4.5x the speed, runs on any Mac with
-    # 16 GB, and beats the 24B model on difficult conversational audio.
+    # mini (3B): the everyday build, 8 bit. Reproduces the bf16 transcript word
+    # for word on our hard-German reference at ~4.5x the speed, runs on any Mac
+    # with 16 GB, and is the one to use for conversational audio.
     "voxtral-mini-8bit": "MarkusKaemmerer/Voxtral-Mini-3B-2507-8bit-dense-encoder",
-    # small (24B): a quality ceiling for clean, read-aloud audio on machines
-    # with 48 GB+. Better than mini on clean speech but slower than realtime, and
-    # refused below ~34 GB (it would swap forever). See MEM_MODEL / min_ram_gb.
-    "voxtral-small-8bit": "MarkusKaemmerer/Voxtral-Small-24B-2507-8bit-dense-encoder",
+    # small (24B): 4 bit, for clean, read-aloud audio and material heavy with
+    # names (FLEURS de 2.78 % WER against mini's 4.89 %), ~2x realtime, fits a
+    # 32 GB Mac. It replaced an 8-bit build of the same layout that needs
+    # ~34 GB; a 6-bit body measured no better than 4, 8 bit is unmeasured
+    # (docs/voxtral-quantisation.md). See MEM_MODEL / min_ram_gb.
+    "voxtral-small-4bit": "MarkusKaemmerer/Voxtral-Small-24B-2507-4bit-dense-encoder",
 }
 
 # The raw unquantised source releases: handing one of these to transcribe()
