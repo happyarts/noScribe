@@ -3490,6 +3490,10 @@ class App(ctk.CTk):
                                 self.logn(where='file')
                                 self.logn(self._speaker_key(job), where='file')
                         else:
+                            if transcription_success:
+                                # Nothing was said: save the header all the same, so
+                                # the transcript that is reported (and opened) exists.
+                                save_doc()
                             job.has_partial_transcript = False
                         if transcription_success:
                             if job.transcript_file != orig_transcript_file: # used alternative filename because saving under the initial name failed
