@@ -3383,9 +3383,8 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn(t('voice_check_start'))
                         turns = [dict(turn, label=short_label(turn['label'])) for turn in diarization]
-                        passages, moves = voice_check.relabel(
-                            voice_segments, turns, centroids,
-                            lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans))
+                        passages, moves = voice_check.relabel(voice_segments, turns, voice_check.Voice(
+                            centroids, lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans)))
                         if moves:
                             # Write the transcript again from the top, header kept.
                             written = list(main_body.children)[header_nodes:]
