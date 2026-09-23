@@ -41,9 +41,10 @@ SAMPLE_RATE = 16000
 # Rough count of text tokens Voxtral generates per second of audio, used ONLY to
 # drive the intra-pass liveness estimate. Measured German conversation runs at
 # ~4.64 text tokens/s (see _transcribe_guarded); this is deliberately set below
-# that so the estimate stays behind the real position: it is capped below 100%
-# and snaps to the true position when a pass finishes, so under-estimating just
-# makes the bar move a touch fast, never past the real chunk boundary.
+# that, so the estimate runs AHEAD of the real position (by ~1.5x) and reaches
+# its cap at ~60% of the pass. It is capped at 95% of the pass and snaps to the
+# true position when a pass finishes, so running ahead only makes the bar wait
+# at the cap for a while, never pass the real chunk boundary.
 _EST_TOKENS_PER_SEC = 3.0
 
 
@@ -205,11 +206,12 @@ FORCED_ALIGN_MAX_CELLS = 2**30
 # tightest, and more (smaller) pieces cost no accuracy and slightly less total
 # DP work. 2**29 keeps a 1500 s window at ~7 pieces of ~220 s of speech each.
 SALVAGE_ALIGN_MAX_CELLS = 2**29
-# When splitting a long file, snap each cut to the longest speaker pause found
-# within a *wide* radius of the target boundary. Because the passes are long we
-# have plenty of slack to hunt far for a real pause, so a cut lands between
-# utterances and never mid-word. 90 s is a judgement call: wide enough that a
-# 10-minute pass always finds a real pause, narrow enough that consecutive
+# When splitting a long file, snap each cut to the clear speaker pause nearest
+# the target boundary within a *wide* radius of it (the longest quiet run only
+# when there is no clear pause; see _chunk_boundaries). Because the passes are
+# long we have plenty of slack to hunt far for a real pause, so a cut lands
+# between utterances and never mid-word. 90 s is a judgement call: wide enough
+# that a 10-minute pass always finds a real pause, narrow enough that consecutive
 # passes stay roughly equal in length.
 SILENCE_SEARCH_SEC = 90
 # A frame counts as "silence" when its AMPLITUDE is at or below this fraction of
@@ -382,10 +384,12 @@ def max_safe_chunk_sec(repo):
     kind = _model_kind(repo)
     m = MEM_MODEL[kind]
     total = _total_ram_gb()
-    if total < min_ram_gb(repo):
-        est = m["fixed"] + m["slope"] * HARD_MIN_CHUNK_SEC
+    need = min_ram_gb(repo)
+    if total < need:
+        # The whole requirement, headroom included: the peak alone ("17 GB")
+        # read as if it fit an 18 GB machine that was just refused.
         raise MemoryError(
-            f"Voxtral {kind} needs about {est:.0f} GB even for its shortest "
+            f"Voxtral {kind} needs about {need:.0f} GB even for its shortest "
             f"chunk, which does not fit in {total:.0f} GB. Pick a smaller model "
             f"(see the memory hint next to each model) or use a machine with more RAM."
         )
@@ -502,7 +506,9 @@ def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
     # with the 8-bit 24B build, which sat at 25 GB while the aligner pushed the
     # machine into swap).
     ceiling = max_safe_chunk_sec(repo)
-    reserve = RAM_RESERVE_GB if not ram_reserve_gb else float(ram_reserve_gb)
+    # `is None`, not falsiness: an explicit 0 means "hold nothing back" and must
+    # not quietly turn into the 7 GB default (the GUI already maps its 0 to None).
+    reserve = RAM_RESERVE_GB if ram_reserve_gb is None else float(ram_reserve_gb)
     budget = total - reserve
     raw = (budget - m["fixed"]) / m["slope"] if m["slope"] else MAX_CHUNK_SEC
     # A reserve below MIN_HEADROOM_GB must not turn into a refusal (the model
@@ -576,6 +582,10 @@ _SCRIPT_RANGES = (
     ("ar", "؀", "ۿ"),   # arabic
     ("el", "Ͱ", "Ͽ"),   # greek
 )
+
+
+# What _detect_language can answer; any other language it can only misname.
+_DETECTABLE = frozenset(_STOPWORDS) | {code for code, _, _ in _SCRIPT_RANGES}
 
 
 def _detect_language(text):
@@ -652,13 +662,21 @@ class _AlignerPool:
         return self.aligner_for(" ".join(words), remember=False).align_prefix(
             words, window)
 
+    def align_words(self, words, window, t_offset):
+        """Word timestamps for a whole pass, with the aligner its text calls
+        for. Through here no caller ever holds an aligner: a reference kept
+        across chunks outlived its eviction, and _release_gpu_memory then
+        freed nothing (measured in its docstring)."""
+        return self.aligner_for(" ".join(words)).align_words(
+            words, window, t_offset=t_offset)
+
     def aligner_for(self, text, remember=True):
         """The aligner for `text`. `remember=False` only reads: the choice for
         the next chunk and the one-off language warning stay untouched."""
         detected, _ = _detect_language(text)
         if self._explicit:
             model = resolve_align_model(self._language)
-            if (remember and detected and detected != self._language
+            if (remember and _reads_as_other(detected, self._language)
                     and not self._warned):
                 self._warned = True
                 _log(self._log_cb, "warn",
@@ -719,8 +737,21 @@ class _AlignerPool:
                 del self._cache[oldest]      # last reference to the evicted one
                 if on_gpu:
                     self._release_gpu_memory()
+            if self._cache and _unfetchable(model):
+                # Offline, a chunk in a language whose aligner was never
+                # downloaded would otherwise end the whole job after its pass
+                # was decoded. The aligner already in use anchors another
+                # language's words too (see _STOPWORDS), only less precisely.
+                fallback = next(reversed(self._cache))
+                _log(self._log_cb, "warn",
+                     f"The alignment model {model} is not downloaded and cannot be "
+                     f"fetched now; aligning this chunk with {fallback} instead.")
+                aligner = self._cache.pop(fallback)
+                self._cache[fallback] = aligner
+                return aligner
             _log(self._log_cb, "info", f"Loading alignment model: {model}")
-            aligner = _Aligner(model)
+            aligner = _load_from_hub(lambda: _Aligner(model), "alignment model",
+                                     model, _ALIGNER_DOWNLOAD_GB, self._log_cb)
         self._cache[model] = aligner   # re-insert = mark most recently used
         if remember:
             self._last_model = model
@@ -793,7 +824,10 @@ def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
     the lead-in overlap the seam is effectively lossless.
 
     `max_len` is a hard per-pass cap (the RAM-safe length): no pass — including
-    the final one after tail-merging and backward snaps — ever exceeds it.
+    the final one after tail-merging and backward snaps — ever exceeds it. And
+    no pass comes out shorter than about a quarter of `chunk_len`: when backward
+    snaps leave a remainder just over `max_len` but too short for a full pass
+    plus a real tail, it is halved instead (see below).
     """
     import numpy as np
     n = len(audio)
@@ -803,8 +837,8 @@ def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
     frame = max(1, int(0.05 * SAMPLE_RATE))  # 50 ms resolution
     good_run = 8   # >= ~400 ms silence counts as a clear speaker pause
     min_run = 3    # >= ~150 ms silence is an acceptable fallback cut
+    long_tail = chunk_len + chunk_len // 2
     bounds = [0]
-    target = chunk_len
     while True:
         remaining = n - bounds[-1]
         # Done when the tail fits one RAM-safe pass AND is not much more than
@@ -812,14 +846,23 @@ def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
         # becoming a tiny extra chunk) — but a tail beyond max_len always gets
         # another cut, so backward snaps can't inflate the final pass past the
         # memory budget.
-        if remaining <= max_len and target >= n - chunk_len // 2:
+        if remaining <= min(max_len, long_tail):
             break
-        # never let a pass shrink below half the target, even hunting backward
-        lo = max(bounds[-1] + max(frame, chunk_len // 2), target - back_len)
-        # ...and never let a snap or tail-merge push this pass past max_len
-        hi = min(n, target + fwd_len, bounds[-1] + max_len)
+        # A full pass here would leave less than half a pass behind it. That
+        # happens when earlier cuts snapped backward and the remainder ended up
+        # just over max_len: aiming at chunk_len then cut 1 s before the end
+        # (measured on a crafted 1190 s file at 600 s: 589.5 + 599.9 + 0.55 s).
+        # Halve the remainder instead; both halves stay within max_len. Either
+        # way the target lies before the end of the audio.
+        step = min(chunk_len if remaining >= long_tail else remaining // 2, max_len)
+        target = bounds[-1] + step
+        # never let a pass shrink below half the step, even hunting backward
+        lo = max(bounds[-1] + max(frame, step // 2), target - back_len)
+        # ...never let a snap or tail-merge push this pass past max_len, and
+        # never leave less than half a step after the cut
+        hi = min(target + fwd_len, bounds[-1] + max_len, n - step // 2)
         if hi - lo <= 2 * frame:
-            cut = min(target, n)
+            cut = target
         else:
             window = audio[lo:hi]
             nf = len(window) // frame
@@ -851,11 +894,28 @@ def _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len=None):
             elif best_long_len >= min_run:
                 cut = lo + best_long * frame + frame // 2
             else:
-                cut = min(target, n)
+                cut = target
         bounds.append(min(max(cut, bounds[-1] + frame), n))
-        target = bounds[-1] + chunk_len
     bounds.append(n)
     return bounds
+
+
+def _pass_bounds(audio, chunk_sec):
+    """Sample offsets of the passes for a RAM-safe pass length of `chunk_sec`.
+
+    Balance the passes: take the fewest passes that keep each within the
+    RAM-safe length, then split evenly. Even passes share the memory headroom
+    and avoid a tiny leftover tail (e.g. 1143s @1006 -> 2x571s, not 1006+137),
+    which also lowers the per-pass peak.
+    """
+    max_len = max(1, int(chunk_sec * SAMPLE_RATE))
+    n_passes = max(1, math.ceil(len(audio) / max_len))
+    chunk_len = math.ceil(len(audio) / n_passes)
+    # Wide backward hunt for a real pause (a shorter pass is always memory-safe),
+    # small forward reach so a cut can't grow the pass much past the RAM budget.
+    back_len = min(int(SILENCE_SEARCH_SEC * SAMPLE_RATE), chunk_len // 2)
+    fwd_len = int(min(SILENCE_SEARCH_SEC, 20) * SAMPLE_RATE)
+    return _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len)
 
 
 def resolve_model(name, default_repo=None):
@@ -1293,10 +1353,24 @@ def _other_language(text, want):
     None whenever there is nothing to compare (no expectation, or too little
     text to judge), so an undecidable pass is never called wrong.
     """
-    if not want:
-        return None
     got, _ = _detect_language(text)
-    return got if got and got != want else None
+    return got if _reads_as_other(got, want) else None
+
+
+def _reads_as_other(got, want):
+    """Whether a text the detector reads as `got` is decidedly not in `want`.
+
+    For a language the detector can name, any other reading counts. For one it
+    cannot, only English does -- the language Voxtral translates into, and the
+    one the detector names reliably: any other reading may be the detector
+    misnaming `want` itself. The script check reads all Cyrillic as "ru" and
+    all Arabic script as "ar", so a correctly pinned Ukrainian or Persian file
+    was "translated" on every pass; Czech reads as Polish by its function
+    words.
+    """
+    if not (got and want) or got == want:
+        return False
+    return want in _DETECTABLE or got == "en"
 
 
 def _halves_disagree(a, b, log_cb, label, name_a, name_b):
@@ -1408,9 +1482,13 @@ def _recover_lost_head(vox, audio, language, text, log_cb, label):
 
     # Never probe more than half the pass: past that the probe is a second
     # transcription rather than a check, and the defect is no longer a lost
-    # opening.
+    # opening. That holds for the first probe too (a 100 s pass gets a 50 s
+    # one). Growing doubles and stops at the last doubling within `longest`
+    # rather than stretching to it: each probe decodes the same opening again,
+    # and on a real interview a 226 s probe after the 120 s one still did not
+    # find it -- the anchor is missed on wording, which more audio does not fix.
     longest = min(HEAD_PROBE_MAX_SEC, duration / 2)
-    sec = HEAD_PROBE_SEC
+    sec = min(HEAD_PROBE_SEC, longest)
     while True:
         probe = vox.transcribe_array(audio[:int(sec * SAMPLE_RATE)], language,
                                      max_new_tokens=int(sec * 20) + 512)
@@ -1428,12 +1506,13 @@ def _recover_lost_head(vox, audio, language, text, log_cb, label):
             break
         # The pass' opening is not in this probe at all, so it lost more than the
         # probe covers. Reach further, up to `longest`.
-        if sec * 2 > longest:
+        grown = sec * 2
+        if grown > longest:
             _log(log_cb, "warn",
                  f"{label}: could not check the opening -- a {sec:.0f}s head "
                  f"probe does not contain the first words of the pass.")
             return text
-        sec *= 2
+        sec = grown
 
     if at == 0:
         return text  # the pass starts where the audio does: nothing was lost
@@ -1512,6 +1591,17 @@ def _turn_profile(turns, dur):
             f"({60.0 * changes / dur:.1f}/min), ~{min(100.0, 100.0 * speech / dur):.0f}% speech")
 
 
+def _free_decode_buffers(vox):
+    """Release a finished decode's MLX buffers before an alignment. They are
+    dead by then, and the aligner's forward runs on the same GPU -- leaving
+    them resident is exactly the co-residency MIN_HEADROOM_GB is meant to
+    prevent."""
+    try:
+        vox._mx.clear_cache()
+    except Exception:
+        pass
+
+
 def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=None,
                         turns=None, align_cb=None, want_lang=None):
     """Transcribe one pass and repair it if it comes back unusable.
@@ -1524,7 +1614,12 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     them shipped 30 minutes of English from a chunk that had no loop at all, so
     a bad language has to make a pass bad here, where the rungs are, rather
     than in a second repair path beside them. `want_lang` is the language the
-    caller expects, or None while it does not know yet.
+    caller expects, or None while it does not know yet. The two defects share
+    the rungs but not all of them: a pass bad for its language alone skips the
+    prefix rung (there is no loop to cut off) and never reaches the penalty
+    rung; after the gentle retry and one split (or, for a window too short to
+    split, the other temperatures), what still reads as another language is
+    taken to be spoken in it.
 
     Repair order, gentlest first:
 
@@ -1555,22 +1650,22 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     # (docs/voxtral-benchmarks.md, section 2). The budget bounds only the
     # generation loop -- a high value reserves no memory.
     max_new = min(32768, int(dur * 20) + 512)
-    trouble = "repetition loop"         # what the log calls this pass's defect
+    loop = "repetition loop"
 
     def attempt(temperature=0.0, seed=None, penalty=1.0):
-        nonlocal trouble
+        """(text, defect, info): the defect is None for a usable pass, else
+        what the log calls it -- `loop`, or the translated-pass description."""
         info = {}
         text = vox.transcribe_array(audio, language, max_new_tokens=max_new,
                                     repetition_penalty=penalty, token_cb=token_cb,
                                     temperature=temperature, seed=seed, info=info)
         # A gave-up attempt is truncated mid-loop; the full-text detector may
         # miss that (a late loop gets diluted), so flag it explicitly.
-        bad = info.get("loop_gave_up", False) or _looks_degenerate(text)
+        if info.get("loop_gave_up", False) or _looks_degenerate(text):
+            return text, loop, info
         got = _other_language(text, want_lang)
-        if got and not bad:
-            bad = True
-            trouble = f"translated pass ('{got}' instead of '{want_lang}')"
-        return text, bad, info
+        defect = f"translated pass ('{got}' instead of '{want_lang}')" if got else None
+        return text, defect, info
 
     # Fallback candidates for the case where no rung resolves the loop.
     # "Shorter is less degenerate" only holds between attempts that actually
@@ -1590,18 +1685,21 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         whole = [c for c, part in candidates if not part]
         return min(whole or [c for c, _ in candidates], key=len) if candidates else ""
 
-    text, bad, info = attempt()
-    if info.get("loop_kicks") and not bad:
+    text, defect, info = attempt()
+    if info.get("loop_kicks") and not defect:
         _log(log_cb, "info", f"{label}: repetition loop broken in place "
                              f"({info['loop_kicks']} intervention(s)).")
-    if not bad:
+    if not defect:
         return text
     keep(text, bool(info.get("loop_gave_up")))
 
     # Keep what the pass got right. This runs before any full re-decode: it is
     # cheaper (one alignment plus the remainder) and it is the only rung that
     # preserves the greedy output for the clean part instead of re-rolling it.
-    if align_cb is not None and depth < LOOP_SPLIT_MAX_DEPTH:
+    # A pass that is bad only for its language has no loop to cut off.
+    if align_cb is not None and depth < LOOP_SPLIT_MAX_DEPTH and defect == loop:
+        # The looping decode is typically the longest of the job.
+        _free_decode_buffers(vox)
         salvaged, why_not = _salvage_prefix(text, audio, align_cb)
         if salvaged is None:
             _log(log_cb, "info", f"{label}: cannot keep the clean part "
@@ -1643,14 +1741,33 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
 
     temps = list(RETRY_TEMPERATURES)
     temperature, seed = temps.pop(0)
-    _log(log_cb, "warn", f"{label}: {trouble}; retrying with gentle "
+    _log(log_cb, "warn", f"{label}: {defect}; retrying with gentle "
                          f"sampling (temperature={temperature}).")
-    retry, rbad, rinfo = attempt(temperature=temperature, seed=seed)
-    if not rbad:
+    retry, rdefect, rinfo = attempt(temperature=temperature, seed=seed)
+    if not rdefect:
         return retry
     keep(retry, bool(rinfo.get("loop_gave_up")))
 
-    if depth < LOOP_SPLIT_MAX_DEPTH and dur >= 2 * LOOP_SPLIT_MIN_SEC:
+    # Neither decode looped; both are bad only because they read as another
+    # language. Perturbing the decode is what fixed both reproducible cases
+    # (this rung; measured above `_other_language`), and which language wins
+    # also hangs on the exact window length, which the split changes. So a
+    # window gets the split once, at the top level, and its halves stop here;
+    # one too short to split gets the remaining temperatures instead. What
+    # still reads as another language after that is taken to be spoken in it --
+    # an English passage on Auto, or a wrong pinned language -- where climbing
+    # on to the penalty rung cost 60 decodes of a 600 s window and then deleted
+    # real repeated words. transcribe() reports the mismatch.
+    splittable = depth < LOOP_SPLIT_MAX_DEPTH and dur >= 2 * LOOP_SPLIT_MIN_SEC
+    language_only = loop not in (defect, rdefect)
+    if language_only and depth > 0:
+        _log(log_cb, "info",
+             f"{label}: {rdefect} again at temperature={temperature}, without a "
+             f"loop; keeping the first decode rather than repairing a language "
+             f"the audio may really be in.")
+        return text
+
+    if splittable:
         cut = _turn_gap_split(audio, turns)
         how = "at a speaker change" if cut is not None else "at the quietest pause"
         if cut is None:
@@ -1665,6 +1782,11 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
                                     depth + 1, token_cb,
                                     _clip_turns(turns, cut_sec, dur), align_cb, want_lang)
         joined = f"{left} {right}".strip()
+        if language_only:
+            # Each half has had its own two decodes at a new window length and
+            # kept what it read as; a half that came back in the wanted
+            # language is the repair, and one that did not is taken as spoken.
+            return text if _looks_degenerate(joined) else joined
         if not _halves_disagree(left, right, log_cb, label,
                                 "the first half", "the second half") \
                 and not _looks_degenerate(joined):
@@ -1681,10 +1803,17 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
     for temperature, seed in temps:
         _log(log_cb, "warn", f"{label}: unresolved; retrying with "
                              f"temperature={temperature}.")
-        retry, rbad, rinfo = attempt(temperature=temperature, seed=seed)
-        if not rbad:
+        retry, rdefect, rinfo = attempt(temperature=temperature, seed=seed)
+        if not rdefect:
             return retry
         keep(retry, bool(rinfo.get("loop_gave_up")))
+
+    if language_only:
+        _log(log_cb, "info",
+             f"{label}: still reads as another language at every temperature; "
+             f"keeping the first decode rather than repairing a language the "
+             f"audio may really be in.")
+        return text
 
     # Everything gentler failed. Fall back to the gentlest penalty that works,
     # because a stronger one starts deleting meaningful repeated words.
@@ -1692,8 +1821,8 @@ def _transcribe_guarded(vox, audio, language, log_cb, label, depth=0, token_cb=N
         _log(log_cb, "warn", f"{label}: still looping; retrying with "
                              f"repetition_penalty={penalty}. Note that a penalty can drop "
                              f"meaningful repeated words.")
-        retry, rbad, rinfo = attempt(penalty=penalty)
-        if not rbad:
+        retry, rdefect, rinfo = attempt(penalty=penalty)
+        if not rdefect:
             return retry
         keep(retry, bool(rinfo.get("loop_gave_up")))
     _log(log_cb, "warn", f"{label}: could not resolve the loop; keeping the "
@@ -1831,6 +1960,101 @@ class _PercentileFloorFeatures:
         feats = clamp_log_mel(log_spec, self.pct, real_frames, self.cap).T
         feats = feats.reshape(N_MELS, n_chunks, N_FRAMES).transpose(1, 0, 2)
         return {"input_features": mx.array(feats)}
+
+
+# --------------------------------------------------------------------------- #
+# First-use downloads
+# --------------------------------------------------------------------------- #
+# What a first-use download weighs, for the one log line before it starts: a
+# silent 15 GB download is indistinguishable from a hang. Sizes of the
+# published snapshots; every wav2vec2-large aligner is ~1.3 GB of weights.
+_DOWNLOAD_GB = {
+    VOXTRAL_MODELS["voxtral-mini-8bit"]: 5.6,
+    VOXTRAL_MODELS["voxtral-small-4bit"]: 15,
+}
+_ALIGNER_DOWNLOAD_GB = 1.3
+
+
+def _needs_download(repo):
+    """True when `repo` is a hub id with nothing of it in the local Hugging
+    Face cache. False whenever that cannot be told, so the log never announces
+    a download that is not happening. Only the config is looked for, so a
+    download interrupted after its first files resumes unannounced: which
+    weight files a snapshot has differs from model to model."""
+    if os.path.isdir(str(repo)):
+        return False
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        return not isinstance(try_to_load_from_cache(str(repo), "config.json"), str)
+    except Exception:
+        return False
+
+
+def _hub_offline():
+    try:
+        from huggingface_hub import constants
+        return bool(constants.HF_HUB_OFFLINE)
+    except Exception:
+        return False
+
+
+def _hub_reachable():
+    """Whether Hugging Face answers at all -- any HTTP answer counts."""
+    try:
+        import httpx
+        from huggingface_hub import constants
+        httpx.head(constants.ENDPOINT, timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def _unfetchable(repo):
+    """True when `repo` is not downloaded and cannot be fetched right now."""
+    return _needs_download(repo) and (_hub_offline() or not _hub_reachable())
+
+
+def _not_fetchable_error(what, repo, size_gb):
+    size = f" (~{size_gb:g} GB)" if size_gb else ""
+    if _hub_offline():
+        how = ("downloads are switched off (HF_HUB_OFFLINE); allow them once so "
+               "it can be downloaded")
+    else:
+        how = ("could not be fetched from Hugging Face (no internet connection, "
+               "or the site is not reachable); connect once so it can be "
+               "downloaded")
+    return RuntimeError(f"The {what} {repo} is not downloaded yet, and {how}{size}.")
+
+
+def _load_from_hub(load, what, repo, size_gb, log_cb):
+    """`load()`, announced when it will download first. A model that is not
+    downloaded and cannot be fetched fails with a sentence the user can act on
+    instead of the library's text; the original stays chained.
+
+    Whether it could be fetched is asked of the hub itself, not read off the
+    exception: the libraries wrap their errors too differently for that.
+    transformers turns an aligner's missing files, a 401 for a stale token and
+    an unwritable cache alike into a bare OSError; a connection that drops
+    during the download ends in an httpx error, which is no OSError at all;
+    hf_xet reports a full disk without an errno. So when a missing model fails
+    to load and the hub does not answer, the model could not be fetched; when
+    it does answer, the library's own error says what else went wrong.
+    """
+    size = f" (~{size_gb:g} GB)" if size_gb else ""
+    missing = _needs_download(repo)
+    if missing and not _hub_offline():
+        _log(log_cb, "info", f"Downloading the {what} {repo}{size}; this happens "
+                             f"only once.")
+    try:
+        from httpx import HTTPError as _TransportFailure
+    except Exception:
+        _TransportFailure = OSError
+    try:
+        return load()
+    except (OSError, _TransportFailure) as exc:   # what fetching can raise
+        if not missing or not (_hub_offline() or not _hub_reachable()):
+            raise
+        raise _not_fetchable_error(what, repo, size_gb) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -2888,21 +3112,34 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     """
     import soundfile as sf
 
+    # "auto"/"multilingual" are how the menu spells "no language". Taken
+    # literally they became the pinned language "au"/"mu" -- in the prompt, in
+    # the translated-pass guard and in the aligner choice.
+    if (language or "").strip().lower() in ("", "auto", "multilingual"):
+        language = None
+
     from noScribe import transcript_corrections
     corrections = transcript_corrections.load_corrections(corrections_path)
     if corrections:
         _log(log_cb, "info", f"Applying {len(corrections)} word correction(s).")
     # The speaker names the user entered are the correct spelling of words that
-    # are very likely to be spoken. A speech model cannot know whether to write
-    # "Markus" or "Marcus", so normalise same-sounding spellings to theirs.
+    # are very likely to be spoken; a spelling of one of them that sounds the
+    # same and is no word is set to theirs (apply_name_corrections).
     speaker_names = [n for n in (speaker_names or []) if n]
     if speaker_names:
-        _log(log_cb, "info", f"Normalising spoken names to: {', '.join(speaker_names)}")
+        _log(log_cb, "info", f"Correcting the spelling of the speaker names: "
+                             f"{', '.join(speaker_names)}")
 
     # A missing file must be diagnosed as a missing file, not as whatever the
     # memory sizing below happens to find wrong with the machine.
     if not os.path.isfile(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    # An empty recording is an empty transcript, as with Whisper -- not a
+    # model load followed by "[as_strided] Negative dimensions" from the
+    # log-Mel features, which cannot be computed for zero samples.
+    if sf.info(audio_path).frames == 0:
+        _log(log_cb, "warn", "The audio contains no samples; nothing to transcribe.")
+        return [], {"duration": 0.0, "language": language}
 
     # The 8-bit mini build as the bare-API default: always fetchable from the
     # hub and its repo name classifies correctly in MEM_MODEL.
@@ -2961,6 +3198,8 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             if ceiling < min(MAX_CHUNK_SEC, TRUSTED_CHUNK_SEC):
                 what = "more memory than this machine has"
             elif MAX_CHUNK_SEC <= TRUSTED_CHUNK_SEC:
+                # Unreachable while TRUSTED_CHUNK_SEC stays below the context
+                # cap; kept for the day it is raised to it, as its comment invites.
                 what = "more context than the model has"
             else:
                 what = ("a longer window than Voxtral has been measured on "
@@ -2972,14 +3211,22 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     quant = _quant_summary(repo)
     _log(log_cb, "info", f"Loading Voxtral model: {repo}"
                          + (f" ({quant})" if quant else ""))
-    vox = _Voxtral(repo)
+    vox = _load_from_hub(lambda: _Voxtral(repo), "Voxtral model", repo,
+                         _DOWNLOAD_GB.get(repo), log_cb)
 
     # The aligner is chosen per chunk from the *transcribed text* (see
     # _AlignerPool): the text exists before its chunk is aligned, so Auto can
     # use the char-native per-language model instead of the weaker romanised
     # multilingual fallback, and mid-file language changes are followed.
     aligner_pool = _AlignerPool(language, log_cb) if need_timestamps else None
-    aligner = None
+    # With the language set, its aligner is known now: fail before the first
+    # pass is decoded rather than after it, if it can be neither found nor
+    # fetched. (Loading it here would keep it resident through the decode.)
+    if aligner_pool is not None and language:
+        align_model = resolve_align_model(language)
+        if _unfetchable(align_model):
+            raise _not_fetchable_error("alignment model", align_model,
+                                       _ALIGNER_DOWNLOAD_GB)
 
     # Language bookkeeping for the translated-chunk guard. With an explicit
     # language there is a target from the first chunk on; on Auto the file has
@@ -3007,18 +3254,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         except (TypeError, ValueError):
             turns = None
         turns = turns or None
-    # Balance the passes: take the fewest passes that keep each within the
-    # RAM-safe length, then split evenly. Even passes share the memory headroom
-    # and avoid a tiny leftover tail (e.g. 1143s @1006 -> 2x571s, not 1006+137),
-    # which also lowers the per-pass peak.
-    max_len = max(1, int(chunk_sec * SAMPLE_RATE))
-    n_passes = max(1, math.ceil(len(audio) / max_len))
-    chunk_len = math.ceil(len(audio) / n_passes)
-    # Wide backward hunt for a real pause (a shorter pass is always memory-safe),
-    # small forward reach so a cut can't grow the pass much past the RAM budget.
-    back_len = min(int(SILENCE_SEARCH_SEC * SAMPLE_RATE), chunk_len // 2)
-    fwd_len = int(min(SILENCE_SEARCH_SEC, 20) * SAMPLE_RATE)
-    bounds = _chunk_boundaries(audio, chunk_len, back_len, fwd_len, max_len)
+    bounds = _pass_bounds(audio, chunk_sec)
     n_chunks = len(bounds) - 1
     if n_chunks > 1:
         _log(log_cb, "info",
@@ -3096,10 +3332,12 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             text = _recover_lost_head(vox, chunk, language, text, log_cb, label)
         chunk_lang, _ = _detect_language(text)
         if _other_language(text, want):
+            # The ladder may have kept this on purpose (the audio can really be
+            # in that language), so say both: only the listener can tell.
             _log(log_cb, "warn",
-                 f"{label}: still reads as '{chunk_lang}' rather than '{want}' "
-                 f"after every repair; these {len(text.split())} words are a "
-                 f"translation, not a transcript.")
+                 f"{label}: reads as '{chunk_lang}' rather than '{want}'. Either "
+                 f"it is spoken in that language, or these "
+                 f"{len(text.split())} words are a translation, not a transcript.")
         if chunk_lang:
             lang_tally[chunk_lang] = lang_tally.get(chunk_lang, 0) + 1
             if not want:
@@ -3107,22 +3345,17 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         if corrections:
             text = transcript_corrections.apply_corrections(text, corrections)
         if speaker_names:
+            # Every language the text may be in: the one it reads as, and the
+            # one expected (see apply_name_corrections).
             text = transcript_corrections.apply_name_corrections(
-                text, speaker_names, language)
-        # Release the decode pass's MLX buffers BEFORE the alignment, not after.
-        # They are dead by now, and the aligner's forward runs on the same GPU --
-        # leaving them resident is exactly the co-residency MIN_HEADROOM_GB is
-        # meant to prevent. Unconditional, so the text-only path frees them too.
-        try:
-            vox._mx.clear_cache()
-        except Exception:
-            pass
+                text, speaker_names, (chunk_lang, want))
+        # Unconditional, so the text-only path frees them too.
+        _free_decode_buffers(vox)
         if aligner_pool is not None:
-            aligner = aligner_pool.aligner_for(text)
             words = re.findall(r"\S+", text)
             _log(log_cb, "info", f"{label}: aligning word timestamps "
                                  f"({len(words)} words)...")
-            stamps = aligner.align_words(words, chunk, t_offset=t_offset)
+            stamps = aligner_pool.align_words(words, chunk, t_offset)
             if a_read < a0:
                 # Drop the *words* already covered by the previous pass (the
                 # overlap region). Filtering at word rather than cue level

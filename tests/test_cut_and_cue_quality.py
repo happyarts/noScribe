@@ -11,6 +11,7 @@ from noScribe.voxtral_engine import (
     SAMPLE_RATE,
     SUB_MAX_SEC,
     _chunk_boundaries,
+    _pass_bounds,
     _frame_energy,
     _segments_from_words,
 )
@@ -62,6 +63,45 @@ def test_noisy_recording_still_finds_its_best_pause():
                                20 * SAMPLE_RATE, 600 * SAMPLE_RATE)
     cut = bounds[1] / SAMPLE_RATE
     assert 589.0 <= cut <= 590.5, f"cut at {cut:.2f}s, dip missed"
+
+
+def test_a_backward_snap_does_not_leave_a_sub_second_tail():
+    """The first cut snapped back to a pause at 589.2 s, leaving 600.5 s --
+    just over the 600 s cap, so one more cut was forced. It aimed at a full
+    pass, found the pause at 1189.3 s and left a final pass of 0.55 s: a whole
+    Voxtral decode (and an aligner call) for half a second of audio, with no
+    context, although the docstring promises tails merge instead."""
+    rng = np.random.default_rng(3)
+    audio = _speech(rng, 1190)
+    for t in (589.2, 1189.3):
+        _fill(audio, t, t + 0.6, 0.0002, rng)
+    passes = np.diff(_pass_bounds(audio, 600)) / SAMPLE_RATE
+    assert passes.max() <= 600, passes
+    assert passes.min() >= 600 / 8, passes
+
+
+def test_pass_plan_invariants_on_random_files():
+    """Passes never exceed the RAM-safe length (memory safety), never run
+    backward, and never come out as a tiny leftover -- whatever the length of
+    the file and wherever its pauses happen to sit. Short passes keep the audio
+    small; the invariants do not depend on the scale."""
+    rng = np.random.default_rng(7)
+    base = _speech(rng, 420)
+    for _ in range(60):
+        chunk_sec = float(rng.uniform(60, 120))
+        n = int(rng.uniform(5, 420) * SAMPLE_RATE)
+        audio = base[:n].copy()
+        for t in rng.uniform(0, n / SAMPLE_RATE, size=int(rng.integers(0, 12))):
+            _fill(audio, t, min(t + rng.uniform(0.2, 1.5), n / SAMPLE_RATE),
+                  0.0002, rng)
+        bounds = _pass_bounds(audio, chunk_sec)
+        passes = np.diff(bounds)
+        max_len = int(chunk_sec * SAMPLE_RATE)
+        assert bounds[0] == 0 and bounds[-1] == n
+        assert (passes > 0).all(), bounds
+        assert passes.max() <= max_len, (chunk_sec, n, bounds)
+        if n > max_len:
+            assert passes.min() >= max_len // 8, (chunk_sec, n, bounds)
 
 
 def test_quiet_level_is_compared_in_the_power_domain():

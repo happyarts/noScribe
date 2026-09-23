@@ -86,7 +86,8 @@ The device choice mirrors `pyannote_mp_worker`'s, macOS floor included, and fall
 back to the CPU once and for good if the forward raises — an unsupported op on a
 backend must not cost the whole job its transcript. `clear_cache()` now runs
 *before* alignment rather than after, so Voxtral's buffers are gone by the time the
-aligner loads next to them; the reasoning is in the comment at that call site.
+aligner loads next to them; the reasoning is in `_free_decode_buffers`, which
+both alignments call.
 
 ## Faster aligners that exist, and what they measure (surveyed 2026-08-21)
 

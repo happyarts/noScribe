@@ -195,3 +195,33 @@ def test_a_degenerate_prefix_is_not_shipped_as_a_success():
     assert not v._looks_degenerate(out), out[:120]
     assert len(calls) > 1, "the ladder did not carry on after the prefix"
     assert any("still looks degenerate" in m for m in logs), logs
+
+
+def test_the_salvage_alignment_runs_on_a_cleared_mlx_cache():
+    """The prefix rung aligns right after the looping decode -- typically the
+    longest of the job -- and the aligner's forward runs on the same GPU. The
+    main path frees the dead MLX buffers before its alignment; this one did
+    not, which is exactly the co-residency MIN_HEADROOM_GB is meant to rule out."""
+    events = []
+
+    class _Mx:
+        def clear_cache(self):
+            events.append("clear")
+
+    class _Vox:
+        _mx = _Mx()
+
+        def transcribe_array(self, audio, language, max_new_tokens=4096,
+                             repetition_penalty=1.0, token_cb=None,
+                             temperature=0.0, seed=None, info=None):
+            events.append("decode")
+            return LOOP_TEXT if events.count("decode") == 1 else "Ein sauberer Rest."
+
+    def _align(words, window):
+        events.append("align")
+        return _stamps(words, real_tail=True)
+
+    audio = np.zeros(200 * SAMPLE_RATE, dtype=np.float32)
+    _transcribe_guarded(_Vox(), audio, "de", None, "Pass 1/1", align_cb=_align)
+    assert "align" in events, events
+    assert events[events.index("align") - 1] == "clear", events

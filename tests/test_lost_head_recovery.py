@@ -151,6 +151,24 @@ def test_growing_never_probes_more_than_half_the_pass():
     assert max(vox.windows_sec) <= 100
 
 
+def test_the_first_probe_also_stays_within_half_the_pass():
+    """Passes of 90-120 s got the full 60 s first probe -- more than half the
+    pass, which the rule above forbids for every probe, not just the grown ones."""
+    vox = FakeVox("nichts davon hier drin")
+    _recover_lost_head(vox, _audio(100), None, BODY, _log, "x")
+    assert vox.windows_sec == [50]
+
+
+def test_growing_stops_at_the_last_doubling_within_half_the_pass():
+    """Stretching the last probe to half the pass decoded the same opening once
+    more: 60, 120 and then 200 s on a 400 s pass, and on a real interview a
+    226 s probe after 120 s that still missed the anchor."""
+    for seconds in (241, 400, 450):
+        vox = FakeVox("nichts davon hier drin")
+        _recover_lost_head(vox, _audio(seconds), None, BODY, _log, "x")
+        assert vox.windows_sec == [HEAD_PROBE_SEC, HEAD_PROBE_SEC * 2], seconds
+
+
 @pytest.mark.parametrize("lang", [None, "de"])
 def test_the_probe_runs_in_the_pass_language(lang):
     """Whatever the pass was decoded with, the probe has to match it."""

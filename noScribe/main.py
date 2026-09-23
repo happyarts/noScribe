@@ -2217,6 +2217,12 @@ class App(ctk.CTk):
         """ Log with a newline appended """
         self.log(f'{txt}\n', tags, where, link, tb)
 
+    def end_open_line(self) -> None:
+        """Finish a line left open -- streamed transcript text, or a progress
+        line from logr -- so the next message does not get glued onto it."""
+        if getattr(self, '_log_line_open', False):
+            self.logn()
+
     def logr(self, txt: str = '', tags: list = [], where: str = 'both', link:str = '', tb: str = '') -> None:
         """ Replace the last line of the log """
         if where != 'file' and not getattr(self, '_headless', False) and hasattr(self, 'log_textbox') and self.log_textbox.winfo_exists():
@@ -3577,6 +3583,7 @@ class App(ctk.CTk):
                     if not proc.is_alive():
                         # Process died without sending result
                         exitcode = proc.exitcode
+                        self.end_open_line()
                         self.logn(f"Transcription worker exited unexpectedly (code {exitcode}).", 'error')
                         raise Exception('Subprocess terminated unexpectedly')
                     continue
@@ -3585,11 +3592,8 @@ class App(ctk.CTk):
                 if mtype == "log":
                     level = msg.get("level", "info")
                     txt = msg.get("msg", "")
-                    # Transcript text streams in without trailing newlines;
-                    # finish that line first so the status message does not get
-                    # glued onto the paragraph.
-                    if getattr(self, '_log_line_open', False):
-                        self.logn()
+                    # Transcript text streams in without trailing newlines.
+                    self.end_open_line()
                     if level == 'error':
                         self.logn(txt, 'error')
                     else:
@@ -3616,6 +3620,7 @@ class App(ctk.CTk):
                     if not msg.get("ok"):
                         err = msg.get('error', 'Transcription failed')
                         trc = msg.get('trace')
+                        self.end_open_line()
                         self.logn(f"Transcription failed: {err}", 'error')
                         if trc:
                             self.logn(trc, where='file')
@@ -3709,7 +3714,7 @@ class App(ctk.CTk):
             "chunk_sec": chunk_sec or None,
             "corrections_path": corrections_path,
             # None unless the job carries speaker names; the engine then
-            # normalises spoken names to those spellings (German only, see
+            # normalises mis-heard names to those spellings (see
             # transcript_corrections.apply_name_corrections).
             "speaker_names": getattr(job, "speaker_names", None),
             # 0 -> engine default; set voxtral_ram_reserve_gb in config.yml to

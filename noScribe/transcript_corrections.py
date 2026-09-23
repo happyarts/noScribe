@@ -13,9 +13,11 @@ Format (case-insensitive, whole-word matches):
       from: [vitaflor, "vita flor", "flor-öl", "flor-öle"]
 """
 
+import functools
 import logging
 import os
 import re
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -92,125 +94,160 @@ def load_corrections(path):
     return rules
 
 
-def _koelner_phonetik(word):
-    """Cologne phonetics code of a word (German equivalent of Soundex).
+# Spellings that sound the same (see _spelling_key): a speech model that hears
+# a name it does not know picks one of them at random. Only these count. A
+# looser rule -- any vowel for any other, m for n, g for k -- turned other
+# people's names and fillers the dictionary does not know into a speaker's
+# name ("Leni" -> "Lena", "Sena" -> "Sina", "Ähm" -> "Ann", Bavarian
+# "Hamma" -> "Hanna"), so a mis-hearing that changes a sound ("Muna" for
+# "Mona") is left to the user's correction list.
+#
+# Measured over 407k words of transcripts (Whisper and Voxtral output of
+# CallHome German, English and Spanish and of AMI, plus private German
+# recordings: a podcast, an interview, a video call), each checked against
+# 70-150 common first names of its
+# language and the names of its own speakers: one change, and a right one --
+# a speaker's name the model had spelled with i for y. The dictionary kept
+# the only other candidate ("Monica" beside "Monika") twice.
+_SAME_SOUND = (
+    (re.compile(r"ph"), "f"),
+    (re.compile(r"ck"), "k"),
+    (re.compile(r"c(?=[aoulr]|$)"), "k"),       # Marcus / Markus
+    (re.compile(r"dt$"), "t"),                  # Schmidt / Schmit
+    (re.compile(r"(?<=.)y$"), "i"),             # Steffy / Steffi; inside a German
+                                                # name y is often ü (Sybille)
+    # an h after a vowel and before none: Mohna / Mona, Noah / Noa; not Johanna
+    (re.compile(r"(?<=[aeiouäöü])h(?![aeiouäöü])"), ""),
+)
+# Doubled letters are deliberately not among them: a doubled vowel is another
+# sound in Dutch, Finnish and English ("Joon" is not "John"), and a doubled
+# consonant shortens the vowel before it in German and Italian, so "Ela" and
+# "Ella", "Mila" and "Milla" are different names that sound different.
 
-    Words that are pronounced alike get the same code, which is exactly the
-    class of error a speech model makes on names: it hears the sound correctly
-    but cannot know the spelling ("Marcus"/"Markus") or picks a similar-sounding
-    one ("Muna"/"Mona").
+
+def _spelling_key(word):
+    """The part of a spelling that can be heard: two words with the same key
+    sound alike to anyone who does not know how either is written. Accents
+    count ("Ole" is not "Öle"), and so does every vowel."""
+    w = unicodedata.normalize("NFC", word).lower()
+    for pattern, same in _SAME_SOUND:
+        w = pattern.sub(same, w)
+    return w
+
+
+@functools.lru_cache(maxsize=None)
+def _spell_checker():
+    """macOS's own spell checker, or None.
+
+    Voxtral runs only on Apple Silicon, and pyobjc is already a dependency
+    there (environments/requirements_macOS_arm64.txt). It works in the spawned
+    worker without a running app.
     """
-    w = word.lower()
-    w = (w.replace("ä", "a").replace("ö", "o").replace("ü", "u")
-          .replace("ß", "ss").replace("é", "e").replace("è", "e").replace("ê", "e"))
-    w = re.sub(r"[^a-z]", "", w)
-    if not w:
-        return ""
-    codes = []
-    for i, ch in enumerate(w):
-        nxt = w[i + 1] if i + 1 < len(w) else ""
-        prv = w[i - 1] if i else ""
-        if ch in "aeiouy":
-            c = "0"
-        elif ch == "b" or (ch == "p" and nxt != "h"):
-            c = "1"
-        elif ch in "dt" and nxt not in "csz":
-            c = "2"
-        elif ch in "fvw" or (ch == "p" and nxt == "h"):
-            c = "3"
-        elif ch in "gkq":
-            c = "4"
-        elif ch == "c":
-            # "c" is spoken like "k" before a/h/k/l/o/q/r/u/x (and at the start),
-            # otherwise like "z" -- this is what maps Marcus onto Markus.
-            c = "4" if (nxt in "ahkloqrux" and (i == 0 or prv not in "sz")) else "8"
-        elif ch == "x":
-            c = "48"
-        elif ch == "l":
-            c = "5"
-        elif ch in "mn":
-            c = "6"
-        elif ch == "r":
-            c = "7"
-        elif ch in "sz":
-            c = "8"
-        else:
-            continue
-        codes.append(c)
-    out = "".join(codes)
-    if not out:
-        # Every letter was uncoded (h/j only, e.g. "Jhh") -> no phonetic code.
-        # Return "" rather than indexing out[0] into an empty string (IndexError
-        # that would otherwise abort the whole correction pass).
-        return ""
-    out = re.sub(r"(.)\1+", r"\1", out)          # collapse repeats
-    return out[0] + out[1:].replace("0", "")      # drop vowels except a leading one
+    try:
+        from AppKit import NSSpellChecker
+        return NSSpellChecker.sharedSpellChecker()
+    except Exception as e:
+        logger.debug("No spell checker: %s", e)
+        return None
 
 
-def _edit_distance(a, b, limit=2):
-    """Levenshtein distance, capped: returns limit+1 once it is exceeded."""
-    a, b = a.lower(), b.lower()
-    if abs(len(a) - len(b)) > limit:
-        return limit + 1
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        if min(cur) > limit:
-            return limit + 1
-        prev = cur
-    return prev[-1]
+@functools.lru_cache(maxsize=None)
+def _dictionary_language(language):
+    """The spell checker's name for a language code ("pt" -> "pt_BR"), or None
+    when it has no dictionary for it. Asked about a language it lacks, the
+    checker calls every word correct, so this must be settled up front."""
+    checker = _spell_checker()
+    code = str(language or "").strip().lower()[:2]
+    if checker is None or len(code) != 2:
+        return None
+    try:
+        available = [str(lang) for lang in checker.availableLanguages()]
+    except Exception as e:     # a correction is never worth a failed job
+        logger.debug("No dictionary list: %s", e)
+        return None
+    if code in available:
+        return code
+    return next((lang for lang in available if lang.startswith(code + "_")), None)
 
 
-def apply_name_corrections(text, names, language=None):
-    """Normalise spoken names to the spelling the user provided.
+def _is_word(word, language):
+    """Whether the dictionary of `language` (see _dictionary_language) knows
+    `word`. Anything short of a clear "unknown" for the whole word counts as
+    known: that leaves the name as the model wrote it, never a real word lost.
 
-    A speech model has no way to know whether it should write "Markus" or
-    "Marcus", and it easily picks a similar-sounding spelling ("Muna" for
-    "Mona"). Where the user has already told us the names (the speaker-names
-    field), both can be fixed.
-
-    Cologne phonetics models *German* pronunciation, so this only runs on German
-    audio. It is deliberately not generalised: a language-neutral "close
-    spelling" rule was tried and rewrote ordinary words ("Rome" -> "Mona",
-    "Anna" -> "Anne"), so for any other language -- and for auto-detect, where we
-    do not know what was spoken -- nothing is changed here and the user's own
-    correction list remains the way to fix names.
-
-    A replacement additionally requires the same word length, which is what
-    keeps ordinary words intact -- the phonetic code collapses vowels, so
-    "Mohn" would otherwise be rewritten to "Mona".
-
-    Residual risk to be aware of: a *different* name that sounds the same as a
-    speaker's ("Anna" next to a speaker called "Anne") is rewritten too. Only
-    names the user explicitly entered are ever used as targets. Measured over
-    4255 words of real German, the two guards hold: exactly 3 intended
-    changes, no false positives.
+    Every way a lookup goes wrong ends up there. Under heavy load the spell
+    server can stall ("NSSpellServer findMisspelledWordInString timed out"
+    on stderr), and measured by pausing it, a stalled lookup reports no
+    misspelling after ~1 s. A dictionary's first lookups while it loads, and
+    every lookup in the 15 listed dictionaries that accept any word at all
+    (uk, bg, el, he, hi, id, is, ga, ko, lt, nb, nn, pa, sl, te on macOS 27),
+    answer the same way. Answers are therefore not cached across calls, so a
+    stall costs at most one chunk's corrections; an ordinary lookup takes
+    1-15 ms, and only the rare word that sounds like a name is asked.
     """
-    if not str(language or "").strip().lower().startswith("de"):
+    try:
+        miss, _count = _spell_checker().checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount_(
+            word, 0, language, False, 0, None)
+    except Exception as e:
+        logger.debug("Spell check of %r failed: %s", word, e)
+        return True
+    return not (miss.location == 0 and miss.length == len(word))
+
+
+def apply_name_corrections(text, names, languages=None):
+    """Set mis-heard spellings of the speakers' names to the one the user gave.
+
+    A speech model hears a name it does not know and writes one of the ways
+    it could be spelled ("Mohna" for "Mona", "Steffy" for "Steffi"). Where the
+    user has told us the names (the speaker-names field), that can be fixed.
+
+    A capitalised word is replaced only when it passes both guards:
+      * it is spelled differently from exactly one of the names but sounds the
+        same (`_spelling_key`),
+      * and no dictionary of `languages` -- one code or several, e.g. the
+        language the text reads as and the one the file is in -- knows it.
+    The dictionary keeps real words that happen to be spelled like a name
+    (every German noun is capitalised), and it knows common names, so
+    "Marcus" stays "Marcus" next to a speaker called Markus: a real name may
+    be someone else. Asking every language the text may be in keeps a word of
+    one language out of the other's gaps, such as an English quote in a German
+    passage. The measurement is above _SAME_SOUND.
+
+    Without a dictionary (not macOS, Auto before the language is known, or a
+    language the system has none for) nothing is changed -- and nothing is
+    either with one of the dictionaries that accept every word (see _is_word).
+    """
+    if isinstance(languages, str) or languages is None:
+        languages = [languages]
+    dictionaries = list(dict.fromkeys(
+        d for d in (_dictionary_language(code) for code in languages) if d))
+    if not dictionaries:
         return text
-    names = [n for n in (names or []) if len(n) >= 3 and n.isalpha()]
-    if not names:
-        return text
-    wanted = {}
-    for n in names:
-        code = _koelner_phonetik(n)
-        if code:
-            wanted.setdefault(code, n)
+    # "Mona Muster" or "Anna-Lena" as a speaker name: each capitalised part is
+    # a name of its own ("del" in "Ana del Río" is not).
+    parts = {p for n in (names or [])
+             for p in re.findall(r"[^\W\d_]{3,}", unicodedata.normalize("NFC", str(n)))
+             if p[0].isupper()}
+    keys = {}
+    for p in parts:
+        keys.setdefault(_spelling_key(p), set()).add(p)
+    lowered = {p.lower() for p in parts}
+    verdicts = {}   # one lookup per word and chunk (see _is_word)
 
     def repl(m):
         word = m.group(0)
-        name = wanted.get(_koelner_phonetik(word))
-        if not name or word == name:
+        if not word[0].isupper() or word.lower() in lowered:
             return word
-        if len(word) != len(name) or _edit_distance(word, name) > 2:
+        key = _spelling_key(word)
+        alike = keys.get(key, ())
+        if len(alike) != 1:
             return word
-        return name
+        if word not in verdicts:
+            verdicts[word] = any(_is_word(word, d) for d in dictionaries)
+        return word if verdicts[word] else next(iter(alike))
 
-    # Only capitalised words: names appear capitalised, and this keeps the rule
-    # away from lowercase everyday words that happen to sound similar.
-    return re.sub(r"(?<!\w)[A-ZÄÖÜ][\wäöüß]{2,}", repl, text)
+    # Not the stem of a contraction or possessive ("Weren't", "Mohna's").
+    return re.sub(r"(?<!\w)[^\W\d_]{3,}(?![\w'\u2019])", repl, text)
 
 
 def apply_corrections(text, rules):

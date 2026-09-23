@@ -208,9 +208,15 @@ find/replace list at:
 
 (macOS: `~/Library/Application Support/noScribe/voxtral_corrections.yml`)
 
-Speaker names entered in the app are normalised in the same step: a spoken name
-the model spelled differently ("Marcus" for "Markus") is corrected to the
-spelling given, matched by sound. This part works for German only.
+Speaker names entered in the app are corrected in the same step, but only
+where the model wrote a name as it sounds and spelled it another way ("Mohna"
+or "Mona", "Steffy" or "Steffi"). A word that sounds different ("Muna") may be
+someone else and is left alone — put it in the list above if it is not — and
+so is any word the macOS dictionary of the transcript's language knows: "Mohn"
+next to a speaker called Mon, or a real name spelled differently ("Marcus" next
+to "Markus"), which may be someone else. Where the system has no dictionary for
+the language, or one that accepts every word, names are left as the model wrote
+them.
 
 ```yaml
 - to: VitaFlor

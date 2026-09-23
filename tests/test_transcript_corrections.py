@@ -69,46 +69,228 @@ def test_default_template_has_no_active_rules(tmp_path):
     assert tc.load_corrections(path) == []
 
 
-def test_koelner_phonetik_groups_same_sounding_names():
-    kp = tc._koelner_phonetik
-    assert kp("Markus") == kp("Marcus")          # c/k are indistinguishable by ear
-    assert kp("Mona") == kp("Mohna") == kp("Muna")
-    assert kp("Monika") != kp("Mona")
+def test_only_spellings_that_sound_the_same_share_a_key():
+    """What a listener cannot tell apart lines up; any change of sound does
+    not -- a looser rule made other people's names and fillers into speakers'
+    names (see _SAME_SOUND)."""
+    def same(word, name):
+        return tc._spelling_key(word) == tc._spelling_key(name)
+    assert same("Mohna", "Mona")                 # a silent h
+    assert same("Noa", "Noah")
+    assert same("Marcus", "Markus")              # c spoken as k
+    assert same("Schmidt", "Schmit")
+    assert same("Steffy", "Steffi")              # a final y
+    assert not same("Sybille", "Sibille")        # but inside a name y can be ü
+    assert not same("Johanna", "Joanna")         # an h that is spoken
+    assert not same("Muna", "Mona")              # every vowel counts
+    assert not same("Leni", "Lena")
+    assert not same("\u00c4hm", "Ann")
+    assert not same("Hamma", "Hanna")            # m is not n
+    assert not same("Ole", "\u00d6le")          # nor is an umlaut nothing
+    assert not same("Lucie", "Luzie")            # c before i is not z
+    assert not same("Ela", "Ella")               # a doubled consonant shortens the vowel
+    assert not same("Joon", "John")              # and a doubled vowel is another one
+    assert not same("Yvonne", "Ivonne")          # a leading y is left as it is
+    assert same("Rafael", "Raphael")
 
 
-def test_apply_name_corrections_fixes_spelling():
-    """Names the user provided win over same-sounding spellings."""
-    names = ["Mona", "Markus"]
-    out = tc.apply_name_corrections("Ich bin Muna Muster und heute mit Marcus hier.", names, "de")
-    assert out == "Ich bin Mona Muster und heute mit Markus hier."
+# A stand-in for the macOS dictionaries, so these tests run where there are
+# none (Linux CI). Every word the tests use that is not a mis-hearing is in it.
+_WORDS = {
+    "de": {"Ich", "Muster", "Und", "Heute", "Mit", "Hier", "Hallo", "Sagt",
+           "Mona", "Markus", "Marcus", "Der", "Mann", "Kam", "Seiner", "Mama",
+           "Dann", "Wir", "Fahren", "Nach", "Kerl", "Karl", "Rose", "Rosa",
+           "Steffi", "Mohn", "Raphael"},
+    "en": {"Then", "Said", "Mona", "Moan", "Mane", "Rome", "Lena", "Lina",
+           "Hello", "Were", "Warren"},
+    "xx": set(),        # a dictionary that knows none of the words
+}
+
+
+@pytest.fixture
+def dictionaries(monkeypatch):
+    monkeypatch.setattr(tc, "_dictionary_language",
+                        lambda language: language if language in _WORDS else None)
+    monkeypatch.setattr(tc, "_is_word", lambda word, language: word in _WORDS[language])
+
+
+def test_apply_name_corrections_fixes_spelling(dictionaries):
+    """A spelling of a name that is no word takes the one the user provided."""
+    names = ["Mona", "Steffi"]
+    out = tc.apply_name_corrections("Ich bin Mohna Muster, und Steffy auch.", names, "de")
+    assert out == "Ich bin Mona Muster, und Steffi auch."
     # already correct -> untouched
-    assert tc.apply_name_corrections("Hallo Markus, sagt Mona.", names, "de") == "Hallo Markus, sagt Mona."
+    assert tc.apply_name_corrections("Hallo Steffi, sagt Mona.", names, "de") == "Hallo Steffi, sagt Mona."
+    # lower case is no name ("mohna" mid-sentence), and the curly possessive is
+    # a possessive like the straight one
+    assert tc.apply_name_corrections("die mohna und Mohna\u2019s Hut.", names, "de") \
+        == "die mohna und Mohna\u2019s Hut."
 
 
-def test_apply_name_corrections_only_for_german():
-    """Cologne phonetics is German; other languages must not be touched by it.
-    A language-neutral rule was tried and rewrote "Rome"/"Anna" -- see docstring."""
-    names = ["Mona", "Markus"]
-    for language in ("en", "fr", None, "", "auto"):
-        assert tc.apply_name_corrections("We flew to Rome with Marcus.", names, language) \
-            == "We flew to Rome with Marcus."
+def test_a_mis_hearing_that_changes_a_sound_is_left_alone(dictionaries):
+    """"Muna" is no word either, but it is not how "Mona" sounds: it may be
+    someone else, and "Leni" next to a speaker called Lena certainly is."""
+    assert tc.apply_name_corrections("Ich bin Muna.", ["Mona"], "de") == "Ich bin Muna."
+    assert tc.apply_name_corrections("Then Leni said hello.", ["Lena"], "en") \
+        == "Then Leni said hello."
 
 
-def test_apply_name_corrections_leaves_real_words_alone():
-    """Cologne phonetics collapses vowels, so "Rom"/"Ruhm" share a code with
-    "Mona". Equal length plus a small edit distance must keep them intact."""
-    names = ["Mona", "Markus"]
-    for sentence in [
-        "Die Marke Markt in Rom ist rund.",
-        "Sein Ruhm war groß, der Rum auch.",
-        "Der Roman von Rosa lag im Sommer am Meer.",
+def test_apply_name_corrections_works_in_any_language_with_a_dictionary(dictionaries):
+    assert tc.apply_name_corrections("Then Mohna said hello.", ["Mona"], "en") \
+        == "Then Mona said hello."
+
+
+def test_apply_name_corrections_takes_each_capitalised_part_of_a_full_name(dictionaries):
+    """A speaker entered as "Mona Muster" or "Lena-Mona" is two names; the old
+    `isalpha()` filter dropped such an entry whole. A particle is no name: "del"
+    in "Ana del R\u00edo", and a name typed in lower case would write itself
+    in lower case into the transcript ("Mohna" -> "mona")."""
+    assert tc.apply_name_corrections("Ich bin Mohna Muhster.", ["Mona Muster"], "de") \
+        == "Ich bin Mona Muster."
+    assert tc.apply_name_corrections("Ich bin Mohna.", ["Lena-Mona"], "de") == "Ich bin Mona."
+    assert tc.apply_name_corrections("Ich bin Mohna.", ["mona"], "de") == "Ich bin Mohna."
+
+
+def test_apply_name_corrections_keeps_a_real_name_that_sounds_alike(dictionaries):
+    """"Marcus" is a name of its own and may be someone else; only a spelling
+    that is no word at all is taken for a mis-hearing."""
+    assert tc.apply_name_corrections("Heute mit Marcus hier.", ["Markus"], "de") \
+        == "Heute mit Marcus hier."
+
+
+def test_apply_name_corrections_leaves_an_ambiguous_word_alone(dictionaries):
+    """"Sahra" is spelled like both speakers; picking one would be a guess."""
+    assert tc.apply_name_corrections("Ich bin Sahra.", ["Sarah", "Sara"], "de") \
+        == "Ich bin Sahra."
+
+
+def test_apply_name_corrections_leaves_real_words_alone(dictionaries):
+    """Every German noun is capitalised, and "Mohn" is spelled like a speaker
+    called Mon; the dictionary keeps it. So does a possessive, with a straight
+    or a curly apostrophe: its stem is not a word of its own."""
+    for sentence, names in [
+        ("Dann Mohn und Marcus.", ["Mon", "Markus"]),
+        ("Mohna's Hut und Mohna\u2019s Tasche.", ["Mona"]),
     ]:
         assert tc.apply_name_corrections(sentence, names, "de") == sentence
 
 
-def test_apply_name_corrections_ignores_empty_and_short_names():
-    assert tc.apply_name_corrections("Muna kam.", [], "de") == "Muna kam."
-    assert tc.apply_name_corrections("Muna kam.", ["Ro"], "de") == "Muna kam."
+def test_a_word_any_of_the_languages_knows_is_kept(dictionaries):
+    """Text the script check reads as one language may be in another, and a
+    dictionary knows nothing of its neighbour's words: a word stays when any
+    of the languages the text may be in knows it."""
+    assert tc.apply_name_corrections("Mohn kam.", ["Mon"], ["xx", "de"]) == "Mohn kam."
+    assert tc.apply_name_corrections("Mohna kam.", ["Mona"], ["xx", "de"]) == "Mona kam."
+
+
+def test_apply_name_corrections_needs_a_dictionary_for_the_language(dictionaries):
+    """Without one there is no telling a mis-heard name from a word -- and
+    macOS, asked about a language it has no dictionary for, calls every word
+    correct -- so nothing is changed."""
+    for language in ("zh", None, "", "auto", ["zh", None]):
+        assert tc.apply_name_corrections("Mohna kam.", ["Mona"], language) == "Mohna kam."
+
+
+def test_dictionary_language_maps_codes_to_what_the_system_has():
+    pytest.importorskip("AppKit")
+    if tc._spell_checker() is None:
+        pytest.skip("no spell checker")
+    available = [str(lang) for lang in tc._spell_checker().availableLanguages()]
+    if "pt" not in available and any(l.startswith("pt_") for l in available):
+        assert tc._dictionary_language("pt").startswith("pt_")
+    assert tc._dictionary_language("xx") is None
+    assert tc._dictionary_language(None) is None
+    assert tc._dictionary_language("auto") is None
+
+
+def test_apply_name_corrections_with_the_macos_dictionary():
+    """The same guards against the real dictionaries the engine will ask."""
+    pytest.importorskip("AppKit")
+    if tc._dictionary_language("de") is None or tc._dictionary_language("en") is None:
+        pytest.skip("no German or English dictionary installed")
+    for text, names, language in [
+        ("Dann Mohn und Marcus.", ["Mon", "Markus"], "de"),   # spelled alike, known
+        ("Then Carl said hello.", ["Karl"], "en"),
+        ("\u00c4hm, also das war so.", ["Ann"], "de"),       # a filler
+        ("Hamma scho, sagt Leni.", ["Hanna", "Lena"], "de"),  # dialect, another name
+    ]:
+        assert tc.apply_name_corrections(text, names, language) == text
+    # Under the load of a full test run the spell server sometimes stalls, and
+    # a stalled lookup answers "a word" (see _is_word); asking again is what
+    # the next chunk of a real job does too.
+    for text, language, expected in [
+        ("Ich bin Mohna Muster.", "de", "Ich bin Mona Muster."),
+        ("Then Mohna came to Rome.", "en", "Then Mona came to Rome."),
+    ]:
+        for _ in range(5):
+            out = tc.apply_name_corrections(text, ["Mona"], language)
+            if out == expected:
+                break
+        assert out == expected
+
+
+_NOT_FOUND = 2**63 - 1   # NSNotFound: the location of "no misspelling"
+
+
+class _FakeChecker:
+    """Answers like NSSpellChecker, with every word unknown (flagged whole)
+    unless told to answer as a stalled spell server does, or to flag a range
+    that is not the word."""
+    def __init__(self, flagged=None):
+        self.flagged = flagged
+        self.asked = []
+
+    def checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount_(
+            self, word, start, language, wrap, tag, count):
+        from types import SimpleNamespace
+        self.asked.append(word)
+        location, length = self.flagged or (0, len(word))
+        return SimpleNamespace(location=location, length=length), 1
+
+
+@pytest.mark.parametrize("flagged", [
+    (_NOT_FOUND, 0),     # a stalled server: measured to report no misspelling
+    (1, 2),              # a range that is not the word
+    (0, 2),              # nor is one that covers only its start
+])
+def test_only_a_clear_unknown_lets_a_name_in(monkeypatch, flagged):
+    """A wrong "unknown" would rewrite a real word into a name, so only a
+    verdict on the whole word counts -- and a stall, which answers "no
+    misspelling", is not remembered: the next chunk asks again."""
+    monkeypatch.setattr(tc, "_dictionary_language", lambda language: "de")
+    monkeypatch.setattr(tc, "_spell_checker", lambda: _FakeChecker(flagged))
+    assert tc.apply_name_corrections("Die Mohna kam.", ["Mona"], "de") == "Die Mohna kam."
+    monkeypatch.setattr(tc, "_spell_checker", lambda: _FakeChecker())
+    assert tc.apply_name_corrections("Die Mohna kam.", ["Mona"], "de") == "Die Mona kam."
+
+
+def test_each_word_is_looked_up_once_per_chunk(monkeypatch):
+    checker = _FakeChecker()
+    monkeypatch.setattr(tc, "_dictionary_language", lambda language: "de")
+    monkeypatch.setattr(tc, "_spell_checker", lambda: checker)
+    assert tc.apply_name_corrections("Mohna, Mohna und Mohna.", ["Mona"], "de") \
+        == "Mona, Mona und Mona."
+    assert checker.asked == ["Mohna"]
+
+
+def test_a_spell_checker_that_fails_costs_no_job(monkeypatch):
+    """Name correction runs after each pass is decoded; the dictionary list was
+    the one AppKit call outside a guard, and an error there failed the job."""
+    class _Broken:
+        def availableLanguages(self):
+            raise RuntimeError("the spell server is gone")
+
+    monkeypatch.setattr(tc, "_spell_checker", lambda: _Broken())
+    tc._dictionary_language.cache_clear()
+    try:
+        assert tc.apply_name_corrections("Die Mohna kam.", ["Mona"], "de") == "Die Mohna kam."
+    finally:
+        tc._dictionary_language.cache_clear()
+
+
+def test_apply_name_corrections_ignores_empty_and_short_names(dictionaries):
+    assert tc.apply_name_corrections("Mohna kam.", [], "de") == "Mohna kam."
+    assert tc.apply_name_corrections("Mohna kam.", ["Ro"], "de") == "Mohna kam."
 
 
 def test_degenerate_detector_separates_real_text_from_loops():
@@ -474,17 +656,6 @@ def test_split_sentences_keeps_unpunctuated_tail():
         "Hallo.", "Wie geht es dir"]
     # normal punctuated text is unchanged
     assert _split_sentences("Ein Satz. Noch einer.") == ["Ein Satz.", "Noch einer."]
-
-
-def test_koelner_phonetik_no_crash_on_uncoded_word():
-    """h and j map to no Cologne code; a token of only those letters must return
-    '' rather than IndexError on out[0] (which aborted the whole name-correction
-    pass)."""
-    from noScribe.transcript_corrections import _koelner_phonetik
-    assert _koelner_phonetik("Jhh") == ""
-    assert _koelner_phonetik("hj") == ""
-    # a normal name still encodes
-    assert _koelner_phonetik("Hallo")
 
 
 def test_model_kind_unknown_is_conservative():

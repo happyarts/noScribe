@@ -65,6 +65,7 @@ def fake_aligner(monkeypatch):
             self.model = model
 
     monkeypatch.setattr(v, "_Aligner", _Fake)
+    monkeypatch.setattr(v, "_unfetchable", lambda model: False)  # no network in tests
     return loads
 
 
@@ -219,3 +220,16 @@ def test_an_unusable_respelling_still_reaches_the_wildcard():
     assert without_s._tokenize(["weiß"])[0] == [
         without_s.vocab[c] for c in "wei"
     ]
+
+
+def test_a_language_the_detector_cannot_name_draws_no_warning(fake_aligner):
+    """All Cyrillic reads as Russian, so a correctly pinned Ukrainian file was
+    told "set to 'uk' but the transcript looks like 'ru' ... check the language
+    setting" -- the one advice that is wrong for it."""
+    ukrainian = ("Ми ще раз усе обговорили, бо я не був певен, чи це підходить, "
+                 "але тепер усе зрозуміло, і ми вже рухаємося далі, бо коли інші "
+                 "ще раз подивляться, у мене є відчуття, що все буде добре.")
+    logs = []
+    pool = _AlignerPool("uk", lambda lvl, m: logs.append((lvl, m)))
+    pool.aligner_for(ukrainian)
+    assert not [m for lvl, m in logs if lvl == "warn"]

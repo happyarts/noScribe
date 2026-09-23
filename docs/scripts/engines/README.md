@@ -17,7 +17,7 @@ dropping its Voxtral import, so a comparison never silently changes the metric:
 | `Audiotest2/referenz/zoom_9890-10190` | 859 words, 5 min, video call |
 | FLEURS German, 100 recordings | the external, clean, read-aloud yardstick |
 
-The audio lives outside the repository (`Audiotest2/` is gitignored).
+The audio is private and lives outside the repository.
 
 The results and what they mean are in
 [`../../other-asr-engines.md`](../../other-asr-engines.md). The short version,
