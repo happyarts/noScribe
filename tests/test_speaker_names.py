@@ -96,6 +96,16 @@ def test_overlap_prefix_preserved():
     assert m.App._apply_speaker_name(app, "//S01", job) == "//Mona"
 
 
+def test_duplicate_names_map_to_distinct_keys():
+    """Two speakers given the same name still occupy distinct map entries, so the
+    on_segment paragraph logic (which compares the raw labels) can keep them
+    apart even though their display name is identical."""
+    app, job = _stub_app(), _job("Mona, Mona")
+    assert m.App._apply_speaker_name(app, "S01", job) == "Mona"
+    assert m.App._apply_speaker_name(app, "S02", job) == "Mona"
+    assert set(job.speaker_name_map) == {"S01", "S02"}
+
+
 def test_overflow_is_numbered_by_appearance_and_warns_once():
     app, job = _stub_app(), _job("OnlyOne")
     assert m.App._apply_speaker_name(app, "S01", job) == "OnlyOne"
@@ -157,3 +167,25 @@ def test_a_job_without_a_list_of_names_is_numbered_too():
     app, job = _stub_app(), _job("")
     job.speaker_names = None
     assert m.App._apply_speaker_name(app, "S01", job) == "S00"
+
+
+def test_the_key_is_logged_wherever_the_transcript_is_saved():
+    """The key used to be logged only on success, while a canceled or failed job
+    still saves its partial transcript under the same numbers. It belongs where
+    the transcript is saved -- the `finally` of the transcription step -- and
+    only there, so a finished job does not log it twice. (That step is inline in
+    the job routine, out of reach of a call; the source is what can be checked.)"""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(m.__file__).read_text(encoding='utf-8'))
+
+    def calls(node, name):
+        return [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                and (getattr(n.func, 'attr', None) == name or getattr(n.func, 'id', None) == name)]
+
+    key_calls = calls(tree, '_speaker_key')
+    assert len(key_calls) == 1
+    saving = [stmt for node in ast.walk(tree) if isinstance(node, ast.Try)
+              for stmt in node.finalbody if calls(stmt, 'save_doc')]
+    assert saving and any(key_calls[0] in calls(stmt, '_speaker_key') for stmt in saving)

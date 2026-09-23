@@ -3458,8 +3458,6 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn()
                         self.logn(t('transcription_finished'), 'highlight')
-                        if job.speaker_name_map:
-                            self.logn(self._speaker_key(job), where='file')
                     except Exception as err:
                         # The CUDA-on-CPU fallback only applies to the Whisper
                         # (faster-whisper / CTranslate2) backend; Voxtral runs on
@@ -3474,6 +3472,13 @@ class App(ctk.CTk):
                         if not first_segment:
                             save_doc()
                             job.has_partial_transcript = job.status != JobStatus.FINISHED
+                            # A canceled or failed job saves its transcript under
+                            # the same numbers, so it needs the key just as much.
+                            if job.speaker_name_map and not retry_cuda:
+                                # On a line of its own, after a transcript that
+                                # may have stopped mid-line.
+                                self.logn(where='file')
+                                self.logn(self._speaker_key(job), where='file')
                         else:
                             job.has_partial_transcript = False
                         if transcription_success:
