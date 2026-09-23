@@ -49,7 +49,7 @@ work to do. Prefix git commands with `git -c core.hooksPath=/dev/null` when one 
 `--no-verify` does not help, it skips only the pre-commit and commit-msg hooks.
 
 CI (`.github/workflows/pytest.yml`) runs the suite on Linux against
-`environments/requirements_linux.txt` on Python 3.10 and 3.13, so anything added must import
+`environments/requirements_linux.txt` on Python 3.11 and 3.13, so anything added must import
 without the macOS-only Voxtral stack — the Voxtral tests use `pytest.importorskip`.
 `.github/workflows/pyinstaller.yml` builds the frozen app on every push and pull request.
 
@@ -184,13 +184,15 @@ This is its boundary:
                           forced_align_stability,transcript_corrections,turn_split,
                           quant_summary,quantize_group_guard,mel_floor,ctc_align,
                           align_language,cut_and_cue_quality,lost_head_recovery,
-                          merged_embeddings,salvage_prefix_alignment,word_prob_format}.py
+                          merged_embeddings,salvage_prefix_alignment,word_prob_format,
+                          voxtral_transcribe_guards}.py
     modified  noScribe/main.py · noScribe/transcription.py · trans/*.yml (four keys:
               voxtral_path_long, voxtral_path_short, voxtral_no_disfluencies, loading_voxtral)
               noScribe/__init__.py (one word: ctc_align in _SUBMODULES)
               environments/requirements_macOS_arm64.txt (a two-line comment)
               tests/test_worker_import_lightweight.py (the voxtral worker in WORKER_MODULES and the
                                                       comment above it)
+              pyinstaller/noScribe_macOS.spec (the MLX stack in `excludes`)
               .gitignore (only the `models/voxtral-*` line)
 
 Every branch Voxtral depended on is part of upstream: the three it touched only textually
