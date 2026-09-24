@@ -1,7 +1,8 @@
 """Speaker diarization with NVIDIA's Nemotron 3 Diarization, in a child process.
 
 An alternative to pyannote_mp_worker, chosen with `diarization_engine: nemotron`
-in config.yml. It answers with the same result message -- turns as
+in config.yml, and by default (`auto`) whenever the installed transformers knows
+the model. It answers with the same result message -- turns as
 {"start": ms, "end": ms, "label": "SPEAKER_nn"} -- and instead of centroids it
 leaves the model's own speaker probabilities (one row per FRAME_S, one column
 per speaker, float16) in a .npy file next to the audio, which is what the voice
@@ -60,6 +61,19 @@ def model_source():
     except Exception:
         pass
     return MODEL_REPO
+
+
+def available():
+    """Whether the installed transformers knows the model, found without importing
+    it: main.py asks this in the GUI process, which never loads transformers."""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("transformers")
+        if spec is None or not spec.origin:
+            return False
+        return os.path.isdir(os.path.join(os.path.dirname(spec.origin), "models", "nemotron3_diarization"))
+    except Exception:
+        return False
 
 
 def label(column):

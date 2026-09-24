@@ -3873,10 +3873,13 @@ class App(ctk.CTk):
         return result.get("segments") or []
 
     def _diarization_engine(self, job) -> str:
-        """'nemotron' when config.yml asks for it (diarization_engine: nemotron), else
-        'pyannote'. Nemotron finds the number of speakers itself and cannot be held to
-        one, so a job with a fixed number of speakers stays with pyannote."""
-        if get_config('diarization_engine', 'pyannote') != 'nemotron':
+        """'nemotron' or 'pyannote', from `diarization_engine` in config.yml: `auto`
+        (the default) takes Nemotron whenever the installed transformers knows the
+        model. Nemotron finds the number of speakers itself and cannot be held to one,
+        so a job with a fixed number of speakers stays with pyannote."""
+        from .nemotron_mp_worker import available
+        engine = get_config('diarization_engine', 'auto')
+        if engine not in ('nemotron', 'auto') or (engine == 'auto' and not available()):
             return 'pyannote'
         if str(job.speaker_detection).isdigit():
             self.logn(f'Nemotron cannot be held to {job.speaker_detection} speakers: diarizing with pyannote',

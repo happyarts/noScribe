@@ -91,3 +91,17 @@ def test_features_in_chunks_equal_one_pass():
             assert (got.input_features == whole.input_features).all(), chunk_frames
             assert (got.attention_mask == whole.attention_mask.long()).all()
     assert fe.preemphasis == 0.97  # put back
+
+
+def test_available_says_whether_transformers_knows_the_model(monkeypatch):
+    """main.py picks the engine in the GUI process, which must not import transformers
+    for it: `available` only looks for the model's directory in the installed package."""
+    import importlib.util
+    import sys
+    was_loaded = 'transformers' in sys.modules
+    result = nw.available()
+    assert isinstance(result, bool)
+    if not was_loaded:
+        assert 'transformers' not in sys.modules
+    monkeypatch.setattr(importlib.util, 'find_spec', lambda name: None)
+    assert nw.available() is False
