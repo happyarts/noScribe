@@ -34,6 +34,17 @@ NOISE = re.compile(r"^[\s)\](}#*=/-]*$")
 # gibt, deshalb kann eine Branch-Zeile hier zu Recht anders lauten. Jede
 # Ausnahme braucht eine Begründung, sonst verdeckt sie echte Drift.
 INTENTIONAL = {
+    # fix/whisper-speech-map-from-diarization reicht die Diarisierung an Whisper;
+    # lokal nur pyannotes (Nemotrons kurze Turns kosten auf Deutsch Woerter), und
+    # lokal ohne `info =`, weil local/main das _Info-Objekt nicht zurueckgibt.
+    "info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment, diarization)":
+        "lokal mit Nemotron-Sperre und ohne info-Rueckgabe",
+    "Returns a simple info object (duration at least). With a diarization,":
+        "lokal ohne info-Rueckgabe (Docstring beginnt die Zeile anders)",
+    # feature/voxtral-engine kennt den Diarisierungs-Parameter noch nicht; lokal
+    # nimmt Whisper sie als Sprachkarte (fix/whisper-speech-map-from-diarization).
+    "def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):":
+        "lokal mit diarization=None (Sprachkarte aus der Diarisierung)",
     # Der Modell-Picker mit RAM-Angabe existiert nur lokal; ohne model_key()
     # würde der Anzeigetext als gemerktes Modell gespeichert.
     "config['last_whisper_model'] = self.option_menu_whisper_model.get()":
