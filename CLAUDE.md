@@ -107,8 +107,9 @@ and defer heavy imports into the entrypoint.
 (`pyannote_mp_worker` or `nemotron_mp_worker`) → transcribe (whisper or voxtral worker) → merge
 and write the transcript. The diarization engine comes from `diarization_engine` in config.yml:
 `auto` (default) takes Nemotron whenever the installed transformers knows
-`nemotron3_diarization`, `pyannote`/`nemotron` force one; a job with a fixed speaker count
-always stays with pyannote.
+`nemotron3_diarization` and its weights are on disk (shipped or in the HF cache), `pyannote`/`nemotron`
+force one (`nemotron` downloads the weights); a job with a fixed speaker count always stays with
+pyannote. The transcript header names the engine ("auto (Nemotron)").
 Which engine runs is decided by the `engine` field on the `WhisperModel` dataclass in
 `transcription.py` (`"whisper"` or `"voxtral"`).
 
