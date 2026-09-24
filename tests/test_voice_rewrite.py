@@ -26,6 +26,7 @@ import random
 import textwrap
 import traceback
 import types
+from concurrent.futures import Future
 from pathlib import Path
 
 import AdvancedHTMLParser
@@ -118,9 +119,11 @@ def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True):
         node.appendText(title)
         main_body.appendChild(node)
     app = FakeApp(voice_at)
+    vad_future = Future()  # Silero found no pauses
+    vad_future.set_result([])
     scope = {'datetime': datetime, 'html': html, 'utils': utils, 'voice_check': voice_check,
              't': lambda key, **kwargs: f'{key}{kwargs or ""}', 'duration': 3600.0, 'sampling_rate': 16000,
-             'speech_chunks': [], 'traceback': traceback, 'get_config': lambda key, default=None: default,
+             'vad_future': vad_future, 'traceback': traceback, 'get_config': lambda key, default=None: default,
              'is_voxtral': False}  # local/main only: on_segment reads it, upstream's does not
     exec(compile(_lift(), str(MAIN), 'exec'), scope)
     on_segment, check_voices, run_voice_check, voice_segments, first_segment = scope['build'](
