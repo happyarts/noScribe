@@ -621,6 +621,97 @@ def _detect_language(text):
     return None, 0.0
 
 
+# A second alignment, level-matched, for a pass whose words leave diarized speech
+# empty. Normalising each window (_Aligner._forward_windows) cannot lift a voice
+# 15-20 dB below one that talks through the same window, and the DP then crowds
+# the quiet voice's words into the loud one's time. Dividing the audio by its
+# own smoothed envelope first fixes that, but levelling everything costs on
+# ordinary material (CallHome +0.1 to +0.24 points of words under the wrong
+# speaker after the voice check) and now and then breaks a file that aligned
+# well. So it only replaces the first alignment where its words cover the
+# diarized speech clearly better -- the one symptom of the failure that needs no
+# ground truth. Chosen on 32 recordings of a second-voice corpus with AMI,
+# CallHome and VoxConverse, then checked on 154 recordings of that corpus that
+# took no part (paired 95 % intervals, words under the wrong speaker after the
+# voice check): call centre -1.04 points [-2.21, -0.15], office -0.19
+# [-1.21, +0.45]; on 105 AMI, CallHome and VoxConverse files not a single pass
+# switches. Margins from +2 to +10 points lie on one plateau. The second
+# alignment runs where the first leaves over LEVEL_COVERAGE_MARGIN of the speech
+# uncovered: on 2 of 3 AMI passes (far-field meetings), 6-11 % of CallHome's and
+# none of VoxConverse's -- a second forward pass and DP over the pass, some
+# seconds against its decode. It runs after _free_decode_buffers, once the first
+# alignment's emission is gone, and adds one levelled copy of the pass (96 MB at
+# 1500 s, ~0.5 GB for a moment while its envelope is taken) -- well inside
+# MIN_HEADROOM_GB, so the pass length needs no allowance for it.
+LEVEL_ENVELOPE_SEC = 0.4      # smoothing of the envelope the audio is divided by
+LEVEL_FLOOR_PERCENTILE = 30   # the envelope is never taken below this percentile:
+#                               pauses and room tone stay quiet as long as they are
+#                               under that share of the pass (a longer silence is
+#                               lifted with the rest -- the coverage check is what
+#                               keeps such an alignment out). 50 already loses most
+#                               of the gain (32 % of the quiet voice's words wrong
+#                               instead of 5 %)
+LEVEL_MAX_GAIN_DB = 60        # and never more than this below the envelope's peak:
+#                               a pass that is over 30 % digital silence has a
+#                               percentile of 0, and near-zero dither beside it
+#                               would otherwise be lifted without bound, or divided
+#                               by zero (3 of 449 measured passes lie below it; with
+#                               it the holdout result above is the same to the word)
+LEVEL_COVERAGE_MARGIN = 0.05  # coverage the second alignment must add to be taken
+# The coverage's resolution and reach are the values the measurement above used,
+# not tuned; the margin and the holdout result rest on them.
+COVERAGE_FRAME_SEC = 0.1
+COVERAGE_REACH_SEC = 0.5      # a word counts for the speech this close to it
+
+
+def _level_matched(audio):
+    """`audio` divided by its moving RMS over LEVEL_ENVELOPE_SEC, never by less
+    than that envelope's LEVEL_FLOOR_PERCENTILE percentile nor more than
+    LEVEL_MAX_GAIN_DB below its peak; all-zero audio comes back unchanged. The
+    moving mean is centred and mirrored at the edges as scipy's uniform_filter1d
+    has it (the measurement used that; scipy is no dependency here). Buffers are
+    reused: this runs right after a decode, and a 1500-s pass would otherwise hold
+    ~0.9 GB of float64 temporaries at once."""
+    import numpy as np
+    n = max(1, int(LEVEL_ENVELOPE_SEC * SAMPLE_RATE))
+    sq = np.pad(np.square(audio, dtype=np.float32), (n // 2, (n - 1) // 2), mode="symmetric")
+    # A running sum of non-negative values never decreases, so the differences are
+    # never negative and their root never NaN -- unlike uniform_filter1d's running
+    # update, which dips a hair below zero after a loud stretch and so turned a
+    # whole measured pass into NaN.
+    c = np.empty(len(sq) + 1)
+    c[0] = 0.0
+    np.cumsum(sq, dtype=np.float64, out=c[1:])
+    del sq
+    env = c[n:] - c[:-n]
+    del c
+    env /= n
+    np.sqrt(env, out=env)
+    floor = max(np.percentile(env, LEVEL_FLOOR_PERCENTILE), env.max() * 10 ** (-LEVEL_MAX_GAIN_DB / 20))
+    if floor <= 0:
+        return audio
+    np.maximum(env, floor, out=env)
+    out = env.astype(np.float32)
+    del env
+    return np.divide(audio, out, out=out)
+
+
+def _speech_coverage(stamps, turns, t_offset):
+    """Share of diarized speech (COVERAGE_FRAME_SEC frames inside any turn) that
+    has a word within COVERAGE_REACH_SEC. `turns` are window-relative
+    (_clip_turns), `stamps` absolute, as align_words returns them."""
+    import numpy as np
+    frames = int(max(end for _, end, _ in turns) / COVERAGE_FRAME_SEC) + 1
+    speech = np.zeros(frames, bool)
+    near = np.zeros(frames, bool)
+    for start, end, _ in turns:
+        speech[int(start / COVERAGE_FRAME_SEC):int(end / COVERAGE_FRAME_SEC)] = True
+    for w in stamps:
+        near[max(0, int((w["start"] - t_offset - COVERAGE_REACH_SEC) / COVERAGE_FRAME_SEC)):
+             int((w["end"] - t_offset + COVERAGE_REACH_SEC) / COVERAGE_FRAME_SEC) + 1] = True
+    return (speech & near).sum() / max(1, speech.sum())
+
+
 class _AlignerPool:
     """Chooses and caches the alignment model chunk by chunk.
 
@@ -662,13 +753,38 @@ class _AlignerPool:
         return self.aligner_for(" ".join(words), remember=False).align_prefix(
             words, window)
 
-    def align_words(self, words, window, t_offset):
+    def align_words(self, words, window, t_offset, turns=None):
         """Word timestamps for a whole pass, with the aligner its text calls
         for. Through here no caller ever holds an aligner: a reference kept
         across chunks outlived its eviction, and _release_gpu_memory then
-        freed nothing (measured in its docstring)."""
-        return self.aligner_for(" ".join(words)).align_words(
-            words, window, t_offset=t_offset)
+        freed nothing (measured in its docstring).
+
+        With `turns` (window-relative, from _clip_turns) naming two speakers or
+        more, a level-matched second alignment replaces the first where its words
+        cover the diarized speech by LEVEL_COVERAGE_MARGIN more (see there). It
+        is not even run where the first already covers 1 - LEVEL_COVERAGE_MARGIN
+        or more: coverage cannot exceed 1, so the second could never be taken."""
+        aligner = self.aligner_for(" ".join(words))
+        stamps = aligner.align_words(words, window, t_offset=t_offset)
+        if not turns or len({label for _, _, label in turns}) < 2:
+            return stamps
+        covered = _speech_coverage(stamps, turns, t_offset)
+        if covered >= 1 - LEVEL_COVERAGE_MARGIN:
+            return stamps
+        levelled = aligner.align_words(words, _level_matched(window), t_offset=t_offset)
+        covered_levelled = _speech_coverage(levelled, turns, t_offset)
+        # Words spread evenly because a window could not be aligned (prob 0.0)
+        # sit near every diarized frame and would win on coverage alone.
+        guessed = lambda ws: sum(not w.get("prob") for w in ws)
+        if covered_levelled > covered + LEVEL_COVERAGE_MARGIN and guessed(levelled) <= guessed(stamps):
+            _log(self._log_cb, "info",
+                 f"Word timestamps level-matched: they cover {covered_levelled:.0%} "
+                 f"of the diarized speech instead of {covered:.0%} (a quieter voice).")
+            return levelled
+        _log(self._log_cb, "debug",
+             f"Level-matched word timestamps not taken: {covered_levelled:.0%} of the "
+             f"diarized speech covered, against {covered:.0%}.")
+        return stamps
 
     def aligner_for(self, text, remember=True):
         """The aligner for `text`. `remember=False` only reads: the choice for
@@ -2465,9 +2581,12 @@ class _Aligner:
                 # 23 AMI meetings and 64 CallHome calls: words more than 0.5 s off
                 # AMI's manual stamps 7.1 % -> 3.1 %, words under the wrong
                 # speaker after the voice check 2.65 % -> 2.24 % (70 of 82 files
-                # better). It does not reach a voice 15-20 dB below one that talks
+                # better); on 23 VoxConverse broadcasts, which took no part and are
+                # mastered, no effect (+0.05 points, 95 % [-0.06, +0.16]). It
+                # does not reach a voice 15-20 dB below one that talks
                 # through the whole window: the window's variance is the loud
-                # voice's, whatever its gain. Population variance and 1e-7, as the
+                # voice's, whatever its gain (the level-matched second alignment in
+                # _AlignerPool.align_words is for that). Population variance and 1e-7, as the
                 # extractor has them. A window shorter than `win` -- the rest at
                 # the end of a pass -- takes its statistics from the `win` samples
                 # that end with it: on its own, a few hundred ms of room tone
@@ -3324,6 +3443,9 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             _emit_progress((_base + min(0.95, ntok / _exp) * _span) * 100)
 
         label = f"Chunk {ci + 1}/{n_chunks}"
+        # The diarization's turns in this pass, window-relative: for the loop
+        # ladder's cuts and for the alignment's coverage check alike.
+        pass_turns = _clip_turns(turns, t_offset, a1 / SAMPLE_RATE)
         # What language should this chunk come back in? With an explicit
         # setting there is an answer from the first chunk on; on Auto the file
         # has to say what it is first (see _file_language), so the earliest
@@ -3331,7 +3453,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
         want = pinned_lang or _file_language(lang_tally)
         text = _transcribe_guarded(vox, chunk, language, log_cb, label,
                                    token_cb=_heartbeat,
-                                   turns=_clip_turns(turns, t_offset, a1 / SAMPLE_RATE),
+                                   turns=pass_turns,
                                    align_cb=(aligner_pool.align_for_salvage
                                              if aligner_pool is not None else None),
                                    want_lang=want)
@@ -3375,7 +3497,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             words = re.findall(r"\S+", text)
             _log(log_cb, "info", f"{label}: aligning word timestamps "
                                  f"({len(words)} words)...")
-            stamps = aligner_pool.align_words(words, chunk, t_offset)
+            stamps = aligner_pool.align_words(words, chunk, t_offset, turns=pass_turns)
             if a_read < a0:
                 # Drop the *words* already covered by the previous pass (the
                 # overlap region). Filtering at word rather than cue level

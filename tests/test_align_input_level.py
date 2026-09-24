@@ -14,6 +14,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from noScribe import voxtral_engine as ve  # noqa: E402
 from noScribe.voxtral_engine import EMISSION_WINDOW_SEC, SAMPLE_RATE, _Aligner  # noqa: E402
 
 FRAME = 320  # samples per emission frame, as wav2vec2's 20 ms stride
@@ -108,3 +109,136 @@ def test_silence_does_not_blow_up():
     al = _aligner()
     out = al._forward_windows(torch.zeros(5 * SAMPLE_RATE), WIN, MIN_WIN)
     assert np.isfinite(out[0].numpy()).all()
+
+
+# --------------------------------------------------------------------------- #
+# The level-matched second alignment (_AlignerPool.align_words)
+# --------------------------------------------------------------------------- #
+
+
+def test_level_matching_survives_digital_silence():
+    """The measurement's envelope (scipy's running filter) dipped below zero after a
+    loud stretch; its root was NaN, the percentile floor NaN, and with it the whole
+    pass -- every word then landed in the last second. Exact zeros must stay finite."""
+    x = np.concatenate([_speech_like(10, seed=6), np.zeros(8 * SAMPLE_RATE, np.float32), _speech_like(10, seed=7) * 0.1])
+    y = ve._level_matched(x)
+    assert np.isfinite(y).all()
+    assert y.dtype == np.float32 and len(y) == len(x)
+
+
+@pytest.mark.parametrize("pause_sec, lifted", [(2, False), (10, True)])
+def test_level_matching_lifts_the_quiet_voice_and_a_pause_only_past_the_floor(pause_sec, lifted):
+    """The floor is the envelope's LEVEL_FLOOR_PERCENTILE percentile: a pause under
+    that share of the pass stays a pause, a longer one is lifted with the rest --
+    which is what the coverage check in _AlignerPool.align_words guards against."""
+    loud, quiet = _speech_like(10, seed=8), _speech_like(10, seed=9) * 0.1   # 20 dB apart
+    room = (np.random.default_rng(10).standard_normal(pause_sec * SAMPLE_RATE) * 1e-4).astype(np.float32)
+    y = ve._level_matched(np.concatenate([loud, room, quiet]))
+    rms = lambda a: float(np.sqrt(np.mean(np.square(a, dtype=np.float64))))
+    n, p = 10 * SAMPLE_RATE, pause_sec * SAMPLE_RATE
+    a, b, c = y[:n], y[n + SAMPLE_RATE // 2:n + p - SAMPLE_RATE // 2], y[n + p:]
+    assert 0.7 < rms(c) / rms(a) < 1.4   # the quiet voice now as loud as the loud one
+    assert (rms(b) > 0.3 * rms(a)) == lifted
+
+
+def test_level_matching_lifts_no_more_than_its_cap():
+    """Over 30 % near-silence puts the percentile floor at the dither's own level,
+    ~100 dB down: uncapped, the dither would come out as loud as the speech. An
+    all-zero pass has nothing to level and comes back as it was."""
+    speech = _speech_like(5, seed=13)
+    dither = (np.random.default_rng(14).standard_normal(8 * SAMPLE_RATE) * 1e-6).astype(np.float32)
+    y = ve._level_matched(np.concatenate([speech, dither]))
+    assert np.isfinite(y).all()
+    assert np.abs(y[-4 * SAMPLE_RATE:]).max() < 0.2   # capped: -100 dB + 60 dB; uncapped peaks near 4
+    silent = np.zeros(4 * SAMPLE_RATE, np.float32)
+    assert np.array_equal(ve._level_matched(silent), silent)
+
+
+def test_level_matching_moves_its_mean_as_the_measured_filter_did():
+    """Agrees with the scipy envelope the measurement used, edges included."""
+    ndimage = pytest.importorskip("scipy.ndimage")
+    x = np.concatenate([_speech_like(3, seed=11), _speech_like(3, seed=12) * 0.05])
+    env = np.sqrt(np.maximum(ndimage.uniform_filter1d(np.square(x, dtype=np.float64),
+                                                      int(ve.LEVEL_ENVELOPE_SEC * SAMPLE_RATE)), 0))
+    want = x / np.maximum(env, np.percentile(env, ve.LEVEL_FLOOR_PERCENTILE))
+    np.testing.assert_allclose(ve._level_matched(x), want, rtol=1e-4, atol=1e-6)
+
+
+def test_speech_coverage_counts_speech_with_a_word_nearby():
+    turns = [(0.0, 10.0, "A"), (20.0, 30.0, "B")]
+    words = [{"start": 100.0 + t, "end": 100.0 + t + 0.3} for t in np.arange(0, 10, 0.8)]  # t_offset 100
+    assert abs(ve._speech_coverage(words, turns, 100.0) - 0.5) < 0.03
+    assert ve._speech_coverage([], turns, 100.0) == 0.0
+
+
+class _FakeAligner:
+    """Spreads the words evenly over `first` seconds of the window on the first call
+    and over `second` seconds on the second (level-matched) one."""
+
+    def __init__(self, first=20.0, second=40.0, second_prob=0.9):
+        self.calls, self.spans, self.second_prob = [], (first, second), second_prob
+
+    def align_words(self, words, window, t_offset=0.0):
+        self.calls.append(window)
+        span = self.spans[min(len(self.calls), 2) - 1]
+        step = span / len(words)
+        prob = 0.9 if len(self.calls) == 1 else self.second_prob
+        return [{"word": w, "start": t_offset + i * step, "end": t_offset + i * step + 0.3, "prob": prob}
+                for i, w in enumerate(words)]
+
+
+def _pool(fake):
+    pool = ve._AlignerPool("en", None)
+    pool.aligner_for = lambda text, remember=True: fake
+    return pool
+
+
+WORDS = [f"w{i}" for i in range(60)]
+WINDOW = np.zeros(40 * SAMPLE_RATE, np.float32)
+TWO = [(0.0, 20.0, "A"), (20.0, 40.0, "B")]
+
+
+def test_quiet_speakers_empty_turn_is_filled_by_the_level_matched_alignment():
+    fake = _FakeAligner()
+    got = _pool(fake).align_words(WORDS, WINDOW, 5.0, turns=TWO)
+    assert len(fake.calls) == 2
+    assert max(w["end"] for w in got) > 5.0 + 30.0   # B's turn has words now
+
+
+@pytest.mark.parametrize("turns", [None, [(0.0, 20.0, "A"), (20.0, 40.0, "A")]])
+def test_without_two_diarized_speakers_one_alignment_is_all(turns):
+    fake = _FakeAligner()
+    _pool(fake).align_words(WORDS, WINDOW, 5.0, turns=turns)
+    assert len(fake.calls) == 1
+
+
+def test_no_second_alignment_where_it_could_not_win():
+    """Coverage >= 1 - margin already: the second could never add the margin."""
+    fake = _FakeAligner()
+    _pool(fake).align_words(WORDS, WINDOW, 5.0, turns=[(0.0, 20.0, "A"), (19.5, 20.0, "B")])
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("margin, taken", [(0.05, True), (0.4, False)])
+def test_the_second_alignment_is_taken_only_past_the_margin(monkeypatch, margin, taken):
+    """First covers ~31 % of the speech, second ~61 %: +30 points clears the default
+    margin and not one of 40 -- and 31 % is below 1 - 0.4, so it does run both."""
+    monkeypatch.setattr(ve, "LEVEL_COVERAGE_MARGIN", margin)
+    fake = _FakeAligner(first=12.0, second=24.0)
+    got = _pool(fake).align_words(WORDS, WINDOW, 5.0, turns=TWO)
+    assert len(fake.calls) == 2
+    assert (max(w["end"] for w in got) > 5.0 + 20.0) == taken
+
+
+def test_a_second_alignment_that_covers_no_more_is_not_taken():
+    fake = _FakeAligner(first=20.0, second=20.0)
+    got = _pool(fake).align_words(WORDS, WINDOW, 5.0, turns=TWO)
+    assert len(fake.calls) == 2 and max(w["end"] for w in got) < 5.0 + 21.0
+
+
+def test_a_second_alignment_spread_by_the_fallback_is_not_taken():
+    """Evenly spread words (prob 0.0, a window the DP could not align) cover the
+    speech well without being aligned at all; they must not win on coverage."""
+    fake = _FakeAligner(second_prob=0.0)
+    got = _pool(fake).align_words(WORDS, WINDOW, 5.0, turns=TWO)
+    assert len(fake.calls) == 2 and max(w["end"] for w in got) < 5.0 + 21.0
