@@ -3490,7 +3490,13 @@ class App(ctk.CTk):
                             self._run_voxtral_subprocess_stream(
                                 tmp_audio_file, job, on_segment, diarization=diarization)
                         else:
-                            self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)
+                            # pyannote's turns only: as Whisper's speech map, Nemotron's
+                            # many short turns cost words on the German hand references
+                            # (9.28 % -> 9.78 % WER against Silero; pyannote's 8.75 %).
+                            # Positional, as the stand-ins in the tests take it.
+                            self._run_whisper_subprocess_stream(
+                                tmp_audio_file, job, on_segment,
+                                diarization if diarization_engine == 'pyannote' else None)
                         run_voice_check()
                         transcription_success = True
                         # if self.cancel:
@@ -3827,9 +3833,11 @@ class App(ctk.CTk):
         from .voxtral_mp_worker import voxtral_proc_entrypoint
         self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)
 
-    def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):
+    def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment, diarization=None):
         """Spawn a subprocess to run Faster-Whisper and stream segments.
-        Calls on_segment(dict) for each segment streamed by the child.
+        Calls on_segment(dict) for each segment streamed by the child. With a
+        diarization, its turns are the speech map in place of Silero's
+        (whisper_mp_worker.SPEECH_MAP_MIN_GAP_S has the measurement).
         """
         global force_whisper_cpu
         # Language code for non-auto/multilingual
@@ -3856,6 +3864,9 @@ class App(ctk.CTk):
             "vad_filter": True,
             "vad_threshold": vad_threshold,
             "locale": config.get("locale", "en"),
+            # Same converted-WAV timeline the worker reads, in seconds.
+            "speech_turns": ([[seg["start"] / 1000.0, seg["end"] / 1000.0] for seg in diarization]
+                             if diarization else None),
         }
 
         from .whisper_mp_worker import whisper_proc_entrypoint
