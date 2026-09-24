@@ -3837,7 +3837,7 @@ class App(ctk.CTk):
         """Spawn a subprocess to run Faster-Whisper and stream segments.
         Calls on_segment(dict) for each segment streamed by the child. With a
         diarization, its turns are the speech map in place of Silero's
-        (whisper_mp_worker.SPEECH_MAP_MIN_GAP_S has the measurement).
+        (the measurement is above whisper_mp_worker._speech_map_from).
         """
         global force_whisper_cpu
         # Language code for non-auto/multilingual

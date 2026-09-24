@@ -16,24 +16,10 @@ from i18n import t
 
 logger = logging.getLogger(__name__)
 
-# With speaker detection, the diarization's turns tell Whisper where speech is,
-# in place of Silero's voice activity. Silero drops quiet speech before Whisper
-# ever hears it: of a voice 15-20 dB below the one beside it, it kept 27-41 % of
-# the time, and Whisper wrote 2-3 % of the words in what it dropped. Lowering its
-# threshold does not help (0.35 is within noise on AMI, 0.15 lets room tone in).
-# The diarization's turns kept 67 % of that voice, and with them as the speech
-# map Whisper wrote 50-65 % of its words instead of 27-46 %, with none in pure
-# noise. On all 23 AMI meetings, against their manual words, it made 1.39 points
-# fewer errors per reference word (95 % [+0.93, +1.92]), with more words found
-# in every meeting; on four hand-checked German passages 9.28 % -> 8.75 % WER,
-# all four better. The same with Nemotron's turns on the 15 AMI test meetings:
-# +1.58 [+0.69, +2.44]. Gaps are closed and edges padded by the same amounts as
-# the Silero options below, but measured for this map on its own: closing gaps up to
-# 2 s instead let one phone call become a single 31-s chunk that Whisper decoded
-# into an invented sentence. Single files vary between runs either way -- faster-
-# whisper re-decodes an unsure window by sampling, unseeded, and quiet speech is
-# where it is unsure (one recording gave 219 to 292 words) -- so only the totals
-# above say anything.
+# Gaps closed and edges padded by the same amounts as the Silero options in
+# whisper_proc_entrypoint, and kept equal on purpose -- but measured for this map on
+# its own: closing gaps up to 2 s instead let one phone call become a single 31-s
+# chunk that Whisper decoded into an invented sentence.
 SPEECH_MAP_MIN_GAP_S = 0.5
 SPEECH_MAP_PAD_S = 0.05
 
@@ -56,6 +42,19 @@ def speech_map(turns, n_samples, sampling_rate=16000):
     return out
 
 
+# With speaker detection, the diarization's turns tell Whisper where speech is,
+# in place of Silero's voice activity. Silero drops quiet speech before Whisper
+# ever hears it: of a voice 15-20 dB below the one beside it, it kept 27-41 % of
+# the time, and Whisper wrote 2-3 % of the words in what it dropped. Lowering its
+# threshold does not help (0.35 is within noise on AMI, 0.15 lets room tone in).
+# The diarization's turns kept 67 % of that voice, and with them as the speech
+# map Whisper wrote 50-65 % of its words instead of 27-46 %, with none in pure
+# noise. On all 23 AMI meetings, against their manual words, it made 1.39 points
+# fewer errors per reference word (95 % [+0.93, +1.92]), with more words found
+# in every meeting; on four hand-checked German passages 9.28 % -> 8.75 % WER,
+# all four better. Single files vary between runs either way -- faster-whisper
+# re-decodes an unsure window by sampling, unseeded, and quiet speech is where it
+# is unsure (one recording gave 219 to 292 words) -- so only the totals say anything.
 @contextlib.contextmanager
 def _speech_map_from(turns):
     """While active, faster-whisper takes its speech chunks from `turns` instead
@@ -179,8 +178,6 @@ def whisper_proc_entrypoint(args: dict, q):
         else:
             whisper_lang = language_code
 
-        # The diarization's turns as the speech map, where there are any (see
-        # SPEECH_MAP_MIN_GAP_S); Silero's otherwise.
         speech_turns = args.get("speech_turns")
 
         # Detect language if requested (Auto)
@@ -228,9 +225,7 @@ def whisper_proc_entrypoint(args: dict, q):
                 vad_filter=args.get("vad_filter", True),
                 vad_parameters=vad_parameters,
             )
-        if mapped:
-            log_cb("debug", f"speech map: {len(speech_turns)} diarization turns instead of Silero's voice activity")
-        elif speech_turns:
+        if speech_turns and not mapped:
             log_cb("debug", "speech map from the diarization unavailable; Silero decides where speech is")
         
         log_cb('info', t('start_transcription') + '\n')
