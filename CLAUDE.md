@@ -92,7 +92,10 @@ contract, which is why `main.py` consumes segments identically regardless of eng
 
 Not every worker sends every message: `whisper_mp_worker.py` emits no `progress`
 (its own docstring advertises one, and a `segments` list on the result, that it does
-not send), and `pyannote_mp_worker.py` speaks a different contract again.
+not send), and `pyannote_mp_worker.py` speaks a different contract again, which
+`nemotron_mp_worker.py` shares (turns in `segments`; instead of pyannote's `centroids` it
+returns `probabilities`, the path, columns and frame length of its per-frame speaker
+probabilities saved next to the audio).
 
 A broken `segment` put is deliberately *not* swallowed — silently truncating a transcript while
 reporting success is worse than failing the job. Worker modules stay stdlib-only at import time
@@ -101,7 +104,11 @@ and defer heavy imports into the entrypoint.
 ### Pipeline
 
 `main.py` drives: convert to WAV (`noScribe/audio/convert.py`, PyAV) → diarize
-(`pyannote_mp_worker`) → transcribe (whisper or voxtral worker) → merge and write the transcript.
+(`pyannote_mp_worker` or `nemotron_mp_worker`) → transcribe (whisper or voxtral worker) → merge
+and write the transcript. The diarization engine comes from `diarization_engine` in config.yml:
+`auto` (default) takes Nemotron whenever the installed transformers knows
+`nemotron3_diarization`, `pyannote`/`nemotron` force one; a job with a fixed speaker count
+always stays with pyannote.
 Which engine runs is decided by the `engine` field on the `WhisperModel` dataclass in
 `transcription.py` (`"whisper"` or `"voxtral"`).
 
@@ -125,14 +132,20 @@ changing a number, and check whether a test in `tests/` pins it.
 - **User config**: `appdirs.user_config_dir('noScribe')/config.yml`. Several behaviours are only
   reachable through it (e.g. `pyannote_xpu`, `force_whisper_cpu`, `voxtral_ram_reserve_gb`).
 - **Models**: `models/` holds `fast`, `precise` and `voxtral-mini-8bit`; Voxtral repos are
-  downloaded on first use.
+  downloaded on first use, and so is `nvidia/Nemotron-3-Diarization` (HF cache) unless a copy
+  sits in `models/nemotron-diarization`.
+- **This venv carries transformers from git main** (5.18.0.dev0, installed 2026-09-24 from the
+  local clone in `~/Documents/transformers-src`), because Nemotron's model is not in a release
+  yet; no requirements file says so. `benchmarks-local/bench_stack.py` gave bit-identical Voxtral
+  text, aligner stamps and pyannote bounds against 5.16.1 (`bench_tf516.json`/`bench_tf518dev.json`).
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
   not the Python source; `de.yml` and `en.yml` are the ones kept current.
 
 ## Conventions this repo keeps but does not enforce
 
 - **`local/main` is the integration line**, not a topic branch: the PR branches are cut from
-  `main`, which stays a clean mirror of upstream. `tools/check_local_current.py` exists because
+  `main`, which stays a clean mirror of upstream (`feature/nemotron-diarization` is the one branch
+  stacked on another; the check follows it through the upper branch). `tools/check_local_current.py` exists because
   a merge can drop a branch's improvement while `git merge` still says "Already up to date";
   its `INTENTIONAL` table records the lines local/main deliberately differs on.
 - **Stage explicit paths on branches cut from `main`.** They carry upstream's `.gitignore`, which
@@ -215,7 +228,23 @@ Voxtral PR:
   `benchmarks-local/whisper-split-ab/`, `benchmarks-local/ami/` and `benchmarks-local/callhome/`.
   `NOSCRIBE_VOICE_CHECK=0` switches it off. Voxtral depends on it in practice: the check
   repairs a misattribution that Voxtral's own short-cue merge causes (`voxtral_engine.py`), so
-  the Voxtral PR should follow this one.
+  the Voxtral PR should follow this one. Its second opinion is pluggable: `relabel()` takes an
+  evidence object, `Voice` (pyannote's embeddings against its centroids, what was measured) or
+  `Probabilities` (on the Nemotron branch below).
+- **Nemotron 3 Diarization** (`noScribe/nemotron_mp_worker.py`, `voice_check.Probabilities`,
+  `_diarization_engine` in `main.py`, `loading_nemotron` in all nine languages,
+  `tests/test_nemotron_worker.py`) has its own branch, `feature/nemotron-diarization`, stacked on
+  `feature/voice-verified-speakers` rather than cut from `main`, and merged into `local/main`.
+  Proposed upstream in issue #360 (Kai agreed on transformers, no pyannote fallback, 8 speakers
+  as the limit); measurements in `benchmarks-local/nemotron/README.md`: fewer wrong speakers
+  than pyannote in English and German, ~7x faster on CPU, the voice check on its probabilities
+  roughly halves wrong words against today's. It chunks the feature extraction itself because
+  transformers' one-pass spectrogram needs ~4 GB per hour of audio (huggingface/transformers#49090;
+  a bit-identical fix waits on `happyarts/transformers`, branch `fix-parakeet-fbank-memory`, no PR).
+  Not done until upstream agrees and transformers 5.18 is released: removing pyannote (worker,
+  models, `pyannote_fast_embeddings`, requirements, specs), dropping the speaker-count setting,
+  shipping bf16 weights with the OpenMDW licence, and a frozen-build proof of transformers'
+  hidden imports.
 - Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`, the
   reworded `warn_speaker_names_more_speakers` in all nine languages, tests in
   `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
