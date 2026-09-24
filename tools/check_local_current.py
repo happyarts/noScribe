@@ -14,6 +14,9 @@ gemeldet.
     python tools/check_local_current.py            # alle origin-Branches
     python tools/check_local_current.py --verbose  # jede fehlende Zeile
 
+Ein Branch, der ganz in einem anderen steckt (gestapelt), wird über den oberen
+geprüft; siehe stacked_into().
+
 Fehlalarme sind möglich, wenn eine Zeile bewusst überholt wurde -- deshalb
 meldet das Skript, statt zu reparieren. Exit-Code 1, wenn etwas fehlt.
 """
@@ -64,6 +67,15 @@ INTENTIONAL = {
         "lokal um voxtral_mp_worker erweitert",
     '# Both are ctx.Process targets, so both are re-imported in a spawn child.':
         "lokal auf drei Worker umformuliert",
+    # feature/nemotron-diarization fuegt seinen Worker als vierten an; lokal
+    # stehen alle vier in der Liste, die der Voxtral- und der Nemotron-Branch je
+    # nur um ihren eigenen Worker erweitern.
+    '# All three are ctx.Process targets, so all are re-imported in a spawn child.':
+        "lokal vier Worker (Nemotron dazu), Kommentar wie im Nemotron-Branch",
+    '"noScribe.voxtral_mp_worker"]':
+        "lokal folgt nemotron_mp_worker in derselben Zeile",
+    'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker", "noScribe.nemotron_mp_worker"]':
+        "lokal um voxtral_mp_worker erweitert, auf zwei Zeilen",
     # feature/voxtral-engine gibt das _Info-Objekt wieder zurueck, wie upstream es
     # tut (die Entfernung wurde dort abgelehnt und bleibt lokal); lokal geben die
     # drei Funktionen nichts zurueck.
@@ -100,8 +112,24 @@ def branches():
     out = sh("git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin")
     # origin/voxtral ist ein Spiegel von local/main, kein PR-Branch.
     return [b for b in out.split()
-            if b not in ("origin/main", "origin/HEAD", "origin/local/main",
+            if b not in ("origin", "origin/main", "origin/HEAD", "origin/local/main",
                          "origin/voxtral")]
+
+
+def stacked_into(branch, others):
+    """Der Branch, auf dem `branch` aufsetzt und der ihn ganz enthält, oder None.
+
+    Ein gestapelter Branch (feature/nemotron-diarization auf
+    feature/voice-verified-speakers) darf Zeilen des unteren bewusst überholen.
+    Der obere wird ohnehin geprüft, und sein Diff gegen upstream/main enthält
+    jede Zeile des unteren, die dort noch gilt -- den unteren eigens zu prüfen
+    meldete nur die überholten."""
+    tip = sh("git", "rev-parse", branch).strip()
+    for other in others:
+        if other != branch and sh("git", "rev-parse", other).strip() != tip and subprocess.run(
+                ["git", "merge-base", "--is-ancestor", branch, other]).returncode == 0:
+            return other
+    return None
 
 
 def added_lines(branch):
@@ -124,7 +152,12 @@ def main():
     args = ap.parse_args()
 
     worst = 0
-    for branch in sorted(branches()):
+    all_branches = sorted(branches())
+    for branch in all_branches:
+        upper = stacked_into(branch, all_branches)
+        if upper:
+            print(f"   {branch:44} steckt ganz in {upper}, dort geprüft")
+            continue
         missing = {}
         for path, lines in added_lines(branch).items():
             if path.startswith(SKIP_PREFIX):
