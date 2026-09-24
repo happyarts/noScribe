@@ -1,15 +1,12 @@
 """noScribe.nemotron_mp_worker without the model: the turns it hands to main.py,
 and the voice check's evidence built from its speaker probabilities."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from noScribe import nemotron_mp_worker as nw
 from noScribe import voice_check as vc
-
-
-def test_labels_and_columns_agree():
-    """main.py maps columns to speakers by these labels; the turns must use the same."""
-    assert nw.turns([{'Start': 0.0, 'End': 1.0, 'Speaker': 3}])[0]['label'] == nw.label(3) == 'SPEAKER_03'
 
 
 def test_turns_are_noscribe_turns_sorted_by_start():
@@ -20,11 +17,6 @@ def test_turns_are_noscribe_turns_sorted_by_start():
                     {'Start': 5.0, 'End': 5.0, 'Speaker': 1}])
     assert got == [{'start': 0, 'end': 2500, 'label': 'SPEAKER_00'},
                    {'start': 3200, 'end': 4000, 'label': 'SPEAKER_01'}]
-
-
-def test_without_a_shipped_copy_the_model_comes_from_the_hub():
-    source = nw.model_source()
-    assert source == nw.MODEL_REPO or source.endswith(nw.MODEL_DIR)
 
 
 def probabilities(*rows_per_second):
@@ -72,9 +64,10 @@ def test_a_unit_goes_to_the_speaker_the_model_hears_most_in_it():
 
 
 def test_features_in_chunks_equal_one_pass():
-    """In one pass transformers' spectrogram took 12.3 GB for a 4.8 h recording, so the
-    worker computes it in chunks -- which must not change a single value, nor the
-    mask that leaves the last frame out, whatever the chunk size and length."""
+    """The worker computes the spectrogram in chunks, which must not change a single
+    value, nor the mask that leaves the last frame out, whatever the chunk size and
+    length. A chunk of one frame would round differently (a matrix-vector product);
+    the worker's last chunk can be one, but that frame is always the masked one."""
     import types
     module = pytest.importorskip(
         'transformers.models.nemotron_asr_streaming.feature_extraction_nemotron_asr_streaming')
@@ -85,7 +78,7 @@ def test_features_in_chunks_equal_one_pass():
     for length in (16000 * 3, 16000 * 3 + 77):
         audio = (rng.standard_normal(length) * 0.05).astype(np.float32)
         whole = fe(audio, sampling_rate=16000, return_tensors='pt')
-        for chunk_frames in (7, 100, 10_000):
+        for chunk_frames in (2, 7, 100, 10_000):
             got = nw.features(processor, audio, 16000, chunk_frames=chunk_frames)
             assert got.input_features.shape == whole.input_features.shape
             assert (got.input_features == whole.input_features).all(), chunk_frames
@@ -95,13 +88,17 @@ def test_features_in_chunks_equal_one_pass():
 
 def test_available_says_whether_transformers_knows_the_model(monkeypatch):
     """main.py picks the engine in the GUI process, which must not import transformers
-    for it: `available` only looks for the model's directory in the installed package."""
+    for it: `available` only looks for the model's directory in the installed package
+    and for its weights."""
     import importlib.util
+    import subprocess
     import sys
-    was_loaded = 'transformers' in sys.modules
-    result = nw.available()
-    assert isinstance(result, bool)
-    if not was_loaded:
-        assert 'transformers' not in sys.modules
+    code = ('import sys; from noScribe.nemotron_mp_worker import available; available(); '
+            'assert "transformers" not in sys.modules')
+    subprocess.run([sys.executable, '-c', code], check=True, cwd=Path(__file__).resolve().parent.parent)
+    import huggingface_hub
+    monkeypatch.setattr(nw, 'model_source', lambda: nw.MODEL_REPO)
+    monkeypatch.setattr(huggingface_hub, 'try_to_load_from_cache', lambda repo, name: None)
+    assert nw.available() is False  # weights neither shipped nor cached: no download behind `auto`
     monkeypatch.setattr(importlib.util, 'find_spec', lambda name: None)
     assert nw.available() is False

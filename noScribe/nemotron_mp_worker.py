@@ -1,8 +1,8 @@
 """Speaker diarization with NVIDIA's Nemotron 3 Diarization, in a child process.
 
 An alternative to pyannote_mp_worker, chosen with `diarization_engine: nemotron`
-in config.yml, and by default (`auto`) whenever the installed transformers knows
-the model. It answers with the same result message -- turns as
+in config.yml (which downloads the model on first use), and by default (`auto`)
+whenever the installed transformers knows the model and its weights are here. It answers with the same result message -- turns as
 {"start": ms, "end": ms, "label": "SPEAKER_nn"} -- and instead of centroids it
 leaves the model's own speaker probabilities (one row per FRAME_S, one column
 per speaker, float16) in a .npy file next to the audio, which is what the voice
@@ -12,11 +12,10 @@ Measured against pyannote in the fork's benchmarks-local/nemotron/README.md: on
 the 15 AMI test meetings (not in Nemotron's training data; VoxConverse and AMI
 train/dev are) 11.6 % of words end up under the wrong speaker against 15.7 %,
 at about a seventh of the time; on 40 German CallHome calls 6.8 % of speech time
-against 11.8 %; a 4.8 h Zoom call runs through its speaker cache in 50 s.
+against 11.8 %; a 4.8 h video call runs through its speaker cache in 50 s.
 
 What it cannot do: more than eight speakers, and a fixed number of speakers
-(main.py keeps such a job with pyannote; here `num_speakers` would only be
-noted and ignored). It needs transformers with `nemotron3_diarization`, which is
+(main.py keeps such a job with pyannote). It needs transformers with `nemotron3_diarization`, which is
 on transformers' main branch only so far, and neither the requirements nor the
 PyInstaller specs carry that yet.
 
@@ -41,7 +40,7 @@ else:
 
 # The Hugging Face repository, used when no copy ships in models/.
 MODEL_REPO = "nvidia/Nemotron-3-Diarization"
-MODEL_DIR = "nemotron-diarization"  # under transcription.DIR_PACKAGE_MODELS
+MODEL_DIR = "nemotron-diarization"  # under models/
 
 # The model's output frame: transformers upsamples its 80 ms encoder frames to
 # the 10 ms of the spectrogram.
@@ -56,7 +55,7 @@ def model_source():
     """The shipped copy under models/ if there is one, else the Hub repository."""
     try:
         path = impres.files("models") / MODEL_DIR
-        if path.is_dir():
+        if (path / "config.json").is_file():
             return str(path)
     except Exception:
         pass
@@ -64,14 +63,21 @@ def model_source():
 
 
 def available():
-    """Whether the installed transformers knows the model, found without importing
-    it: main.py asks this in the GUI process, which never loads transformers."""
+    """Whether the installed transformers knows the model and its weights are here,
+    shipped or in the Hugging Face cache, so `auto` never starts a download or fails
+    offline. Found without importing transformers: main.py asks this in the GUI
+    process, which never loads it."""
     try:
         import importlib.util
         spec = importlib.util.find_spec("transformers")
         if spec is None or not spec.origin:
             return False
-        return os.path.isdir(os.path.join(os.path.dirname(spec.origin), "models", "nemotron3_diarization"))
+        if not os.path.isdir(os.path.join(os.path.dirname(spec.origin), "models", "nemotron3_diarization")):
+            return False
+        if model_source() != MODEL_REPO:
+            return True
+        from huggingface_hub import try_to_load_from_cache
+        return isinstance(try_to_load_from_cache(MODEL_REPO, "model.safetensors"), str)
     except Exception:
         return False
 
@@ -81,35 +87,47 @@ def label(column):
     return f"SPEAKER_{int(column):02d}"
 
 
-def features(processor, audio, sample_rate, chunk_frames=60000):
+def features(processor, audio, sample_rate, chunk_frames=60000, device="cpu"):
     """The model's input for a whole recording, as processor(audio) gives it, but
     computed ten minutes at a time: in one pass transformers' spectrogram took
-    12.3 GB for a 4.8 h recording whose features are 0.9 GB (5.4 GB peak this way).
+    12.3 GB for a 4.8 h recording whose features are 0.9 GB (huggingface/transformers#49090;
+    this function can go once a release computes it in parts itself).
     Bit-identical to the one-pass features: each chunk's STFT windows are cut from
-    the padded recording as its feature extractor's docstring describes
-    (center=False), and the pre-emphasis runs once over the whole recording so no
-    chunk starts without its previous sample."""
+    the recording as padded by center=True, as its feature extractor's docstring
+    describes (center=False), and pre-emphasised from the sample before the chunk."""
     import numpy as np
     import torch
     from transformers.feature_extraction_utils import BatchFeature
     fe = processor.feature_extractor
     hop, n_fft, pre = fe.hop_length, fe.n_fft, fe.preemphasis
-    n = len(audio) // hop + 1  # frames of one centered pass (torch.stft)
-    x = np.pad(audio, (n_fft // 2, n_fft // 2))  # center=True's constant padding
-    if pre:
-        x[n_fft // 2 + 1:n_fft // 2 + len(audio)] -= pre * audio[:-1]
+    half, length = n_fft // 2, len(audio)
+    n = length // hop + 1  # frames of one centered pass (torch.stft)
+
+    def padded(a, b):
+        """Samples a:b of the recording padded by n_fft // 2 on each side and pre-emphasised."""
+        x = np.zeros(b - a, dtype=audio.dtype)
+        lo, hi = max(a - half, 0), min(b - half, length)
+        x[lo + half - a:hi + half - a] = audio[lo:hi]
+        if pre and hi > max(lo, 1):
+            first = max(lo, 1)
+            x[first + half - a:hi + half - a] -= pre * audio[first - 1:hi - 1]
+        return x
+
+    feats = None
     fe.preemphasis = None
     try:
-        parts = [fe(x[hop * k:hop * (min(n, k + chunk_frames) - 1) + n_fft], sampling_rate=sample_rate,
-                    center=False, return_tensors="pt").input_features
-                 for k in range(0, n, chunk_frames)]
+        for k in range(0, n, chunk_frames):
+            part = fe(padded(hop * k, hop * (min(n, k + chunk_frames) - 1) + n_fft), sampling_rate=sample_rate,
+                      center=False, return_tensors="pt").input_features
+            if feats is None:
+                feats = torch.empty((1, n, part.shape[2]), dtype=part.dtype, device=device)
+            feats[:, k:k + part.shape[1]] = part
     finally:
         fe.preemphasis = pre
-    feats = torch.cat(parts, dim=1)
     # One pass counts only floor(L / hop) frames as valid: the last is masked and padded.
-    valid = len(audio) // hop
+    valid = length // hop
     feats[:, valid:] = fe.padding_value
-    mask = torch.zeros(feats.shape[:2], dtype=torch.long)
+    mask = torch.zeros(feats.shape[:2], dtype=torch.long, device=device)
     mask[:, :valid] = 1
     return BatchFeature({"input_features": feats, "attention_mask": mask})
 
@@ -131,10 +149,11 @@ def nemotron_proc_entrypoint(args: dict, q):
 
     device = ''
     try:
+        # First: pyannote_mp_worker sets the OpenMP variables torch has to find at import.
+        from .pyannote_mp_worker import load_waveform, select_device
         import numpy as np
         import torch
         from transformers import AutoModelForAudioFrameClassification, AutoProcessor
-        from .pyannote_mp_worker import load_waveform, select_device
         try:
             from transformers.models import nemotron3_diarization  # noqa: F401
         except ImportError:
@@ -145,17 +164,12 @@ def nemotron_proc_entrypoint(args: dict, q):
         audio_file = args["audio_path"]
         if not os.path.exists(audio_file):
             raise FileNotFoundError(audio_file)
-        if args.get("num_speakers"):
-            plog("warn", "Nemotron diarization finds the number of speakers itself; "
-                         f"the requested {args['num_speakers']} is ignored")
-
         device = select_device(args.get("device", ""))
 
         source = model_source()
         plog("debug", f"Loading Nemotron diarization from {source} on {device}")
         q.put({"type": "progress", "pct": 0})
         processor = AutoProcessor.from_pretrained(source)
-        model = AutoModelForAudioFrameClassification.from_pretrained(source).to(device).eval()
 
         waveform, sample_rate = load_waveform(audio_file)
         audio = waveform[0].numpy()  # ToWav writes mono; a view, not a copy
@@ -163,10 +177,13 @@ def nemotron_proc_entrypoint(args: dict, q):
         if sample_rate != processor.feature_extractor.sampling_rate:
             raise RuntimeError(f"audio at {sample_rate} Hz, the model needs "
                                f"{processor.feature_extractor.sampling_rate} Hz")
+        inputs = features(processor, audio, sample_rate, device=device)
+        del audio
+        # Loaded after the features, so it is not held through their peak.
+        model = AutoModelForAudioFrameClassification.from_pretrained(source).to(device).eval()
+        inputs = inputs.to(device, dtype=model.dtype)
         # Offline mode: the whole recording in one call, cut into chunks with a
         # speaker cache inside the model, so there is no length limit.
-        inputs = features(processor, audio, sample_rate).to(device, dtype=model.dtype)
-        del audio
         with torch.inference_mode():
             logits = model(**inputs).logits
         mask = inputs.attention_mask
