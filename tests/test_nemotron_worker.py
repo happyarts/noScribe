@@ -69,3 +69,25 @@ def test_a_unit_goes_to_the_speaker_the_model_hears_most_in_it():
     turns = [{'start': 0, 'end': 1900, 'label': 'S00'}]
     passages, moves = vc.relabel([(seg, 'S00', False)], turns, vc.Probabilities(probs, {'S00': 0, 'S01': 1}, 0.01))
     assert [(p['text'], s) for p, s in passages] == [(' Right?', 'S00'), (' Sure.', 'S01')] and len(moves) == 1
+
+
+def test_features_in_chunks_equal_one_pass():
+    """In one pass transformers' spectrogram took 12.3 GB for a 4.8 h recording, so the
+    worker computes it in chunks -- which must not change a single value, nor the
+    mask that leaves the last frame out, whatever the chunk size and length."""
+    import types
+    module = pytest.importorskip(
+        'transformers.models.nemotron_asr_streaming.feature_extraction_nemotron_asr_streaming')
+    fe = module.NemotronAsrStreamingFeatureExtractor(
+        feature_size=128, hop_length=160, n_fft=512, win_length=400, preemphasis=0.97, sampling_rate=16000)
+    processor = types.SimpleNamespace(feature_extractor=fe)
+    rng = np.random.default_rng(0)
+    for length in (16000 * 3, 16000 * 3 + 77):
+        audio = (rng.standard_normal(length) * 0.05).astype(np.float32)
+        whole = fe(audio, sampling_rate=16000, return_tensors='pt')
+        for chunk_frames in (7, 100, 10_000):
+            got = nw.features(processor, audio, 16000, chunk_frames=chunk_frames)
+            assert got.input_features.shape == whole.input_features.shape
+            assert (got.input_features == whole.input_features).all(), chunk_frames
+            assert (got.attention_mask == whole.attention_mask.long()).all()
+    assert fe.preemphasis == 0.97  # put back
