@@ -4,7 +4,7 @@ Reads /tmp/out_mapped.vtt, /tmp/out_unmapped.html and /tmp/out_short.txt --
 scratch files the user produces with three CLI invocations -- and checks the
 output-format and speaker-name plumbing: mapped names reach the VTT voices,
 S00/S01 survive without --speaker-names, no HTML leaks into the txt path. A
-format check, not a measurement; listed under docs/voxtral-benchmarks.md §8.
+format check, not a measurement; listed under docs/voxtral-benchmarks.md §9.
 """
 import os, re, sys
 

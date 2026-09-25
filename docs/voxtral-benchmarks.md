@@ -195,7 +195,71 @@ the evidence that the 600-s cap costs nothing.
 
 ---
 
-## 7. What became of the open points
+## 7. Where the time goes, and the speed levers not taken
+
+As of 25 September 2026 · M1 Max, 32 GB · `voxtral-mini-8bit`, a default job
+(Auto, long path, Nemotron diarization, voice check) on a 61-min German
+two-speaker interview: **692 s, 5.3× real time**, no retry rung fired.
+
+| Stage | s | share |
+|---|---:|---:|
+| conversion to WAV | 4 | 0.6 % |
+| diarization (Nemotron, MPS) | 18 | 2.6 % |
+| model load | 5 | 0.7 % |
+| audio encoder + projector | 75 | 10.9 % |
+| prompt prefill | 101 | 14.5 % |
+| token decode (39 tok/s) | 409 | 59.1 % |
+| wav2vec2 emissions (MPS) | 55 | 8.0 % |
+| numpy Viterbi | 8.5 | 1.2 % |
+
+What remains of the 692 s is aligner load, log-Mel, voice check and writing,
+none above half a percent. (Another session used about two CPU cores during the
+run; the shares stand, the absolute seconds may be a few percent high.) The
+10 s of Silero that used to run in the parent before the worker was spawned now
+runs beside it.
+
+**Encoder and prefill are compute-bound and already efficient**: about
+3.8 TFLOPS against the 5.7 TFLOPS the same machine reaches on a plain
+4096² bf16 GEMM. Faster hardware is the only lever there;
+this quarter of the job is what the Neural Accelerators from M5 on speed up.
+
+**Decode is not bandwidth-bound.** 45 tok/s × ~3.6 GB of 8-bit weights is
+~160 GB/s against the M1 Max's 400, which fits the quantisation finding that
+halving the bytes (8 → 4 bit) buys only 12 %. That is why batching buys little.
+Decoding four equal-length 300 s passes together (`batch_probe.py`: no padding,
+greedy, every row token-identical to production):
+
+| batch | wall vs. one at a time | decode, all rows | peak |
+|---|---:|---:|---:|
+| 1 | 1.00× | 45 tok/s | — |
+| 2 | 1.16× | 59 tok/s | 11.3 GB |
+| 4 | 1.11× | 60 tok/s | 12.0 GB |
+
+A per-row loop breaker, per-row retries and padded prompts of unequal length
+are not worth 11–16 %.
+
+**Shorter passes are not worth it either.** Decode does slow with the pass
+length — 39 tok/s in the ~530 s passes above, 49–51 tok/s in 60–180 s ones,
+because every token reads a KV cache of ~120 KB per position — but 300 s
+passes bought only 3.3 % (the interview) and 3.8 % (a 20-min podcast) of wall
+time, since every extra seam re-reads 15 s of overlap. Their cost at the seams
+is not measurable either way: seams placed deliberately inside the
+hand-corrected passages, 10 pairs, 12 seams, 7274 reference words, gave
+ΔWER −0.05 pp with a paired-bootstrap 95 % interval of [−0.72, +0.52]; words,
+commas and sentence ends of the whole files stayed level. `TRUSTED_CHUNK_SEC`
+stays at 600. The Viterbi grows with frames × states, i.e. quadratically with
+the pass length, and is capped at its 1.2 % either way.
+
+**Not taken, without a measurement**: aligning pass N while pass N+1 decodes
+(both on the same GPU, and their peaks would add up where `MEM_MODEL` assumes
+they alternate), starting the worker during the diarization (5–10 s per job),
+pipelining a queue of files. Keeping MLX's buffer cache across passes instead
+of `_free_decode_buffers` has nothing to win: the stages above leave 1.4 s of
+the whole hour unaccounted.
+
+---
+
+## 8. What became of the open points
 
 All five are decided; the list stays so that nobody opens them a second time.
 
@@ -217,9 +281,9 @@ All five are decided; the list stays so that nobody opens them a second time.
 
 ---
 
-## 8. Reproducing
+## 9. Reproducing
 
 The scripts are in `docs/scripts/`: `bitmatrix.py` (speed/word fidelity),
 `decisive.py` (punctuation per penalty), `rep_matrix.py` (penalty rungs against
-the doubled "nicht"), `split_retry.py` (loop repair), `cli_check.py` (format
-check). The conversion is in the repository as `tools/quantize_voxtral.py`.
+the doubled "nicht"), `split_retry.py` (loop repair), `batch_probe.py` (batched
+decode, §7), `cli_check.py` (format check). The conversion is in the repository as `tools/quantize_voxtral.py`.

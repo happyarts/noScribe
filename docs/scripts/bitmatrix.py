@@ -6,7 +6,7 @@ realtime factor, peak memory and word agreement with bf16. The hypothesis
 under test, raised when the builds were made: MLX's 6-bit matmul kernels may
 be slower than the 4- and 8-bit ones, so 6 bit could lose in speed what it
 saves in size. Feeds the bit-width tables in docs/voxtral-quantisation.md;
-docs/voxtral-benchmarks.md §8 lists it.
+docs/voxtral-benchmarks.md §9 lists it.
 """
 import sys, time, difflib, soundfile as sf, mlx.core as mx
 import pathlib
