@@ -20,8 +20,11 @@ importlib-resources>=5.10; python_version < "3.12"
 matplotlib>=3.11
 Pillow
 pyannote.audio>=4
-# 6.14.1 or newer (as pinned for Windows): in older builds transformers' import-structure scan fails on the frozen __init__.pyc
-pyinstaller>=6.14.1
+# 6.21 or newer: before 6.14 a frozen transformers cannot import itself (its
+# import-structure scan fails on __init__.pyc), and before 6.21 a frozen scipy 1.18
+# misses scipy._cyutility and array_api_compat's numpy.fft. The Windows spec collects
+# all of scipy itself, so its pin to 6.14.1 is enough there.
+pyinstaller>=6.21
 pyobjc
 python-i18n
 PyYAML
