@@ -252,7 +252,7 @@ Voxtral PR:
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
   and `nemotron_asr_streaming` plus torchcodec's metadata, and PyInstaller must be 6.14.0 or
   newer (bisected: 6.4-6.13 fail in transformers' own import-structure scan of the frozen
-  `__init__.pyc`), which the macOS and Linux requirements now ask for; Windows pins 6.14.1.
+  `__init__.pyc`), the macOS and Linux requirements ask for 6.14.1 or newer, as Windows pins it.
   Not done until upstream agrees and transformers 5.18 is released: removing pyannote (worker,
   models, `pyannote_fast_embeddings`, requirements, specs), dropping the speaker-count setting,
   shipping bf16 weights with the OpenMDW licence, and `transformers>=5.18` in the requirements.
