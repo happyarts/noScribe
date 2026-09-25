@@ -13,10 +13,21 @@
 >
 > **[→ What it is, how to install it, and every measurement behind it: VOXTRAL.md](VOXTRAL.md)**
 >
-> Requires a Mac with Apple Silicon (M1–M4). There is **no packaged download for
-> this fork yet** — you install it from source, on top of a normal noScribe
-> checkout. Everything else in this README is the original project's and applies
-> unchanged.
+> It also finds the speakers with NVIDIA's **Nemotron 3 Diarization** instead of
+> pyannote: fewer passages given to the wrong speaker in English and German, and
+> about seven times faster on the CPU. Nemotron is not in a transformers release
+> yet, so it needs transformers installed from its git main
+> (`pip install git+https://github.com/huggingface/transformers`), and its weights
+> are fetched only once `diarization_engine: nemotron` is set in noScribe's
+> `config.yml`. Without either, the default `auto` quietly stays with pyannote;
+> the transcript header says which one ran — "auto (Nemotron)" or
+> "auto (PyAnnote)".
+>
+> Requires a Mac with Apple Silicon (M1–M4) for Voxtral. There is **no packaged
+> download for this fork yet** — you install it from source: the `main` branch
+> carries every feature of the fork together, and each one is offered upstream on
+> its own branch. Everything else in this README is the original project's and
+> applies unchanged.
 >
 > **Looking for the official noScribe?** It lives at
 > [kaixxx/noScribe](https://github.com/kaixxx/noScribe) and

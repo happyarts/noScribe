@@ -121,10 +121,9 @@ def sh(*args):
 
 def branches():
     out = sh("git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin")
-    # origin/voxtral ist ein Spiegel von local/main, kein PR-Branch.
+    # origin/main ist ein Spiegel von local/main, kein PR-Branch.
     return [b for b in out.split()
-            if b not in ("origin", "origin/main", "origin/HEAD", "origin/local/main",
-                         "origin/voxtral")]
+            if b not in ("origin", "origin/main", "origin/HEAD", "origin/local/main")]
 
 
 def stacked_into(branch, others):
