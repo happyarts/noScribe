@@ -64,26 +64,26 @@ def test_a_unit_goes_to_the_speaker_the_model_hears_most_in_it():
 
 
 def test_features_in_chunks_equal_one_pass():
-    """The worker computes the spectrogram in chunks, which must not change a single
-    value, nor the mask that leaves the last frame out, whatever the chunk size and
-    length. A chunk of one frame would round differently (a matrix-vector product);
-    the worker's last chunk can be one, but that frame is always the masked one."""
-    import types
+    """The worker computes the spectrogram in chunks through the processor's streaming
+    calls, which must not change a single value, nor the mask that leaves the last
+    frame out, whatever the chunk size and length -- including the last valid frame,
+    which the streamed chunks leave out and a separate call has to supply."""
     module = pytest.importorskip(
-        'transformers.models.nemotron_asr_streaming.feature_extraction_nemotron_asr_streaming')
-    fe = module.NemotronAsrStreamingFeatureExtractor(
+        'transformers.models.nemotron3_diarization.processing_nemotron3_diarization')
+    from transformers.models.nemotron_asr_streaming.feature_extraction_nemotron_asr_streaming import (
+        NemotronAsrStreamingFeatureExtractor)
+    fe = NemotronAsrStreamingFeatureExtractor(
         feature_size=128, hop_length=160, n_fft=512, win_length=400, preemphasis=0.97, sampling_rate=16000)
-    processor = types.SimpleNamespace(feature_extractor=fe)
+    processor = module.Nemotron3DiarizationProcessor(fe)
     rng = np.random.default_rng(0)
-    for length in (16000 * 3, 16000 * 3 + 77):
+    for length in (16000 * 3, 16000 * 3 + 77, 16000 * 3 + 160, 16000 * 3 + 350):  # the last: under one window left
         audio = (rng.standard_normal(length) * 0.05).astype(np.float32)
-        whole = fe(audio, sampling_rate=16000, return_tensors='pt')
-        for chunk_frames in (2, 7, 100, 10_000):
+        whole = processor(audio, sampling_rate=16000)
+        for chunk_frames in (8, 56, 800, 80_000):
             got = nw.features(processor, audio, 16000, chunk_frames=chunk_frames)
             assert got.input_features.shape == whole.input_features.shape
-            assert (got.input_features == whole.input_features).all(), chunk_frames
+            assert (got.input_features == whole.input_features).all(), (length, chunk_frames)
             assert (got.attention_mask == whole.attention_mask.long()).all()
-    assert fe.preemphasis == 0.97  # put back
 
 
 def test_available_says_whether_transformers_knows_the_model(monkeypatch):

@@ -90,43 +90,38 @@ def label(column):
 def features(processor, audio, sample_rate, chunk_frames=60000, device="cpu"):
     """The model's input for a whole recording, as processor(audio) gives it, but
     computed ten minutes at a time: in one pass transformers' spectrogram took
-    12.3 GB for a 4.8 h recording whose features are 0.9 GB (huggingface/transformers#49090;
-    this function can go once a release computes it in parts itself).
-    Bit-identical to the one-pass features: each chunk's STFT windows are cut from
-    the recording as padded by center=True, as its feature extractor's docstring
-    describes (center=False), and pre-emphasised from the sample before the chunk."""
-    import numpy as np
+    12.3 GB for a 4.8 h recording whose features are 0.9 GB. transformers keeps the
+    one pass by design (huggingface/transformers#49090) and points to the
+    processor's streaming calls, whose chunks reproduce it frame for frame; only
+    the model's forward stays offline, since its streaming mode caches speakers
+    differently. What is left after the last whole chunk comes from an offline call
+    on the recording's end: the streaming call for a last chunk left out the last
+    valid frame, differed from the one pass on a few short ends and refused one
+    under a window long. Bit-identical to the one pass."""
     import torch
     from transformers.feature_extraction_utils import BatchFeature
-    fe = processor.feature_extractor
-    hop, n_fft, pre = fe.hop_length, fe.n_fft, fe.preemphasis
-    half, length = n_fft // 2, len(audio)
-    n = length // hop + 1  # frames of one centered pass (torch.stft)
+    hop = processor.feature_extractor.hop_length
+    valid = len(audio) // hop  # frames one pass counts as valid; it adds one more, masked
+    step = chunk_frames // processor.subsampling_factor
+    processor.streaming_modes = dict(processor.streaming_modes, noscribe_offline=(step, 0))
+    processor.set_streaming_mode("noscribe_offline")
+    if len(audio) <= processor.num_samples_first_audio_chunk:
+        return processor(audio, sampling_rate=sample_rate).to(device)
 
-    def padded(a, b):
-        """Samples a:b of the recording padded by n_fft // 2 on each side and pre-emphasised."""
-        x = np.zeros(b - a, dtype=audio.dtype)
-        lo, hi = max(a - half, 0), min(b - half, length)
-        x[lo + half - a:hi + half - a] = audio[lo:hi]
-        if pre and hi > max(lo, 1):
-            first = max(lo, 1)
-            x[first + half - a:hi + half - a] -= pre * audio[first - 1:hi - 1]
-        return x
-
-    feats = None
-    fe.preemphasis = None
-    try:
-        for k in range(0, n, chunk_frames):
-            part = fe(padded(hop * k, hop * (min(n, k + chunk_frames) - 1) + n_fft), sampling_rate=sample_rate,
-                      center=False, return_tensors="pt").input_features
-            if feats is None:
-                feats = torch.empty((1, n, part.shape[2]), dtype=part.dtype, device=device)
-            feats[:, k:k + part.shape[1]] = part
-    finally:
-        fe.preemphasis = pre
-    # One pass counts only floor(L / hop) frames as valid: the last is masked and padded.
-    valid = length // hop
-    feats[:, valid:] = fe.padding_value
+    feats, done = None, 0
+    start, end, first = 0, processor.num_samples_first_audio_chunk, True
+    while end <= len(audio):
+        part = processor(audio[start:end], sampling_rate=sample_rate, is_streaming=True,
+                         is_first_audio_chunk=first).input_features
+        if feats is None:
+            feats = torch.empty((1, valid + 1, part.shape[2]), dtype=part.dtype, device=device)
+        feats[:, done:done + part.shape[1]] = part
+        done += part.shape[1]
+        start = processor.audio_chunk_start(done)
+        end, first = start + processor.num_samples_per_audio_chunk, False
+    tail = max(0, done - 16) * hop  # on the frame grid, and far enough back for the window and pre-emphasis
+    feats[:, done:valid] = processor(audio[tail:], sampling_rate=sample_rate).input_features[:, done - tail // hop:valid - tail // hop]
+    feats[:, valid:] = processor.feature_extractor.padding_value
     mask = torch.zeros(feats.shape[:2], dtype=torch.long, device=device)
     mask[:, :valid] = 1
     return BatchFeature({"input_features": feats, "attention_mask": mask})
