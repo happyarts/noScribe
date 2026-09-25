@@ -1,6 +1,6 @@
 """Prüft, ob der lokale Testzweig alle Änderungen der offenen PR-Branches trägt.
 
-Hintergrund: local/main ist die Integrationslinie, auf der getestet wird. Die
+Hintergrund: main ist die Integrationslinie, auf der getestet wird. Die
 PR-Branches werden nach Reviews weiterentwickelt, und ein Merge kann eine
 Verbesserung stillschweigend wieder verlieren -- eine Konfliktauflösung, die
 die falsche Seite nimmt, hinterlässt keine Spur, und `git merge` meldet danach
@@ -30,13 +30,13 @@ SKIP_PREFIX = ("docs/", "benchmarks-local/")
 # Zeilen ohne Aussagekraft: Leerzeilen, alleinstehende Klammern, Trennlinien.
 NOISE = re.compile(r"^[\s)\](}#*=/-]*$")
 
-# Bewusste Abweichungen: local/main trägt Funktionen, die es upstream nicht
+# Bewusste Abweichungen: main trägt Funktionen, die es upstream nicht
 # gibt, deshalb kann eine Branch-Zeile hier zu Recht anders lauten. Jede
 # Ausnahme braucht eine Begründung, sonst verdeckt sie echte Drift.
 INTENTIONAL = {
     # fix/whisper-speech-map-from-diarization reicht die Diarisierung an Whisper;
     # lokal nur pyannotes (Nemotrons kurze Turns kosten auf Deutsch Woerter), und
-    # lokal ohne `info =`, weil local/main das _Info-Objekt nicht zurueckgibt.
+    # lokal ohne `info =`, weil main das _Info-Objekt nicht zurueckgibt.
     "info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment, diarization)":
         "lokal mit Nemotron-Sperre und ohne info-Rueckgabe",
     "Returns a simple info object (duration at least). With a diarization,":
@@ -49,7 +49,7 @@ INTENTIONAL = {
     # würde der Anzeigetext als gemerktes Modell gespeichert.
     "config['last_whisper_model'] = self.option_menu_whisper_model.get()":
         "lokal durch model_key() ersetzt (dekorierter Picker)",
-    # local/main trägt zusätzlich ctc_align (numpy-Viterbi), das es upstream
+    # main trägt zusätzlich ctc_align (numpy-Viterbi), das es upstream
     # nicht gibt -- die Zeile ist hier also eine echte Obermenge der PR-Zeile.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils")':
         "lokal um ctc_align erweitert",
@@ -121,9 +121,9 @@ def sh(*args):
 
 def branches():
     out = sh("git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin")
-    # origin/main ist ein Spiegel von local/main, kein PR-Branch.
+    # origin/main ist die Integrationslinie, kein PR-Branch.
     return [b for b in out.split()
-            if b not in ("origin", "origin/main", "origin/HEAD", "origin/local/main")]
+            if b not in ("origin", "origin/main", "origin/HEAD")]
 
 
 def stacked_into(branch, others):

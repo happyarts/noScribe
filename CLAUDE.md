@@ -22,7 +22,7 @@ noScribe quitting — the two share no runtime state, only the transcript file. 
 side rarely affect the other.
 
 Supporting code that is neither: `tools/` (model quantisation, loop-detection calibration, and
-`check_local_current.py`, which proves `local/main` still carries every line the open PR branches
+`check_local_current.py`, which proves `main` still carries every line the open PR branches
 add), `docs/scripts/` (one-off measurement scripts behind the write-ups in `docs/`, plus
 `docs/scripts/engines/` for scoring rival ASR engines), and
 `benchmarks-local/`, which is excluded through `.git/info/exclude` rather than `.gitignore` and
@@ -144,16 +144,18 @@ changing a number, and check whether a test in `tests/` pins it.
 
 ## Conventions this repo keeps but does not enforce
 
-- **`local/main` is the integration line**, not a topic branch: the PR branches are cut from
+- **`main` is the integration line**, not a topic branch: the PR branches are cut from
   `upstream-main`, the local branch that stays a clean mirror of `upstream/main` (`feature/nemotron-diarization` is the one branch
   stacked on another; the check follows it through the upper branch). `tools/check_local_current.py` exists because
   a merge can drop a branch's improvement while `git merge` still says "Already up to date";
-  its `INTENTIONAL` table records the lines local/main deliberately differs on.
+  its `INTENTIONAL` table records the lines `main` deliberately differs on.
 - **Stage explicit paths on branches cut from `upstream-main`.** They carry upstream's `.gitignore`, which
   does not exclude `Audiotest/`, `Audiotest2/` (private recordings), `models/voxtral-*` or
   `venv/`, so `git add -A` there would stage them.
-- **`origin/main` is the fork's default branch** and a pure mirror of `local/main` — it is *not*
-  upstream's `main`: every push of `local/main` is followed by `git push origin local/main:main`.
+- **`main` is the fork's default branch**, tracking `origin/main` — it is *not* upstream's
+  `main`, which lives locally as `upstream-main`.
+- **Fix on the topic branch first, then merge it into `main`** — not the other way round, or
+  the change has to be carried into the PR branch by hand later.
   On GitHub, never use "Contribute → Open pull request" from it (it would offer the whole fork
   to kaixxx) or "Sync fork → Discard commits" (it would reset it to upstream).
 - **Never write `kaixxx/noScribe#N` in a pull request or issue on the fork.** GitHub turns it into
@@ -170,7 +172,7 @@ changing a number, and check whether a test in `tests/` pins it.
 ## The Voxtral pull request
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
-`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review) from `upstream/main` plus `local/main`'s
+`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review) from `upstream/main` plus `main`'s
 Voxtral set (the earlier branch of that name, tip `8f132bc`, was deleted once it had fallen far
 behind). It is cut from `upstream-main` and carries **neither of the still-open small PRs**, so its diff
 is Voxtral alone; it overlaps with both textually in `noScribe/main.py`, and whichever merges
@@ -178,8 +180,8 @@ first, the rest is rebased. It is five commits (engine, integration, tests, tool
 that shape when rebuilding. `docs/scripts/` needs `git add -f` there -- upstream's `.gitignore`
 has a `scripts/` entry. The PR text lives in `benchmarks-local/voxtral-pr-description.md`.
 
-To refresh the branch after `local/main` moved: check the Voxtral-only files out of
-`local/main` wholesale, and carry `main.py` changes over by hand -- its Voxtral hunks sit
+To refresh the branch after `main` moved: check the Voxtral-only files out of
+`main` wholesale, and carry `main.py` changes over by hand -- its Voxtral hunks sit
 between the other branches' hunks but share only two with them (`diarization = None`, which the
 voice check adds identically, and the `try:` block that dispatches on the engine).
 `tools/check_local_current.py` must stay green for the branch; its `INTENTIONAL` table lists the
@@ -215,14 +217,14 @@ Every branch Voxtral depended on is part of upstream: the three it touched only 
 (speaker-names, header-labels, torch-2.13-stack) and the one hard dependency,
 `fix/lazy-main-import` (`_SUBMODULES`).
 
-**On `local/main` but neither Voxtral nor one of the open small PRs** — keep them out of the
+**On `main` but neither Voxtral nor one of the open small PRs** — keep them out of the
 Voxtral PR:
 
 - `noScribe/voice_check.py`, its second call to the diarization worker
   (`_run_voice_embeddings`, the `embed_spans` mode and `_centroids` in `pyannote_mp_worker.py`),
   `check_voices` in `main.py`, `tests/test_voice_{check,rewrite,embeddings}.py` and the
   `voice_check_*` keys in all nine languages are engine-agnostic and have their own branch,
-  `feature/voice-verified-speakers`, cut from `upstream-main` and merged into `local/main`: upstream
+  `feature/voice-verified-speakers`, cut from `upstream-main` and merged into `main`: upstream
   PR #351. It checks each passage's speaker against the voice and replaced the sentence
   split (`split_at_speaker_change`), which moved 83 of 100 words rightly on Whisper segments
   overall but did net harm on some corpora. Its margins are chosen for the fewest wrong words
@@ -237,7 +239,7 @@ Voxtral PR:
 - **Nemotron 3 Diarization** (`noScribe/nemotron_mp_worker.py`, `voice_check.Probabilities`,
   `_diarization_engine` in `main.py`, `loading_nemotron` in all nine languages,
   `tests/test_nemotron_worker.py`) has its own branch, `feature/nemotron-diarization`, stacked on
-  `feature/voice-verified-speakers` rather than cut from `upstream-main`, and merged into `local/main`.
+  `feature/voice-verified-speakers` rather than cut from `upstream-main`, and merged into `main`.
   Proposed upstream in issue #360 (Kai agreed on transformers, no pyannote fallback, 8 speakers
   as the limit); measurements in `benchmarks-local/nemotron/README.md`: fewer wrong speakers
   than pyannote in English and German, ~7x faster on CPU, the voice check on its probabilities
@@ -253,7 +255,7 @@ Voxtral PR:
   `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
   from `upstream-main`. It numbers where a speaker is first *written*; numbering the diarization instead
   missed 17 of 132 recordings (the docstring has the measurement). Because a label named before
-  the transcript exists no longer says who is meant, `local/main` reports the voice check's
+  the transcript exists no longer says who is meant, `main` reports the voice check's
   moved passages only after the transcription, under the written names — lines that
   exist only where these branches meet (`tools/check_local_current.py` lists them), so whichever
   of them goes upstream later has to bring its half.
@@ -275,7 +277,7 @@ makes it look:
   kaixxx/noScribe and noscribe.de). It exists for the fork alone. This one is not a judgement
   call; leaving it in would push the fork's advertising into the upstream project.
 - **`CLAUDE.md`** — upstream has no such file, and this one describes the fork's own workflow.
-- **`tools/check_local_current.py`** — it checks `local/main` against the *fork's* PR branches;
+- **`tools/check_local_current.py`** — it checks `main` against the *fork's* PR branches;
   upstream has nothing for it to do.
 - **The deletion of `environments/marked_for_deletion/`** — that directory is the upstream
   maintainers' own staging area (created 2025-05-29, and the name says they mean to remove it
