@@ -244,8 +244,9 @@ Voxtral PR:
   as the limit); measurements in `benchmarks-local/nemotron/README.md`: fewer wrong speakers
   than pyannote in English and German, ~7x faster on CPU, the voice check on its probabilities
   roughly halves wrong words against today's. It chunks the feature extraction itself because
-  transformers' one-pass spectrogram needs ~4 GB per hour of audio (huggingface/transformers#49090;
-  a bit-identical fix waits on `happyarts/transformers`, branch `fix-parakeet-fbank-memory`, no PR).
+  transformers' one-pass spectrogram needs ~4 GB per hour of audio; transformers keeps that by
+  design (huggingface/transformers#49090), so the worker uses the processor's streaming calls
+  for the features, bit-identical, and runs the model offline.
   Not done until upstream agrees and transformers 5.18 is released: removing pyannote (worker,
   models, `pyannote_fast_embeddings`, requirements, specs), dropping the speaker-count setting,
   shipping bf16 weights with the OpenMDW licence, and a frozen-build proof of transformers'
