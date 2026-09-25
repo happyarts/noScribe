@@ -247,10 +247,14 @@ Voxtral PR:
   transformers' one-pass spectrogram needs ~4 GB per hour of audio; transformers keeps that by
   design (huggingface/transformers#49090), so the worker uses the processor's streaming calls
   for the features, bit-identical, and runs the model offline.
+  The branch is two commits (worker, integration) ready for review; its PR text is in
+  `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
+  A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
+  and `nemotron_asr_streaming` plus torchcodec's metadata, and PyInstaller must be current
+  (6.4 fails in transformers' own import-structure scan of the frozen `__init__.pyc`; 6.22 works).
   Not done until upstream agrees and transformers 5.18 is released: removing pyannote (worker,
   models, `pyannote_fast_embeddings`, requirements, specs), dropping the speaker-count setting,
-  shipping bf16 weights with the OpenMDW licence, and a frozen-build proof of transformers'
-  hidden imports.
+  shipping bf16 weights with the OpenMDW licence, and `transformers>=5.18` in the requirements.
 - Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`, the
   reworded `warn_speaker_names_more_speakers` in all nine languages, tests in
   `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
