@@ -34,6 +34,10 @@ NOISE = re.compile(r"^[\s)\](}#*=/-]*$")
 # gibt, deshalb kann eine Branch-Zeile hier zu Recht anders lauten. Jede
 # Ausnahme braucht eine Begründung, sonst verdeckt sie echte Drift.
 INTENTIONAL = {
+    # feature/nemotron-diarization liest seinen CPU-Schalter wie die beiden alten;
+    # main liest alle drei ueber get_config_flag (fix/config-booleans).
+    "force_nemotron_cpu = get_config('force_nemotron_cpu', '').lower() == 'true'":
+        "lokal ueber get_config_flag",
     # fix/whisper-speech-map-from-diarization reicht die Diarisierung an Whisper;
     # lokal nur pyannotes (Nemotrons kurze Turns kosten auf Deutsch Woerter), und
     # lokal ohne `info =`, weil main das _Info-Objekt nicht zurueckgibt.
