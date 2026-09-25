@@ -41,6 +41,7 @@ def test_transcript_uses_actual_converted_media_position(
         _apply_speaker_name=lambda speaker, job: m.App._apply_speaker_name(app, speaker, job),
         _speaker_key=m.App._speaker_key,
         _handle_cuda_fallback=lambda *args: False,
+        _diarization_engine=lambda job: "pyannote",
     )
     m.App._process_single_job(app, job)
 
