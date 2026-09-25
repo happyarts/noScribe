@@ -250,8 +250,9 @@ Voxtral PR:
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
-  and `nemotron_asr_streaming` plus torchcodec's metadata, and PyInstaller must be current
-  (6.4 fails in transformers' own import-structure scan of the frozen `__init__.pyc`; 6.22 works).
+  and `nemotron_asr_streaming` plus torchcodec's metadata, and PyInstaller must be 6.14.0 or
+  newer (bisected: 6.4-6.13 fail in transformers' own import-structure scan of the frozen
+  `__init__.pyc`), which the macOS and Linux requirements now ask for; Windows pins 6.14.1.
   Not done until upstream agrees and transformers 5.18 is released: removing pyannote (worker,
   models, `pyannote_fast_embeddings`, requirements, specs), dropping the speaker-count setting,
   shipping bf16 weights with the OpenMDW licence, and `transformers>=5.18` in the requirements.

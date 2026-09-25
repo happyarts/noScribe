@@ -20,7 +20,8 @@ importlib-resources>=5.10; python_version < "3.12"
 matplotlib>=3.11
 Pillow
 pyannote.audio>=4
-pyinstaller
+# 6.14 or newer: in older builds transformers' import-structure scan fails on the frozen __init__.pyc
+pyinstaller>=6.14
 pyobjc
 python-i18n
 PyYAML
