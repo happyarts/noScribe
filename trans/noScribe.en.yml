@@ -98,10 +98,13 @@ en:
   audio_conversion_skipped_invalid_packets: '%{count} invalid audio packets were skipped.'
   start_identifying_speakers: 'Speaker identification...'
   loading_pyannote: 'Loading pyannote'
+  loading_nemotron: 'Loading Nemotron'
+  nemotron_all_speakers: "All 8 of Nemotron's speaker channels are in use: if more people speak, some were merged with others."
   start_canceling: 'Canceling... (please wait a second)'
   start_transcription: 'Transcription...'
   loading_whisper: 'Loading whisper'
   pyannote_cuda_retry: 'PyAnnote CUDA error detected. Retrying on CPU.'
+  nemotron_cuda_retry: 'Nemotron CUDA error detected. Retrying on CPU.'
   whisper_cuda_retry: 'Whisper CUDA error detected. Retrying on CPU.'
   vad: 'Voice activity detection...'
   language_detect: 'Detected language "%{lang}" with probability %{prob}'
@@ -145,6 +148,12 @@ en:
   rescue_saving_failed: 'Error: Saving to the original filename failed. The alternate filename also exists. I have to quit. (Make sure your transcript is not already opened in Word!)'
   pyannote_cuda_error_prompt: |-
     PyAnnote diarization failed with a CUDA error:
+
+    %{error}
+
+    Switch to CPU processing and retry?
+  nemotron_cuda_error_prompt: |-
+    Nemotron diarization failed with a CUDA error:
 
     %{error}
 

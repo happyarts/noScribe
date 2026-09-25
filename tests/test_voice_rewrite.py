@@ -107,7 +107,8 @@ def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True):
     job = types.SimpleNamespace(
         start=0, timestamps=True, timestamp_interval=20000, timestamp_color='#78909C', pause=1,
         pause_marker='.', speaker_detection='auto', overlapping=overlapping, file_ext=file_ext,
-        auto_save=False, speaker_names=list(names), speaker_name_map={}, speaker_centroids=VOICES)
+        auto_save=False, speaker_names=list(names), speaker_name_map={}, speaker_centroids=VOICES,
+        speaker_probabilities={})
     d = AdvancedHTMLParser.AdvancedHTMLParser()
     d.parseStr('<html><head></head><body></body></html>')
     main_body = d.createElement('div')
@@ -225,6 +226,34 @@ def test_a_moved_answer_is_written_under_its_speaker():
     assert any('voice check: 00:00:02 S00 -> S01' in line for line in h.app.logged)
 
 
+def test_a_diarization_with_its_own_probabilities_is_its_own_second_opinion(tmp_path):
+    """With job.speaker_probabilities (nemotron_mp_worker's result) the check reads
+    them instead of asking pyannote for voices: each column is the speaker the
+    worker's `columns` names, whatever the order, and a column the diarization
+    never named cannot win a unit even where it is loudest."""
+    import numpy as np
+    turns, segments = two_people()
+    h = harness(turns, voice_at=None)
+    for segment in segments:
+        h.on_segment(segment)
+    rows = np.zeros((1000, 3), dtype=np.float16)  # 10 s, columns: SPEAKER_01, SPEAKER_00, SPEAKER_02
+    rows[:170, 1] = 0.9    # S00 asks, up to 1.7 s
+    rows[170:, 0] = 0.9    # S01 from there on
+    rows[:, 2] = 0.95      # never named, loudest everywhere
+    np.save(tmp_path / 'speakers.npy', rows)
+    h.job.speaker_probabilities = {'path': str(tmp_path / 'speakers.npy'), 'frame_s': 0.01,
+                                   'columns': ['SPEAKER_01', 'SPEAKER_00', 'SPEAKER_02']}
+
+    def no_voices(*args):
+        raise AssertionError('the probabilities are the evidence; no embedding call')
+
+    h.app._run_voice_embeddings = no_voices
+    h.check_voices()
+    first, second = paragraphs(h)
+    assert first.startswith('S00:') and first.endswith('Does it help?')
+    assert second.startswith('S01:') and 'Yes, sure.' in second
+
+
 def test_names_follow_the_order_in_which_the_voices_are_first_heard():
     """The diarization put the opening under S01; the voice says it is S00. The
     first name belongs to whoever is heard first, so it has to change hands."""
@@ -323,7 +352,7 @@ def test_stop_during_the_check_ends_the_check_and_not_the_job():
     """Stop pressed while the check waits for its voices -- which can take
     minutes -- used to cancel the job, and a complete transcript was reported as
     canceled. The check is what Stop ends (the worker is terminated before the
-    cancel is raised, see _run_pyannote_worker); the job goes on to finish with
+    cancel is raised, see _run_diarization_worker); the job goes on to finish with
     the transcript as diarized, and the screen says why nothing was checked."""
     turns, segments = two_people()
     h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
@@ -341,7 +370,7 @@ def test_stop_during_the_check_ends_the_check_and_not_the_job():
 
 
 def _pump(monkeypatch, messages, cancel_after=None):
-    """Run the real _run_pyannote_worker against a worker that sends
+    """Run the real _run_diarization_worker against a worker that sends
     `messages`, in a thread instead of a spawned process; returns what was
     logged, as (text, where) pairs, and the error raised, if any."""
     import queue
@@ -392,7 +421,7 @@ def _pump(monkeypatch, messages, cancel_after=None):
     app.set_progress = lambda *a, **k: None
     job = types.SimpleNamespace(speaker_detection='auto')
     try:
-        m.App._run_pyannote_worker(app, 'audio.wav', job, {}, errors_to='file')
+        m.App._run_diarization_worker(app, 'audio.wav', job, {}, 'pyannote', errors_to='file')
         return logged, None
     except Exception as err:
         return logged, err
