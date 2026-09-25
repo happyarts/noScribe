@@ -193,9 +193,10 @@ class Probabilities:
     frame by frame (noScribe.nemotron_mp_worker): a unit's score per speaker is
     the model's mean probability for that speaker over the unit.
 
-    Measured on the pool the margins above were chosen on, minus what is in
-    Nemotron's training data (AMI train/dev, VoxConverse): 16 AMI test meetings
-    and 77 CallHome calls in five languages. Words under the wrong speaker
+    Measured on the pool the margins above were chosen on, minus what is known to
+    be in Nemotron's training data (AMI train/dev, VoxConverse): 16 AMI test
+    meetings and 77 CallHome calls in five languages (CallHome Part 1 is in it,
+    whether these calls are is not known). Words under the wrong speaker
     afterwards:
 
                                           faster-whisper   second engine
@@ -210,6 +211,10 @@ class Probabilities:
     words wrong on the tuning half, each more than the last, and the other half
     agreed. On the AMI meetings alone the gain over pyannote with Voice is
     smaller (faster-whisper 2.16 -> 1.79 %, the second engine 2.57 -> 2.51 %).
+    A unit the model hears almost no one in moves on small differences too;
+    leaving it alone below a mean probability of 0.02, 0.05, 0.1 or 0.2 left
+    more words wrong each time (0.02: 1 more with faster-whisper, 32 with the
+    second engine), so it is not done.
 
     probabilities   rows of per-speaker probabilities, one row per frame_s, as
                     a numpy array

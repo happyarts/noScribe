@@ -101,11 +101,13 @@ fr:
   start_identifying_speakers: "Identification des locuteurs en cours..."
   loading_pyannote: "Chargement de pyannote"
   loading_nemotron: "Chargement de Nemotron"
+  nemotron_all_speakers: "Les 8 canaux de locuteurs de Nemotron sont tous utilisés : si davantage de personnes parlent, certaines ont été fusionnées avec d'autres."
   start_canceling: "Annulation en cours... (veuillez patienter un instant)"
   start_transcription: "Transcription en cours..."
   loading_whisper: "Chargement de whisper"
   loading_voxtral: "Chargement de Voxtral"
   pyannote_cuda_retry: 'Erreur CUDA PyAnnote détectée. Nouvel essai sur le CPU.'
+  nemotron_cuda_retry: 'Erreur CUDA Nemotron détectée. Nouvel essai sur le CPU.'
   whisper_cuda_retry: 'Erreur CUDA Whisper détectée. Nouvel essai sur le CPU.'
   vad: "Détection d'activité vocale..."
   language_detect: 'Langue détectée « %{lang} » avec une probabilité de %{prob}'
@@ -143,6 +145,12 @@ fr:
   rescue_saving_failed: "Erreur : Échec de l'enregistrement sous le nom de fichier d'origine. Le nom de fichier alternatif existe également. Je dois quitter. (Assurez-vous que votre transcription n'est pas déjà ouverte dans Word !)"
   pyannote_cuda_error_prompt: |-
     La diarisation PyAnnote a échoué avec une erreur CUDA :
+
+    %{error}
+
+    Basculer sur un traitement CPU et réessayer ?
+  nemotron_cuda_error_prompt: |-
+    La diarisation Nemotron a échoué avec une erreur CUDA :
 
     %{error}
 

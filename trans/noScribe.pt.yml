@@ -102,11 +102,13 @@ pt:
   start_identifying_speakers: 'Identificação de alto-falantes...'
   loading_pyannote: 'Carregando pyannote'
   loading_nemotron: 'Carregando Nemotron'
+  nemotron_all_speakers: "Os 8 canais de orador do Nemotron estão todos em uso: se falarem mais pessoas, algumas foram fundidas com outras."
   start_canceling: 'Cancelando... (aguarde um segundo)'
   start_transcription: 'Transcrição...'
   loading_whisper: 'Carregando whisper'
   loading_voxtral: 'Carregando Voxtral'
   pyannote_cuda_retry: 'Erro CUDA do PyAnnote detectado. Tentando novamente na CPU.'
+  nemotron_cuda_retry: 'Erro CUDA do Nemotron detectado. Tentando novamente na CPU.'
   whisper_cuda_retry: 'Erro CUDA do Whisper detectado. Tentando novamente na CPU.'
   vad: 'Detecção de atividade de voz...'
   language_detect: 'Idioma detectado "%{lang}" com probabilidade %{prob}'
@@ -144,6 +146,12 @@ pt:
   rescue_saving_failed: 'Erro: Falha ao salvar com o nome de arquivo original. O nome alternativo também existe. Preciso sair. (Certifique-se de que sua transcrição não esteja aberta no Word!)'
   pyannote_cuda_error_prompt: |-
     A diarização do PyAnnote falhou com um erro CUDA:
+
+    %{error}
+
+    Alternar para processamento na CPU e tentar novamente?
+  nemotron_cuda_error_prompt: |-
+    A diarização do Nemotron falhou com um erro CUDA:
 
     %{error}
 

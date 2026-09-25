@@ -1,12 +1,11 @@
 """noScribe.nemotron_mp_worker without the model: the turns it hands to main.py,
-and the voice check's evidence built from its speaker probabilities."""
+the features it builds, and when `auto` may choose it."""
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from noScribe import nemotron_mp_worker as nw
-from noScribe import voice_check as vc
 
 
 def test_turns_are_noscribe_turns_sorted_by_start():
@@ -17,50 +16,6 @@ def test_turns_are_noscribe_turns_sorted_by_start():
                     {'Start': 5.0, 'End': 5.0, 'Speaker': 1}])
     assert got == [{'start': 0, 'end': 2500, 'label': 'SPEAKER_00'},
                    {'start': 3200, 'end': 4000, 'label': 'SPEAKER_01'}]
-
-
-def probabilities(*rows_per_second):
-    """One row per 10 ms: each argument is (seconds, [p per speaker])."""
-    return np.array([p for seconds, p in rows_per_second for _ in range(round(seconds * 100))], dtype=np.float32)
-
-
-def test_a_unit_scores_the_mean_probability_of_each_named_speaker():
-    probs = probabilities((1.0, [0.9, 0.1, 0.0]), (1.0, [0.1, 0.8, 0.0]))
-    evidence = vc.Probabilities(probs, {'S00': 0, 'S01': 1}, 0.01)
-    (first, second, both) = evidence.scores([[0.0, 1.0], [1.0, 2.0], [0.0, 2.0]])
-    assert first == pytest.approx({'S00': 0.9, 'S01': 0.1})
-    assert second['S01'] > second['S00'] and abs(both['S00'] - 0.5) < 1e-6
-    assert evidence.margins([]) == (0.0, 0.0)
-
-
-def test_a_span_beyond_the_probabilities_gives_nothing_to_go_by():
-    evidence = vc.Probabilities(probabilities((1.0, [0.9, 0.1])), {'S00': 0, 'S01': 1}, 0.01)
-    assert evidence.scores([[5.0, 6.0]]) == [None]
-
-
-def test_only_the_columns_it_is_given_take_part():
-    """main.py passes the speakers the diarization named: a column that never
-    reached the threshold must not win a unit."""
-    evidence = vc.Probabilities(probabilities((1.0, [0.2, 0.1, 0.6])), {'S00': 0, 'S01': 1}, 0.01)
-    assert evidence.labels == {'S00', 'S01'} and set(evidence.scores([[0.0, 1.0]])[0]) == {'S00', 'S01'}
-
-
-def test_float16_rows_are_averaged_without_overflow():
-    """The worker saves float16; a mean over thousands of rows must not be
-    accumulated in float16."""
-    probs = np.full((200000, 2), 0.75, dtype=np.float16)
-    assert vc.Probabilities(probs, {'S00': 0, 'S01': 1}, 0.01).scores([[0.0, 2000.0]])[0]['S00'] == pytest.approx(0.75)
-
-
-def test_a_unit_goes_to_the_speaker_the_model_hears_most_in_it():
-    """Margin 0: the second sentence of a segment the diarization gave to S00
-    moves to S01 as soon as the model hears S01 more there."""
-    ws = [{'word': ' Right?', 'start': 0.0, 'end': 0.8}, {'word': ' Sure.', 'start': 1.2, 'end': 1.9}]
-    seg = {'start': 0.0, 'end': 1.9, 'text': ' Right? Sure.', 'words': ws}
-    probs = probabilities((1.0, [0.9, 0.1]), (1.0, [0.45, 0.55]))
-    turns = [{'start': 0, 'end': 1900, 'label': 'S00'}]
-    passages, moves = vc.relabel([(seg, 'S00', False)], turns, vc.Probabilities(probs, {'S00': 0, 'S01': 1}, 0.01))
-    assert [(p['text'], s) for p, s in passages] == [(' Right?', 'S00'), (' Sure.', 'S01')] and len(moves) == 1
 
 
 def test_features_in_chunks_equal_one_pass():
@@ -86,19 +41,26 @@ def test_features_in_chunks_equal_one_pass():
             assert (got.attention_mask == whole.attention_mask.long()).all()
 
 
-def test_available_says_whether_transformers_knows_the_model(monkeypatch):
+def test_auto_needs_the_model_in_transformers_and_its_weights_on_disk(monkeypatch, tmp_path):
     """main.py picks the engine in the GUI process, which must not import transformers
-    for it: `available` only looks for the model's directory in the installed package
-    and for its weights."""
+    for it, and `auto` must never start a download."""
     import importlib.util
     import subprocess
     import sys
+    import types
+    import huggingface_hub
     code = ('import sys; from noScribe.nemotron_mp_worker import available; available(); '
             'assert "transformers" not in sys.modules')
     subprocess.run([sys.executable, '-c', code], check=True, cwd=Path(__file__).resolve().parent.parent)
-    import huggingface_hub
+
+    (tmp_path / 'models' / 'nemotron3_diarization').mkdir(parents=True)
+    knows = types.SimpleNamespace(origin=str(tmp_path / '__init__.py'))
+    older = types.SimpleNamespace(origin=str(tmp_path / 'models' / '__init__.py'))
     monkeypatch.setattr(nw, 'model_source', lambda: nw.MODEL_REPO)
-    monkeypatch.setattr(huggingface_hub, 'try_to_load_from_cache', lambda repo, name: None)
-    assert nw.available() is False  # weights neither shipped nor cached: no download behind `auto`
-    monkeypatch.setattr(importlib.util, 'find_spec', lambda name: None)
-    assert nw.available() is False
+    whole = {'config.json', 'processor_config.json', 'model.safetensors'}
+    for spec, cached, expected in ((knows, whole, True), (knows, set(), False), (knows, {'model.safetensors'}, False),
+                                   (older, whole, False), (None, whole, False)):
+        monkeypatch.setattr(importlib.util, 'find_spec', lambda name, spec=spec: spec)
+        monkeypatch.setattr(huggingface_hub, 'try_to_load_from_cache',
+                            lambda repo, name, cached=cached: f'/cache/{name}' if name in cached else None)
+        assert nw.available() is expected, (spec, cached)

@@ -1,23 +1,22 @@
 """Speaker diarization with NVIDIA's Nemotron 3 Diarization, in a child process.
 
-An alternative to pyannote_mp_worker, chosen with `diarization_engine: nemotron`
-in config.yml (which downloads the model on first use), and by default (`auto`)
-whenever the installed transformers knows the model and its weights are here. It answers with the same result message -- turns as
+An alternative to pyannote_mp_worker; main.App._diarization_engine picks one.
+It answers with the same result message -- turns as
 {"start": ms, "end": ms, "label": "SPEAKER_nn"} -- and instead of centroids it
 leaves the model's own speaker probabilities (one row per FRAME_S, one column
 per speaker, float16) in a .npy file next to the audio, which is what the voice
 check compares against (noScribe.voice_check.Probabilities).
 
-Measured against pyannote in the fork's benchmarks-local/nemotron/README.md: on
-the 15 AMI test meetings (not in Nemotron's training data; VoxConverse and AMI
-train/dev are) 11.6 % of words end up under the wrong speaker against 15.7 %,
-at about a seventh of the time; on 40 German CallHome calls 6.8 % of speech time
-against 11.8 %; a 4.8 h video call runs through its speaker cache in 50 s.
+Measured against pyannote (issue #360): on 15 of the 16 AMI test meetings (not
+in Nemotron's training data; VoxConverse and AMI train/dev are) 11.6 % of words
+end up under the wrong speaker against 15.7 %, at about a seventh of the time;
+on 40 German CallHome calls 6.8 % of speech time against 11.8 % (CallHome Part 1
+is in the training data, whether these calls are is not known); a 4.8 h video
+call runs through its speaker cache in 50 s.
 
-What it cannot do: more than eight speakers, and a fixed number of speakers
-(main.py keeps such a job with pyannote). It needs transformers with `nemotron3_diarization`, which is
-on transformers' main branch only so far, and neither the requirements nor the
-PyInstaller specs carry that yet.
+What it cannot do: more than eight speakers (it folds the others into them;
+main.py says so when all eight are in use), and a fixed number of speakers. It needs transformers with
+`nemotron3_diarization`, 5.18 or newer.
 
 Messages:
   {"type":"log","level":"info|warn|error|debug","msg":str}
@@ -62,10 +61,22 @@ def model_source():
     return MODEL_REPO
 
 
+def weights_on_disk():
+    """Whether the model is shipped under models/ or already whole in the Hugging Face
+    cache: the worker then loads it without asking the Hub."""
+    if model_source() != MODEL_REPO:
+        return True
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        return all(isinstance(try_to_load_from_cache(MODEL_REPO, name), str)
+                   for name in ("config.json", "processor_config.json", "model.safetensors"))
+    except Exception:
+        return False
+
+
 def available():
-    """Whether the installed transformers knows the model and its weights are here,
-    shipped or in the Hugging Face cache, so `auto` never starts a download or fails
-    offline. Found without importing transformers: main.py asks this in the GUI
+    """Whether the installed transformers knows the model and its weights are on
+    disk. Found without importing transformers: main.py asks this in the GUI
     process, which never loads it."""
     try:
         import importlib.util
@@ -74,10 +85,7 @@ def available():
             return False
         if not os.path.isdir(os.path.join(os.path.dirname(spec.origin), "models", "nemotron3_diarization")):
             return False
-        if model_source() != MODEL_REPO:
-            return True
-        from huggingface_hub import try_to_load_from_cache
-        return isinstance(try_to_load_from_cache(MODEL_REPO, "model.safetensors"), str)
+        return weights_on_disk()
     except Exception:
         return False
 
@@ -153,8 +161,8 @@ def nemotron_proc_entrypoint(args: dict, q):
             from transformers.models import nemotron3_diarization  # noqa: F401
         except ImportError:
             import transformers
-            raise RuntimeError(f"Nemotron diarization needs a transformers that knows the model "
-                               f"(5.18 or newer); this one is {transformers.__version__}") from None
+            raise RuntimeError(f"Nemotron diarization needs transformers 5.18 or newer; "
+                               f"this one is {transformers.__version__}") from None
 
         audio_file = args["audio_path"]
         if not os.path.exists(audio_file):
@@ -162,9 +170,12 @@ def nemotron_proc_entrypoint(args: dict, q):
         device = select_device(args.get("device", ""))
 
         source = model_source()
+        # Weights on disk load without asking the Hub, so a job stays offline
+        # and a new upload of the model cannot change results unannounced.
+        offline = weights_on_disk()
         plog("debug", f"Loading Nemotron diarization from {source} on {device}")
         q.put({"type": "progress", "pct": 0})
-        processor = AutoProcessor.from_pretrained(source)
+        processor = AutoProcessor.from_pretrained(source, local_files_only=offline)
 
         waveform, sample_rate = load_waveform(audio_file)
         audio = waveform[0].numpy()  # ToWav writes mono; a view, not a copy
@@ -175,7 +186,8 @@ def nemotron_proc_entrypoint(args: dict, q):
         inputs = features(processor, audio, sample_rate, device=device)
         del audio
         # Loaded after the features, so it is not held through their peak.
-        model = AutoModelForAudioFrameClassification.from_pretrained(source).to(device).eval()
+        model = AutoModelForAudioFrameClassification.from_pretrained(
+            source, local_files_only=offline).to(device).eval()
         inputs = inputs.to(device, dtype=model.dtype)
         # Offline mode: the whole recording in one call, cut into chunks with a
         # speaker cache inside the model, so there is no length limit.

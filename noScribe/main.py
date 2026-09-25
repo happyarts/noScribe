@@ -236,6 +236,7 @@ def get_config_flag(key: str, default: bool) -> bool:
     return default
 
 force_pyannote_cpu = get_config_flag('force_pyannote_cpu', False)
+force_nemotron_cpu = get_config_flag('force_nemotron_cpu', False)
 force_whisper_cpu = get_config_flag('force_whisper_cpu', False)
 
 _CUDA_ERROR_KEYWORDS = (
@@ -254,7 +255,7 @@ _CUDA_ERROR_KEYWORDS = (
 PAUSE_OPTIONS = ['none', '1sec+', '2sec+', '3sec+']
 
 # The diarization engines by the name their log lines and the transcript header give them.
-DIARIZATION_ENGINES = {'pyannote': 'PyAnnote', 'nemotron': 'Nemotron'}
+DIARIZATION_ENGINES = {'pyannote': 'pyannote', 'nemotron': 'Nemotron'}
 
 
 def pause_label(pause) -> str:
@@ -2566,6 +2567,7 @@ class App(ctk.CTk):
         config['last_timestamps'] = self.check_box_timestamps.get()
         config['last_disfluencies'] = self.check_box_disfluencies.get()
         config['force_pyannote_cpu'] = str(force_pyannote_cpu)
+        config['force_nemotron_cpu'] = str(force_nemotron_cpu)
         config['force_whisper_cpu'] = str(force_whisper_cpu)
         save_config()
 
@@ -3006,10 +3008,14 @@ class App(ctk.CTk):
                                 diarization = self._run_diarize_subprocess(tmp_audio_file, job, diarization_engine)
                                 break
                             except Exception as err:
-                                if self._handle_cuda_fallback('pyannote', err):
-                                    self.logn(t('pyannote_cuda_retry'), 'highlight')
+                                if self._handle_cuda_fallback(diarization_engine, err):
+                                    self.logn(t(f'{diarization_engine}_cuda_retry'), 'highlight')
                                     continue
                                 raise
+
+                        # Nemotron has eight speaker channels and folds any further voice into them
+                        if diarization_engine == 'nemotron' and len({s['label'] for s in diarization}) >= 8:
+                            self.logn(t('nemotron_all_speakers'), 'highlight')
 
                         # write segments to log file
                         for segment in diarization:
@@ -3396,10 +3402,10 @@ class App(ctk.CTk):
                         if probabilities:
                             import numpy as np
                             named = {turn['label'] for turn in turns}
-                            columns = {short_label(label): column for column, label in enumerate(probabilities['columns'])}
                             evidence = voice_check.Probabilities(
-                                np.load(probabilities['path']),
-                                {label: column for label, column in columns.items() if label in named},
+                                np.load(probabilities['path'], mmap_mode='r'),
+                                {short_label(label): column for column, label in enumerate(probabilities['columns'])
+                                 if short_label(label) in named},
                                 probabilities['frame_s'])
                         else:
                             evidence = voice_check.Voice(
@@ -3631,6 +3637,7 @@ class App(ctk.CTk):
 
     def _handle_cuda_fallback(self, component: str, error: Exception) -> bool:
         global force_pyannote_cpu
+        global force_nemotron_cpu
         global force_whisper_cpu
         message = str(error).strip()
         if not _is_cuda_error_message(message):
@@ -3643,6 +3650,17 @@ class App(ctk.CTk):
             if tk.messagebox.askyesno(title='noScribe', message=prompt):
                 force_pyannote_cpu = True
                 config['force_pyannote_cpu'] = 'true'
+                save_config()
+                return True
+            return False
+
+        if component == 'nemotron':
+            if force_nemotron_cpu:
+                return False
+            prompt = t('nemotron_cuda_error_prompt', error=message)
+            if tk.messagebox.askyesno(title='noScribe', message=prompt):
+                force_nemotron_cpu = True
+                config['force_nemotron_cpu'] = 'true'
                 save_config()
                 return True
             return False
@@ -3880,13 +3898,13 @@ class App(ctk.CTk):
         from .whisper_mp_worker import whisper_proc_entrypoint
         self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)
 
-    def _run_diarize_subprocess(self, tmp_audio_file: str, job, engine='pyannote'):
+    def _run_diarize_subprocess(self, tmp_audio_file: str, job, engine: str):
         """Spawn a subprocess to run diarization and return list of segments.
         Streams child logs/progress back to GUI and honors cancel.
         """
         result = self._run_diarization_worker(tmp_audio_file, job, {
             "num_speakers": (int(job.speaker_detection) if str(job.speaker_detection).isdigit() else None),
-        }, engine=engine)
+        }, engine)
         # Whichever second opinion the worker brought: pyannote its centroids,
         # a model with its own speaker probabilities those.
         job.speaker_centroids = result.get("centroids") or {}
@@ -3894,12 +3912,15 @@ class App(ctk.CTk):
         return result.get("segments") or []
 
     def _diarization_engine(self, job) -> str:
-        """'nemotron' or 'pyannote', from `diarization_engine` in config.yml: `auto`
-        (the default) takes Nemotron whenever the installed transformers knows the
-        model and its weights are here. Nemotron finds the number of speakers itself and cannot be held to one,
-        so a job with a fixed number of speakers stays with pyannote."""
+        """'nemotron' or 'pyannote', from `diarization_engine` in config.yml.
+
+        `auto` (the default) takes Nemotron when the installed transformers knows the
+        model and its weights are on disk, shipped in models/ or in the Hugging Face
+        cache, so it never starts a download; `nemotron` downloads them on first use,
+        `pyannote` keeps the old engine. Nemotron finds the number of speakers itself
+        and cannot be held to one, so a job with a fixed number stays with pyannote."""
         from .nemotron_mp_worker import available
-        engine = get_config('diarization_engine', 'auto')
+        engine = str(get_config('diarization_engine', 'auto')).lower()
         if str(job.speaker_detection).isdigit():
             return 'pyannote'
         return 'nemotron' if engine == 'nemotron' or (engine == 'auto' and available()) else 'pyannote'
@@ -3910,11 +3931,11 @@ class App(ctk.CTk):
         A second, short call to the diarization worker: the embedding model lives
         there, and the spans only exist once the transcript does.
         """
-        result = self._run_diarization_worker(tmp_audio_file, job, {"embed_spans": spans}, errors_to='file')
+        result = self._run_diarization_worker(tmp_audio_file, job, {"embed_spans": spans}, 'pyannote', errors_to='file')
         return result.get("embeddings") or []
 
-    def _run_diarization_worker(self, tmp_audio_file: str, job, extra_args: dict, errors_to='both',
-                                engine='pyannote') -> dict:
+    def _run_diarization_worker(self, tmp_audio_file: str, job, extra_args: dict, engine: str,
+                                errors_to='both') -> dict:
         """Run a diarization worker once and return its result message: pyannote_mp_worker,
         or nemotron_mp_worker, which speaks the same messages. errors_to='file' keeps a
         failure off the screen, for a call the job can do without."""
@@ -3927,7 +3948,7 @@ class App(ctk.CTk):
             from .pyannote_mp_worker import pyannote_proc_entrypoint as entry
         name = DIARIZATION_ENGINES[engine]
         args = {
-            "device": 'cpu' if force_pyannote_cpu else '',
+            "device": 'cpu' if (force_nemotron_cpu if engine == 'nemotron' else force_pyannote_cpu) else '',
             "audio_path": tmp_audio_file,
             **extra_args,
         }
@@ -3979,7 +4000,7 @@ class App(ctk.CTk):
                         self.set_progress(2, progress_percent * 0.3, job.speaker_detection)
                     elif step_name == 'embeddings':
                         self.set_progress(2, 30 + (progress_percent * 0.7), job.speaker_detection)
-                    elif "step" not in msg:  # a worker without steps reports the whole
+                    elif step_name == name:  # a worker without steps reports the whole
                         self.set_progress(2, progress_percent, job.speaker_detection)
                 elif mtype == "result":
                     close_progress()

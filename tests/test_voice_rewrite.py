@@ -425,7 +425,7 @@ def _pump(monkeypatch, messages, cancel_after=None):
     app.set_progress = lambda *a, **k: None
     job = types.SimpleNamespace(speaker_detection='auto')
     try:
-        m.App._run_diarization_worker(app, 'audio.wav', job, {}, errors_to='file')
+        m.App._run_diarization_worker(app, 'audio.wav', job, {}, 'pyannote', errors_to='file')
         return logged, None
     except Exception as err:
         return logged, err
