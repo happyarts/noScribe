@@ -247,6 +247,13 @@ Voxtral PR:
   transformers' one-pass spectrogram needs ~4 GB per hour of audio; transformers keeps that by
   design (huggingface/transformers#49090), so the worker uses the processor's streaming calls
   for the features, bit-identical, and runs the model offline.
+  The streaming call for the last chunk drops the final frame when `len(audio) % 160 < 96`
+  (huggingface/transformers#49113, filed by us), so the worker takes the recording's end from an
+  offline call instead; that stays until a transformers release carries the fix. Another
+  contributor wrote the fix (`pad_end` on `NemotronAsrStreamingFeatureExtractor`, fork PR linked
+  from the issue) and carries the upstream PR; we reviewed it on 2026-09-28 (bit-identical across
+  all three modes, ~6,500 lengths) and review the upstream PR rather than open our own. Running
+  transformers' tests from this venv needs `pytest --noconftest -c /dev/null`.
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
