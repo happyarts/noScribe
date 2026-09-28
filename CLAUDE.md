@@ -249,15 +249,16 @@ Voxtral PR:
   for the features, bit-identical, and runs the model offline.
   The streaming call for the last chunk drops the final frame when `len(audio) % 160 < 96`
   (huggingface/transformers#49113, filed by us), so the worker takes the recording's end from an
-  offline call instead; that stays until a transformers release carries the fix. Another
-  contributor wrote the fix (`pad_end` on `NemotronAsrStreamingFeatureExtractor`) and carries it
-  as huggingface/transformers#49161; we approved it on 2026-09-28 after running head `f79c456e`
-  (bit-identical across all three modes, ~6,500 lengths; the Nemotron model tests pass, which
-  upstream CI skips) and re-review it if it changes rather than open our own. Its tests compare
-  at `1e-5`, because Windows x86 already deviates by up to 2.4e-7 without it. Still open: the
-  maintainers' review, whether the two ASR processors on the same extractor join, and the
-  overlap with the AudioProcessor migration (#48114). Running transformers' tests from this venv
-  needs `pytest --noconftest -c /dev/null` and `parameterized` on the path.
+  offline call instead; that stays until a transformers release carries the fix. The fix that
+  goes in is the audio maintainer's own, huggingface/transformers#49167: the extractor takes
+  `is_last_audio_chunk` and pads `n_fft // 2 - hop` after pre-emphasis. It supersedes another
+  contributor's #49161 (a new `pad_end`, padding `n_fft // 2`), which we had approved too. We
+  approved #49167 on 2026-09-29 after running head `56d64a7f`: bit-identical across all three
+  shipped modes (~6,500 lengths) and batched, Nemotron model tests pass (upstream CI skips them).
+  Only in a mode without look-ahead (`(1, 0)`, not shipped) does its shorter pad leave a last
+  chunk under 416 samples to `torch.stft`, which raises; we noted that in the review as out of
+  scope. Running transformers' tests from this venv needs `pytest --noconftest -c /dev/null`
+  and `parameterized` on the path.
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
