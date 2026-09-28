@@ -250,10 +250,14 @@ Voxtral PR:
   The streaming call for the last chunk drops the final frame when `len(audio) % 160 < 96`
   (huggingface/transformers#49113, filed by us), so the worker takes the recording's end from an
   offline call instead; that stays until a transformers release carries the fix. Another
-  contributor wrote the fix (`pad_end` on `NemotronAsrStreamingFeatureExtractor`, fork PR linked
-  from the issue) and carries the upstream PR; we reviewed it on 2026-09-28 (bit-identical across
-  all three modes, ~6,500 lengths) and review the upstream PR rather than open our own. Running
-  transformers' tests from this venv needs `pytest --noconftest -c /dev/null`.
+  contributor wrote the fix (`pad_end` on `NemotronAsrStreamingFeatureExtractor`) and carries it
+  as huggingface/transformers#49161; we approved it on 2026-09-28 after running head `f79c456e`
+  (bit-identical across all three modes, ~6,500 lengths; the Nemotron model tests pass, which
+  upstream CI skips) and re-review it if it changes rather than open our own. Its tests compare
+  at `1e-5`, because Windows x86 already deviates by up to 2.4e-7 without it. Still open: the
+  maintainers' review, whether the two ASR processors on the same extractor join, and the
+  overlap with the AudioProcessor migration (#48114). Running transformers' tests from this venv
+  needs `pytest --noconftest -c /dev/null` and `parameterized` on the path.
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
