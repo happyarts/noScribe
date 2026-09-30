@@ -103,9 +103,12 @@ def features(processor, audio, sample_rate, chunk_frames=60000, device="cpu"):
     processor's streaming calls, whose chunks reproduce it frame for frame; only
     the model's forward stays offline, since its streaming mode caches speakers
     differently. What is left after the last whole chunk comes from an offline call
-    on the recording's end: the streaming call for a last chunk left out the last
-    valid frame, differed from the one pass on a few short ends and refused one
-    under a window long. Bit-identical to the one pass."""
+    on the recording's end. The streaming call for a last chunk keeps the last
+    valid frame since transformers 5.18 (huggingface/transformers#49167), but in
+    this mode without look-ahead it still refuses an end under 416 samples and
+    rounds a lone frame differently (up to 9.5e-7): on 5.18.0, 19 of 4,526 lengths
+    raised and 179 differed, with chunks of 8 to 8,000 frames. Bit-identical to
+    the one pass."""
     import torch
     from transformers.feature_extraction_utils import BatchFeature
     hop = processor.feature_extractor.hop_length
