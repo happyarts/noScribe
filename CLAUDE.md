@@ -255,14 +255,20 @@ Voxtral PR:
   #49161), but pads it by only `n_fft // 2 - hop`. In a mode without look-ahead, which the
   worker's `(step, 0)` is, a last chunk under 416 samples then raises in `torch.stft`, and one
   whose STFT has a single frame rounds differently (the mel projection of one column, up to
-  9.5e-7). The docstring of `features` has the numbers. A fix (pad `n_fft // 2`, same frame count; bit-identical on
-  every length tried, including the worker's mode) is committed, not pushed, on
-  `fix/nemotron-last-chunk-short-tail` in `~/Documents/transformers-src`, with its PR text and
-  an alternative comment for the maintainer in `~/Documents/transformers-src-analysis/`. transformers asks first-time
-  contributors not to open agent-written PRs, and we have none merged there, so it is the
-  user's call how it goes upstream. Once a release carries it, the offline call for the end
-  can go. Running transformers' tests from this venv needs `pytest --noconftest -c /dev/null`
-  and `parameterized` on the path.
+  9.5e-7). The docstring of `features` has the numbers. The fix is
+  huggingface/transformers#49213 (opened 2026-09-30 after eustlb's "feel free to raise a PR" on
+  #49167, AI assistance disclosed): pad `n_fft // 2`, keep `num_padding` for the frame count,
+  one changed line per extractor file plus a regression test. Bit-identical on every length
+  tried, including the worker's mode. Its branch `fix/nemotron-last-chunk-short-tail` lives in
+  `~/Documents/transformers-src` and on the fork `happyarts/transformers` (remote `fork`); the PR
+  text is `~/Documents/transformers-src-analysis/pr-body-49167-followup.md`. That clone has its
+  own dev venv (`.venv`: editable install with `[quality]`, torch 2.13, torchvision, librosa,
+  pytest, parameterized), because transformers' checklist asks for `make fix-repo`, `make
+  typing` and `make check-repo` (all pass) and those need the quality tools; `librosa` and
+  torchvision are needed too, or tests and `check_repo.py` fail for reasons unrelated to a
+  change. `utils/tests_fetcher.py` crashes on macOS (case-insensitive file system), so the
+  test list is the three Nemotron model folders. Once a release carries #49213, the offline
+  call for the end can go.
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
