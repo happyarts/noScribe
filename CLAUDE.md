@@ -140,7 +140,8 @@ changing a number, and check whether a test in `tests/` pins it.
   bit-identical Voxtral text, aligner stamps and pyannote bounds against 5.18.0.dev0 and 5.16.1
   (`bench_tf5180.json`, `bench_tf518dev.json`, `bench_tf516.json`). Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
-  `benchmarks-local/UPGRADE-CHECKS.md`; start a new check from there. `~/Documents/transformers-src`
+  `benchmarks-local/UPGRADE-CHECKS.md`; start a new check from there. That log, like all of
+  `benchmarks-local/`, is local only and never committed. `~/Documents/transformers-src`
   is a clone of transformers for upstream work there; `~/Documents/transformers-src-analysis/README.md`
   says how to work in it (dev venv, checks, scripts, PR texts).
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
