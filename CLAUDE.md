@@ -135,10 +135,12 @@ changing a number, and check whether a test in `tests/` pins it.
 - **Models**: `models/` holds `fast`, `precise` and `voxtral-mini-8bit`; Voxtral repos are
   downloaded on first use, and so is `nvidia/Nemotron-3-Diarization` (HF cache) unless a copy
   sits in `models/nemotron-diarization`.
-- **This venv carries transformers from git main** (5.18.0.dev0, installed 2026-09-24 from the
-  local clone in `~/Documents/transformers-src`), because Nemotron's model is not in a release
-  yet; no requirements file says so. `benchmarks-local/bench_stack.py` gave bit-identical Voxtral
-  text, aligner stamps and pyannote bounds against 5.16.1 (`bench_tf516.json`/`bench_tf518dev.json`).
+- **This venv carries transformers 5.18.0**, the first release with Nemotron's model (installed
+  2026-09-30 in place of a 5.18.0.dev0 from git main). `benchmarks-local/bench_stack.py` gave
+  bit-identical Voxtral text, aligner stamps and pyannote bounds against 5.18.0.dev0 and 5.16.1
+  (`bench_tf5180.json`, `bench_tf518dev.json`, `bench_tf516.json`). `~/Documents/transformers-src`
+  is a clone of transformers for upstream work there; its measurement scripts sit beside it in
+  `~/Documents/transformers-src-analysis/`.
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
   not the Python source; `de.yml` and `en.yml` are the ones kept current.
 
@@ -247,17 +249,19 @@ Voxtral PR:
   transformers' one-pass spectrogram needs ~4 GB per hour of audio; transformers keeps that by
   design (huggingface/transformers#49090), so the worker uses the processor's streaming calls
   for the features, bit-identical, and runs the model offline.
-  The streaming call for the last chunk drops the final frame when `len(audio) % 160 < 96`
-  (huggingface/transformers#49113, filed by us), so the worker takes the recording's end from an
-  offline call instead; that stays until a transformers release carries the fix. The fix that
-  goes in is the audio maintainer's own, huggingface/transformers#49167: the extractor takes
-  `is_last_audio_chunk` and pads `n_fft // 2 - hop` after pre-emphasis. It supersedes another
-  contributor's #49161 (a new `pad_end`, padding `n_fft // 2`), which we had approved too. We
-  approved #49167 on 2026-09-29 after running head `56d64a7f`: bit-identical across all three
-  shipped modes (~6,500 lengths) and batched, Nemotron model tests pass (upstream CI skips them).
-  Only in a mode without look-ahead (`(1, 0)`, not shipped) does its shorter pad leave a last
-  chunk under 416 samples to `torch.stft`, which raises; we noted that in the review as out of
-  scope. Running transformers' tests from this venv needs `pytest --noconftest -c /dev/null`
+  The worker takes the recording's end from an offline call, not from the streaming call for a
+  last chunk. transformers 5.18.0 keeps that chunk's last frame (huggingface/transformers#49113,
+  filed by us, fixed by the audio maintainer in #49167, which superseded another contributor's
+  #49161), but pads it by only `n_fft // 2 - hop`. In a mode without look-ahead, which the
+  worker's `(step, 0)` is, a last chunk under 416 samples then raises in `torch.stft`, and one
+  whose STFT has a single frame rounds differently (the mel projection of one column, up to
+  9.5e-7). The docstring of `features` has the numbers. A fix (pad `n_fft // 2`, same frame count; bit-identical on
+  every length tried, including the worker's mode) is committed, not pushed, on
+  `fix/nemotron-last-chunk-short-tail` in `~/Documents/transformers-src`, with its PR text and
+  an alternative comment for the maintainer in `~/Documents/transformers-src-analysis/`. transformers asks first-time
+  contributors not to open agent-written PRs, and we have none merged there, so it is the
+  user's call how it goes upstream. Once a release carries it, the offline call for the end
+  can go. Running transformers' tests from this venv needs `pytest --noconftest -c /dev/null`
   and `parameterized` on the path.
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
@@ -266,9 +270,9 @@ Voxtral PR:
   6.14 a frozen transformers fails its own import-structure scan of `__init__.pyc`, before 6.21 a
   frozen scipy 1.18 misses `scipy._cyutility` (6.14) or array_api_compat's `numpy.fft` (6.15-6.20);
   so macOS and Linux ask for >=6.21, and Windows keeps 6.14.1 (its spec collects all of scipy).
-  Not done until upstream agrees and transformers 5.18 is released: removing pyannote (worker,
-  models, `pyannote_fast_embeddings`, requirements, specs), dropping the speaker-count setting,
-  shipping bf16 weights with the OpenMDW licence, and `transformers>=5.18` in the requirements.
+  The requirements ask for `transformers>=5.18` since its release (2026-09-30). Not done until
+  upstream agrees: removing pyannote (worker, models, `pyannote_fast_embeddings`, requirements,
+  specs), dropping the speaker-count setting, and shipping bf16 weights with the OpenMDW licence.
 - Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`, the
   reworded `warn_speaker_names_more_speakers` in all nine languages, tests in
   `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
