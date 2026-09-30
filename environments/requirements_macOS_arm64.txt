@@ -29,3 +29,6 @@ pyobjc
 python-i18n
 PyYAML
 soundfile
+# 5.18 or newer: the first release that carries Nemotron 3 Diarization, which
+# noScribe/nemotron_mp_worker.py runs.
+transformers>=5.18
