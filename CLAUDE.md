@@ -141,8 +141,8 @@ changing a number, and check whether a test in `tests/` pins it.
   (`bench_tf5180.json`, `bench_tf518dev.json`, `bench_tf516.json`). Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
   `benchmarks-local/UPGRADE-CHECKS.md`; start a new check from there. `~/Documents/transformers-src`
-  is a clone of transformers for upstream work there; its measurement scripts sit beside it in
-  `~/Documents/transformers-src-analysis/`.
+  is a clone of transformers for upstream work there; `~/Documents/transformers-src-analysis/README.md`
+  says how to work in it (dev venv, checks, scripts, PR texts).
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
   not the Python source; `de.yml` and `en.yml` are the ones kept current.
 
@@ -172,6 +172,11 @@ changing a number, and check whether a test in `tests/` pins it.
   pass"). No prefixes, no imperative fragments.
 - **A measurement lives next to what it justifies**: a tuning constant carries it in the comment
   above it, a regression guard in its test docstring, and only what fits neither goes to `docs/`.
+- **Pull requests and issues to other projects follow that project's rules.** Read its
+  CONTRIBUTING and PR checks first and run its own check commands (for transformers `make
+  fix-repo`, `make typing`, `make check-repo`); keep the diff minimal and comments short;
+  disclose AI help; where agent-written PRs are unwelcome, ask the maintainer first; tick a
+  checklist box only once it is true.
 
 ## The Voxtral pull request
 
@@ -251,26 +256,10 @@ Voxtral PR:
   transformers' one-pass spectrogram needs ~4 GB per hour of audio; transformers keeps that by
   design (huggingface/transformers#49090), so the worker uses the processor's streaming calls
   for the features, bit-identical, and runs the model offline.
-  The worker takes the recording's end from an offline call, not from the streaming call for a
-  last chunk. transformers 5.18.0 keeps that chunk's last frame (huggingface/transformers#49113,
-  filed by us, fixed by the audio maintainer in #49167, which superseded another contributor's
-  #49161), but pads it by only `n_fft // 2 - hop`. In a mode without look-ahead, which the
-  worker's `(step, 0)` is, a last chunk under 416 samples then raises in `torch.stft`, and one
-  whose STFT has a single frame rounds differently (the mel projection of one column, up to
-  9.5e-7). The docstring of `features` has the numbers. The fix is
-  huggingface/transformers#49213 (opened 2026-09-30 after eustlb's "feel free to raise a PR" on
-  #49167, AI assistance disclosed): pad `n_fft // 2`, keep `num_padding` for the frame count,
-  one changed line per extractor file plus a regression test. Bit-identical on every length
-  tried, including the worker's mode. Its branch `fix/nemotron-last-chunk-short-tail` lives in
-  `~/Documents/transformers-src` and on the fork `happyarts/transformers` (remote `fork`); the PR
-  text is `~/Documents/transformers-src-analysis/pr-body-49167-followup.md`. That clone has its
-  own dev venv (`.venv`: editable install with `[quality]`, torch 2.13, torchvision, librosa,
-  pytest, parameterized), because transformers' checklist asks for `make fix-repo`, `make
-  typing` and `make check-repo` (all pass) and those need the quality tools; `librosa` and
-  torchvision are needed too, or tests and `check_repo.py` fail for reasons unrelated to a
-  change. `utils/tests_fetcher.py` crashes on macOS (case-insensitive file system), so the
-  test list is the three Nemotron model folders. Once a release carries #49213, the offline
-  call for the end can go.
+  The worker takes the recording's end from an offline call, because transformers' streaming
+  call for a last chunk raises on short ends in a mode without look-ahead, which the worker's
+  `(step, 0)` is (numbers in the docstring of `features`). Our fix is
+  huggingface/transformers#49213; once a release carries it, the offline call can go.
   The branch is two commits (worker, integration) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
