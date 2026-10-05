@@ -271,15 +271,19 @@ Voxtral PR:
   The requirements ask for `transformers>=5.18` since its release (2026-09-30). Not done until
   upstream agrees: removing pyannote (worker, models, `pyannote_fast_embeddings`, requirements,
   specs), dropping the speaker-count setting, and shipping bf16 weights with the OpenMDW licence.
-- Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`, the
-  reworded `warn_speaker_names_more_speakers` in all nine languages, tests in
-  `tests/test_speaker_names.py`) has its own branch, `feature/speakers-in-order-of-appearance`, cut
-  from `upstream-main`. It numbers where a speaker is first *written*; numbering the diarization instead
-  missed 17 of 132 recordings (the docstring has the measurement). Because a label named before
-  the transcript exists no longer says who is meant, `main` reports the voice check's
-  moved passages only after the transcription, under the written names — lines that
-  exist only where these branches meet (`tools/check_local_current.py` lists them), so whichever
-  of them goes upstream later has to bring its half.
+- Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`) is
+  upstream since 2026-10-05 (PR #350). Because a label named before the transcript exists no
+  longer says who is meant, `main` reports the voice check's moved passages only after the
+  transcription, under the written names, and `_apply_speaker_name` takes a `warn` flag for the
+  silent rewrite — lines that exist only where the numbering meets the voice check
+  (`tools/check_local_current.py` lists them), so `feature/voice-verified-speakers` has to bring
+  them when it is rebased onto upstream.
+- Kai's own fix for a recording without speech (an error, nothing saved; he closed our PR #356
+  that saved the header instead) runs on `main` after either engine, before the voice check.
+  Upstream's tests for it and for the media timeline (`test_empty_transcript.py`,
+  `test_transcript_media_timeline.py`) take a fourth argument in their Whisper stand-ins and a
+  `_diarization_engine` stub here — local adaptations that the PR branches touching those calls
+  must carry too.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
   `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
