@@ -3682,10 +3682,11 @@ class App(ctk.CTk):
         """'nemotron' or 'pyannote', from `diarization_engine` in config.yml.
 
         `auto` (the default) takes Nemotron when the installed transformers knows the
-        model and its weights are on disk, shipped in models/ or in the Hugging Face
-        cache, so it never starts a download; `nemotron` downloads them on first use,
-        `pyannote` keeps the old engine. Nemotron finds the number of speakers itself
-        and cannot be held to one, so a job with a fixed number stays with pyannote."""
+        model, librosa is installed for its processor, and its weights are on disk,
+        shipped in models/ or in the Hugging Face cache, so it never starts a download;
+        `nemotron` downloads them on first use, `pyannote` keeps the old engine.
+        Nemotron finds the number of speakers itself and cannot be held to one, so a
+        job with a fixed number stays with pyannote."""
         from .nemotron_mp_worker import available
         engine = str(get_config('diarization_engine', 'auto')).lower()
         if str(job.speaker_detection).isdigit():

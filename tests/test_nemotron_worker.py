@@ -41,29 +41,34 @@ def test_features_in_chunks_equal_one_pass():
             assert (got.attention_mask == whole.attention_mask.long()).all()
 
 
-def test_auto_needs_the_model_in_transformers_and_its_weights_on_disk(monkeypatch, tmp_path):
+def test_auto_needs_the_model_in_transformers_librosa_and_its_weights_on_disk(monkeypatch, tmp_path):
     """main.py picks the engine in the GUI process, which must not import transformers
-    for it, and `auto` must never start a download."""
+    or librosa for it, and `auto` must never start a download. Without librosa
+    transformers cannot build the processor (NameError in its feature extractor),
+    and the worker has no fallback, so `auto` has to stay with pyannote."""
     import importlib.util
     import subprocess
     import sys
     import types
     import huggingface_hub
     code = ('import sys; from noScribe.nemotron_mp_worker import available; available(); '
-            'assert "transformers" not in sys.modules')
+            'assert "transformers" not in sys.modules and "librosa" not in sys.modules')
     subprocess.run([sys.executable, '-c', code], check=True, cwd=Path(__file__).resolve().parent.parent)
 
     (tmp_path / 'models' / 'nemotron3_diarization').mkdir(parents=True)
     knows = types.SimpleNamespace(origin=str(tmp_path / '__init__.py'))
     older = types.SimpleNamespace(origin=str(tmp_path / 'models' / '__init__.py'))
+    librosa = types.SimpleNamespace(origin='/site-packages/librosa/__init__.py')
     monkeypatch.setattr(nw, 'model_source', lambda: nw.MODEL_REPO)
     whole = {'config.json', 'processor_config.json', 'model.safetensors'}
-    for spec, cached, expected in ((knows, whole, True), (knows, set(), False), (knows, {'model.safetensors'}, False),
-                                   (older, whole, False), (None, whole, False)):
-        monkeypatch.setattr(importlib.util, 'find_spec', lambda name, spec=spec: spec)
+    for spec, lib, cached, expected in ((knows, librosa, whole, True), (knows, librosa, set(), False),
+                                        (knows, librosa, {'model.safetensors'}, False), (knows, None, whole, False),
+                                        (older, librosa, whole, False), (None, librosa, whole, False)):
+        specs = {'transformers': spec, 'librosa': lib}
+        monkeypatch.setattr(importlib.util, 'find_spec', lambda name, specs=specs: specs[name])
         monkeypatch.setattr(huggingface_hub, 'try_to_load_from_cache',
                             lambda repo, name, cached=cached: f'/cache/{name}' if name in cached else None)
-        assert nw.available() is expected, (spec, cached)
+        assert nw.available() is expected, (spec, lib, cached)
 
 
 @pytest.mark.parametrize("inherited", [None, "0", "false"])
