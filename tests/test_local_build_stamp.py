@@ -10,9 +10,10 @@ def test_build_stamp_extends_the_version_without_replacing_it():
     einem Arbeitsbaum, der sich mehrmals täglich ändert, nichts aus. Wichtig:
     app_version selbst bleibt unangetastet -- sie wird im Update-Check gegen
     die veröffentlichte Version verglichen."""
+    import re
     import noScribe.main as m
 
     stamp = m.local_build_stamp()
     assert stamp.startswith(m.app_version)      # Version zuerst, dann Herkunft
     assert 'MK' in stamp
-    assert m.app_version == '0.7.2'             # unverändert für version_higher
+    assert re.fullmatch(r'\d+(\.\d+)*', m.app_version)  # unverändert für version_higher

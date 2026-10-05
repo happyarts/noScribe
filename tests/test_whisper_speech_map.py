@@ -139,6 +139,15 @@ def test_the_worker_transcribes_inside_the_swap(tmp_path, monkeypatch):
         assert asked == expected, language
 
 
+def _whisper_stand_in(seen):
+    """Records its arguments and says one word: a job without any text is an error."""
+    def stream(*args):
+        seen.append(args)
+        args[2]({"start": 0.5, "end": 1.0, "text": " Hallo", "words": []})
+        return SimpleNamespace(duration=3.0)
+    return stream
+
+
 @pytest.mark.parametrize("detection, handed", [("auto", True), ("none", False)])
 def test_the_diarization_reaches_whisper(tmp_path, monkeypatch, detection, handed):
     """Through the pipeline: with speaker detection the turns go to Whisper, without
@@ -157,8 +166,7 @@ def test_the_diarization_reaches_whisper(tmp_path, monkeypatch, detection, hande
     monkeypatch.setattr(app, "_diarization_engine", lambda job: "pyannote")
     monkeypatch.setattr(app, "_run_diarize_subprocess", lambda *a, **k: turns)
     seen = []
-    monkeypatch.setattr(app, "_run_whisper_subprocess_stream",
-                        lambda *args: seen.append(args) or SimpleNamespace(duration=3.0))
+    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", _whisper_stand_in(seen))
     job = m.create_transcription_job(audio_file=str(audio), transcript_file=str(tmp_path / "a.html"),
                                      speaker_detection=detection, cli_mode=True)
     app._process_single_job(job)
@@ -182,8 +190,7 @@ def test_only_pyannotes_turns_reach_whisper(tmp_path, monkeypatch, engine, hande
     monkeypatch.setattr(app, "_diarization_engine", lambda job: engine)
     monkeypatch.setattr(app, "_run_diarize_subprocess", lambda *a, **k: turns)
     seen = []
-    monkeypatch.setattr(app, "_run_whisper_subprocess_stream",
-                        lambda *args: seen.append(args) or SimpleNamespace(duration=3.0))
+    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", _whisper_stand_in(seen))
     job = m.create_transcription_job(audio_file=str(audio), transcript_file=str(tmp_path / "a.html"),
                                      speaker_detection="auto", cli_mode=True)
     app._process_single_job(job)

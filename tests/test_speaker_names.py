@@ -96,16 +96,6 @@ def test_overlap_prefix_preserved():
     assert m.App._apply_speaker_name(app, "//S01", job) == "//Mona"
 
 
-def test_duplicate_names_map_to_distinct_keys():
-    """Two speakers given the same name still occupy distinct map entries, so the
-    on_segment paragraph logic (which compares the raw labels) can keep them
-    apart even though their display name is identical."""
-    app, job = _stub_app(), _job("Mona, Mona")
-    assert m.App._apply_speaker_name(app, "S01", job) == "Mona"
-    assert m.App._apply_speaker_name(app, "S02", job) == "Mona"
-    assert set(job.speaker_name_map) == {"S01", "S02"}
-
-
 def test_overflow_is_numbered_by_appearance_and_warns_once():
     app, job = _stub_app(), _job("OnlyOne")
     assert m.App._apply_speaker_name(app, "S01", job) == "OnlyOne"
@@ -130,6 +120,16 @@ def test_without_names_speakers_are_numbered_in_the_order_they_appear():
     assert m.App._apply_speaker_name(app, "S01", job) == "S00"
     assert m.App._apply_speaker_name(app, "//S02", job) == "//S01"
     assert app._logs == []
+
+
+def test_duplicate_names_map_to_distinct_keys():
+    """Two speakers given the same name still occupy distinct map entries, so the
+    on_segment paragraph logic (which compares the raw labels) can keep them
+    apart even though their display name is identical."""
+    app, job = _stub_app(), _job("Anna, Anna")
+    assert m.App._apply_speaker_name(app, "S01", job) == "Anna"
+    assert m.App._apply_speaker_name(app, "S02", job) == "Anna"
+    assert set(job.speaker_name_map) == {"S01", "S02"}
 
 
 def test_a_speaker_first_heard_talking_over_someone_is_numbered_too():

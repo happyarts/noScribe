@@ -87,7 +87,7 @@ logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 logger = logging.getLogger()
 
-app_version = '0.7.2'
+app_version = '0.8'
 app_year = '2026'
 
 
@@ -2141,10 +2141,13 @@ class App(ctk.CTk):
         if platform.system() == 'Windows':
             program = impres.files("noScribeEdit") / "noScribeEdit.exe"
         elif platform.system() == "Darwin": # = MAC
-            # use local copy in development, installed one if used as an app:
-            program = impres.files("noScribeEdit") / "noScribeEdit"
-            if not program.exists():
+            # The frozen app uses the separately installed editor. Do not try
+            # importlib.resources there: noScribeEdit is intentionally not
+            # part of the noScribe bundle and therefore is not importable.
+            if getattr(sys, "frozen", False):
                 program = Path("/Applications") / "noScribeEdit.app" / "Contents" / "MacOS" / "noScribeEdit"
+            else:
+                program = impres.files("noScribeEdit") / "noScribeEdit"
         elif platform.system() == "Linux":
             if hasattr(sys, "_MEIPASS"):
                 program = Path(sys._MEIPASS) / "noScribeEdit" / "noScribeEdit"
@@ -2896,6 +2899,11 @@ class App(ctk.CTk):
                             # similar.
                             raise Exception(t('err_user_cancelation'))
 
+                    # Conversion can begin before the requested start by part
+                    # of a frame, or later if a video's audio track is delayed.
+                    # Use its actual media position for all exported timestamps.
+                    transcript_start = self._ffmpeg_proc.start_offset_ms
+
                 except Exception as e:
                     traceback_str = traceback.format_exc()
 
@@ -3019,7 +3027,7 @@ class App(ctk.CTk):
 
                         # write segments to log file
                         for segment in diarization:
-                            line = f'{utils.ms_to_str(job.start + segment["start"], include_ms=True)} - {utils.ms_to_str(job.start + segment["end"], include_ms=True)} {segment["label"]}'
+                            line = f'{utils.ms_to_str(transcript_start + segment["start"], include_ms=True)} - {utils.ms_to_str(transcript_start + segment["end"], include_ms=True)} {segment["label"]}'
                             self.logn(line, where='file')
 
                         self.logn(where='file')  # the pump ended the progress line
@@ -3239,14 +3247,19 @@ class App(ctk.CTk):
                                 self.words = d.get('words')
                         segment = _Seg(seg)
 
+                        # Empty segments must not create speaker labels, pauses,
+                        # or autosaves that look like a meaningful transcript.
+                        if not segment.text or not segment.text.strip():
+                            return
+
                         segment = adjust_for_pause(segment)
 
                         # get time of the segment in milliseconds
                         start = round(segment.start * 1000.0)
                         end = round(segment.end * 1000.0)
-                        # if we skipped a part at the beginning of the audio we have to add this here again, otherwise the timestamps will not match the original audio:
-                        orig_audio_start = job.start + start
-                        orig_audio_end = job.start + end
+                        # Restore the converted clip's actual media position.
+                        orig_audio_start = transcript_start + start
+                        orig_audio_end = transcript_start + end
 
                         if job.timestamps:
                             ts = utils.ms_to_str(orig_audio_start)
@@ -3265,8 +3278,8 @@ class App(ctk.CTk):
                             if first_segment:
                                 pause_str = pause_str.lstrip() + ' '
 
-                            orig_audio_start_pause = job.start + last_segment_end
-                            orig_audio_end_pause = job.start + start
+                            orig_audio_start_pause = transcript_start + last_segment_end
+                            orig_audio_end_pause = transcript_start + start
                             a = d.createElement('a')
                             a.name = f'ts_{orig_audio_start_pause}_{orig_audio_end_pause}_{speaker_disp}'
                             a.appendText(pause_str)
@@ -3475,7 +3488,7 @@ class App(ctk.CTk):
                             def shown(label, mapping):
                                 return ('//' if label.startswith('//') else '') + mapping.get(label.lstrip('/'), label.lstrip('/'))
                             for passage, before, after in moves:
-                                self.logn(f"voice check: {utils.ms_to_str(job.start + round(passage['start'] * 1000))} "
+                                self.logn(f"voice check: {utils.ms_to_str(transcript_start + round(passage['start'] * 1000))} "
                                           f"{shown(before, names_given)} -> {shown(after, job.speaker_name_map)}:"
                                           f"{passage['text'][:60]}", where='file')
                         self.logn(t('voice_check_done', count=len(moves)))
@@ -3511,6 +3524,8 @@ class App(ctk.CTk):
                             self._run_whisper_subprocess_stream(
                                 tmp_audio_file, job, on_segment,
                                 diarization if diarization_engine == 'pyannote' else None)
+                        if first_segment:
+                            raise ValueError(t('err_empty_transcript'))
                         run_voice_check()
                         transcription_success = True
                         # if self.cancel:
@@ -3542,10 +3557,6 @@ class App(ctk.CTk):
                                 self.logn(where='file')
                                 self.logn(self._speaker_key(job), where='file')
                         else:
-                            if transcription_success:
-                                # Nothing was said: save the header all the same, so
-                                # the transcript that is reported (and opened) exists.
-                                save_doc()
                             job.has_partial_transcript = False
                         if transcription_success:
                             if job.transcript_file != orig_transcript_file: # used alternative filename because saving under the initial name failed

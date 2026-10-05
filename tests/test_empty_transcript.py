@@ -1,50 +1,131 @@
-"""A recording without speech still gets its transcript file.
-
-The transcript used to be written only once the first segment arrived. When
-Whisper returned none, the log still said "transcript saved" and linked the
-file, and for a single html job the editor was opened on it -- but the file did
-not exist. It now holds the header, like any other transcript.
-"""
+"""Empty results fail without saving; meaningful partial transcripts survive."""
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import soundfile as sf
+import yaml
 
 pytest.importorskip("tkinter")
 
 import noScribe.main as m
 
 
-def _run(tmp_path, monkeypatch, whisper):
+@pytest.fixture
+def app(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "config_dir", str(tmp_path))
     monkeypatch.setattr(m, "config", {})
+    monkeypatch.setattr(m, "get_speech_timestamps", lambda *args: [])
+    messages = yaml.safe_load(
+        (Path(m.__file__).parent.parent / "trans/noScribe.en.yml").read_text(encoding="utf-8")
+    )["en"]
+    monkeypatch.setattr(m, "t", lambda key, **kwargs: messages.get(key, key))
+    instance = m.HeadlessApp()
+    instance.logs = []
+    monkeypatch.setattr(instance, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(instance, "logn", lambda text="", *args, **kwargs: instance.logs.append(text))
+    monkeypatch.setattr(instance, "set_progress", lambda *args: None)
+    monkeypatch.setattr(instance, "update_queue_table", lambda: None)
+    monkeypatch.setattr(instance, "update_queue_controls", lambda: None)
+    monkeypatch.setattr(instance, "_run_diarize_subprocess", lambda *args: [
+        {"start": 0, "end": 3000, "label": "SPEAKER_00"}
+    ])
+    return instance
+
+
+def _job(tmp_path, suffix="html", detection="none", name="transcript"):
     audio = tmp_path / "silence.wav"
     sf.write(audio, np.zeros(16000 * 3, dtype=np.int16), 16000)
-    transcript = tmp_path / "transcript.html"
-    app = m.HeadlessApp()
+    return m.create_transcription_job(
+        audio_file=str(audio), transcript_file=str(tmp_path / f"{name}.{suffix}"),
+        speaker_detection=detection, timestamps=True, pause=1, cli_mode=True,
+    )
+
+
+def _segment(text, start=1.0):
+    return {"start": start, "end": start + 0.5, "text": text, "words": []}
+
+
+@pytest.mark.parametrize("suffix", ["html", "txt", "vtt"])
+@pytest.mark.parametrize("detection", ["none", "auto"])
+@pytest.mark.parametrize("texts", [[], ["", " \t\n ", "\u2003"]])
+def test_empty_result_fails_without_saving(app, tmp_path, monkeypatch, suffix, detection, texts):
+    def whisper(path, job, on_segment, *speech_map):
+        for text in texts:
+            on_segment(_segment(text))
+        return {}
+
     monkeypatch.setattr(app, "_run_whisper_subprocess_stream", whisper)
-    job = m.create_transcription_job(
-        audio_file=str(audio), transcript_file=str(transcript),
-        speaker_detection="none", cli_mode=True,
-    )
-    app._process_single_job(job)
-    return transcript
+    job = _job(tmp_path, suffix, detection)
+    app.queue.add_job(job)
+    app.transcription_worker()
+
+    assert job.status == m.JobStatus.ERROR
+    assert "No text was recognized" in job.error_message
+    assert not job.has_partial_transcript
+    assert not Path(job.transcript_file).exists()
+    assert not job.speaker_name_map
+    assert not any("Saved to:" in line or "Transcription finished" in line for line in app.logs)
 
 
-def test_transcript_without_segments_is_saved(tmp_path, monkeypatch):
-    transcript = _run(
-        tmp_path, monkeypatch, lambda *args: SimpleNamespace(duration=3.0)
-    )
+def test_empty_job_does_not_open_editor(app, tmp_path, monkeypatch):
+    app._headless = False
+    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", lambda *args: {})
+    monkeypatch.setattr(app, "launch_editor", lambda *args: pytest.fail("Empty job opened editor"))
+    app.queue.add_job(_job(tmp_path))
+    app.transcription_worker()
+    assert app.queue.jobs[0].status == m.JobStatus.ERROR
 
-    assert "silence" in transcript.read_text(encoding="utf-8")
+
+def test_batch_continues_after_empty_job(app, tmp_path, monkeypatch):
+    empty = _job(tmp_path, name="empty")
+    valid = _job(tmp_path, name="valid")
+
+    def whisper(path, job, on_segment, *speech_map):
+        if job is valid:
+            on_segment(_segment(" Hello"))
+        return {}
+
+    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", whisper)
+    app.queue.add_job(empty)
+    app.queue.add_job(valid)
+    app.transcription_worker()
+    assert empty.status == m.JobStatus.ERROR
+    assert not Path(empty.transcript_file).exists()
+    assert valid.status == m.JobStatus.FINISHED
+    assert "Hello" in Path(valid.transcript_file).read_text(encoding="utf-8")
 
 
-def test_failed_transcription_writes_no_file(tmp_path, monkeypatch):
-    def whisper(*args):
+@pytest.mark.parametrize("suffix", ["html", "txt", "vtt"])
+@pytest.mark.parametrize("canceled", [False, True])
+def test_failed_or_canceled_job_keeps_real_partial_text(app, tmp_path, monkeypatch, suffix, canceled):
+    def whisper(path, job, on_segment, *speech_map):
+        on_segment(_segment(" Hello"))
+        on_segment(_segment(" \t ", start=2.0))
+        if canceled:
+            app.cancel = True
+            raise RuntimeError(m.t("err_user_cancelation"))
         raise RuntimeError("worker died")
 
-    with pytest.raises(RuntimeError, match="worker died"):
-        _run(tmp_path, monkeypatch, whisper)
+    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", whisper)
+    job = _job(tmp_path, suffix)
+    app.queue.add_job(job)
+    app.transcription_worker()
+    assert job.status == (m.JobStatus.CANCELED if canceled else m.JobStatus.ERROR)
+    assert job.has_partial_transcript
+    assert "Hello" in Path(job.transcript_file).read_text(encoding="utf-8")
 
-    assert not (tmp_path / "transcript.html").exists()
+
+def test_empty_cli_result_returns_failure(app, tmp_path, monkeypatch, capsys):
+    job = _job(tmp_path)
+    app.whisper_models = {"test": object()}
+    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", lambda *args: {})
+    monkeypatch.setattr(m, "HeadlessApp", lambda: app)
+    monkeypatch.setattr(m, "create_job_from_cli_args", lambda args: job)
+
+    assert m.run_cli_mode(SimpleNamespace(model="test")) == 1
+    output = capsys.readouterr().out
+    assert "No text was recognized" in output
+    assert "Output saved to:" not in output
+    assert not Path(job.transcript_file).exists()

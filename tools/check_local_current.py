@@ -34,6 +34,14 @@ NOISE = re.compile(r"^[\s)\](}#*=/-]*$")
 # gibt, deshalb kann eine Branch-Zeile hier zu Recht anders lauten. Jede
 # Ausnahme braucht eine Begründung, sonst verdeckt sie echte Drift.
 INTENTIONAL = {
+    # Seit upstream 53a03e3 beginnen die Zeitmarken bei transcript_start, der
+    # tatsaechlichen Medienposition der Konvertierung, nicht mehr bei job.start;
+    # seit 2ef73cc ist ein Job ohne Text ein Fehler. Die PR-Branches stammen von
+    # davor und uebernehmen beides erst beim Rebase auf upstream.
+    "self.logn(f\"voice check: {utils.ms_to_str(job.start + round(passage['start'] * 1000))} \"":
+        "lokal ab transcript_start (upstream 53a03e3)",
+    "lambda *args: seen.append(args) or SimpleNamespace(duration=3.0))":
+        "lokal mit einem gesprochenen Wort (leerer Job ist seit upstream 2ef73cc ein Fehler)",
     # feature/nemotron-diarization liest seinen CPU-Schalter wie die beiden alten;
     # main liest alle drei ueber get_config_flag (fix/config-booleans).
     "force_nemotron_cpu = get_config('force_nemotron_cpu', '').lower() == 'true'":
