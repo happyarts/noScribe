@@ -123,6 +123,12 @@ INTENTIONAL = {
     # is_voxtral mit, das es nur zusammen mit dem Voxtral-Satz gibt.
     "'speech_chunks': [], 'traceback': traceback, 'get_config': lambda key, default=None: default}":
         "lokal mit is_voxtral im Harness-Scope",
+    # Seit dem Rebase auf upstream 0.8 steht transcript_start mit im Harness-Scope;
+    # lokal liegen dazwischen vad_future (fix/silero-beside-worker) und is_voxtral.
+    "'speech_chunks': [], 'traceback': traceback, 'get_config': lambda key, default=None: default,":
+        "lokal mit vad_future statt speech_chunks (fix/silero-beside-worker)",
+    "'transcript_start': 0}  # where the converted audio starts in the media":
+        "lokal folgt is_voxtral, die Zeile endet mit einem Komma",
 }
 
 
