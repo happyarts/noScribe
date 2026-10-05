@@ -16,7 +16,8 @@ call runs through its speaker cache in 50 s.
 
 What it cannot do: more than eight speakers (it folds the others into them;
 main.py says so when all eight are in use), and a fixed number of speakers. It needs transformers with
-`nemotron3_diarization`, 5.18 or newer.
+`nemotron3_diarization`, 5.18 or newer, and librosa, with which transformers
+builds the processor's mel filters.
 
 Messages:
   {"type":"log","level":"info|warn|error|debug","msg":str}
@@ -75,7 +76,8 @@ def weights_on_disk():
 
 
 def available():
-    """Whether the installed transformers knows the model and its weights are on
+    """Whether the installed transformers knows the model, librosa is there for its
+    processor (transformers builds the mel filters with it), and the weights are on
     disk. Found without importing transformers: main.py asks this in the GUI
     process, which never loads it."""
     try:
@@ -84,6 +86,8 @@ def available():
         if spec is None or not spec.origin:
             return False
         if not os.path.isdir(os.path.join(os.path.dirname(spec.origin), "models", "nemotron3_diarization")):
+            return False
+        if importlib.util.find_spec("librosa") is None:
             return False
         return weights_on_disk()
     except Exception:
