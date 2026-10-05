@@ -189,7 +189,7 @@ def _is_word(word, language):
         miss, _count = _spell_checker().checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount_(
             word, 0, language, False, 0, None)
     except Exception as e:
-        logger.debug("Spell check of %r failed: %s", word, e)
+        logger.debug("Spell check failed: %s", e)  # not the word: no transcript text in logs
         return True
     return not (miss.location == 0 and miss.length == len(word))
 
