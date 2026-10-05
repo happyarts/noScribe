@@ -182,7 +182,7 @@ changing a number, and check whether a test in `tests/` pins it.
 ## The Voxtral pull request
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
-`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review) from `upstream/main` plus `main`'s
+`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review; rebased with the other open branches onto upstream 0.8 on 2026-10-05, each now carrying its own adaptations of upstream's tests) from `upstream/main` plus `main`'s
 Voxtral set (the earlier branch of that name, tip `8f132bc`, was deleted once it had fallen far
 behind). It is cut from `upstream-main` and carries **neither of the still-open small PRs**, so its diff
 is Voxtral alone; it overlaps with both textually in `noScribe/main.py`, and whichever merges
@@ -271,19 +271,6 @@ Voxtral PR:
   The requirements ask for `transformers>=5.18` since its release (2026-09-30). Not done until
   upstream agrees: removing pyannote (worker, models, `pyannote_fast_embeddings`, requirements,
   specs), dropping the speaker-count setting, and shipping bf16 weights with the OpenMDW licence.
-- Numbering the speakers in the order they appear (`_apply_speaker_name`, `_speaker_key`) is
-  upstream since 2026-10-05 (PR #350). Because a label named before the transcript exists no
-  longer says who is meant, `main` reports the voice check's moved passages only after the
-  transcription, under the written names, and `_apply_speaker_name` takes a `warn` flag for the
-  silent rewrite — lines that exist only where the numbering meets the voice check
-  (`tools/check_local_current.py` lists them), so `feature/voice-verified-speakers` has to bring
-  them when it is rebased onto upstream.
-- Kai's own fix for a recording without speech (an error, nothing saved; he closed our PR #356
-  that saved the header instead) runs on `main` after either engine, before the voice check.
-  Upstream's tests for it and for the media timeline (`test_empty_transcript.py`,
-  `test_transcript_media_timeline.py`) take a fourth argument in their Whisper stand-ins and a
-  `_diarization_engine` stub here — local adaptations that the PR branches touching those calls
-  must carry too.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
   `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.

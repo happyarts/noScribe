@@ -34,18 +34,6 @@ NOISE = re.compile(r"^[\s)\](}#*=/-]*$")
 # gibt, deshalb kann eine Branch-Zeile hier zu Recht anders lauten. Jede
 # Ausnahme braucht eine Begründung, sonst verdeckt sie echte Drift.
 INTENTIONAL = {
-    # Seit upstream 53a03e3 beginnen die Zeitmarken bei transcript_start, der
-    # tatsaechlichen Medienposition der Konvertierung, nicht mehr bei job.start;
-    # seit 2ef73cc ist ein Job ohne Text ein Fehler. Die PR-Branches stammen von
-    # davor und uebernehmen beides erst beim Rebase auf upstream.
-    "self.logn(f\"voice check: {utils.ms_to_str(job.start + round(passage['start'] * 1000))} \"":
-        "lokal ab transcript_start (upstream 53a03e3)",
-    "lambda *args: seen.append(args) or SimpleNamespace(duration=3.0))":
-        "lokal mit einem gesprochenen Wort (leerer Job ist seit upstream 2ef73cc ein Fehler)",
-    # feature/nemotron-diarization liest seinen CPU-Schalter wie die beiden alten;
-    # main liest alle drei ueber get_config_flag (fix/config-booleans).
-    "force_nemotron_cpu = get_config('force_nemotron_cpu', '').lower() == 'true'":
-        "lokal ueber get_config_flag",
     # fix/whisper-speech-map-from-diarization reicht die Diarisierung an Whisper;
     # lokal nur pyannotes (Nemotrons kurze Turns kosten auf Deutsch Woerter), und
     # lokal ohne `info =`, weil main das _Info-Objekt nicht zurueckgibt.
@@ -57,39 +45,10 @@ INTENTIONAL = {
     # nimmt Whisper sie als Sprachkarte (fix/whisper-speech-map-from-diarization).
     "def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):":
         "lokal mit diarization=None (Sprachkarte aus der Diarisierung)",
-    # Der Modell-Picker mit RAM-Angabe existiert nur lokal; ohne model_key()
-    # würde der Anzeigetext als gemerktes Modell gespeichert.
-    "config['last_whisper_model'] = self.option_menu_whisper_model.get()":
-        "lokal durch model_key() ersetzt (dekorierter Picker)",
-    # main trägt zusätzlich ctc_align (numpy-Viterbi), das es upstream
-    # nicht gibt -- die Zeile ist hier also eine echte Obermenge der PR-Zeile.
-    '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils")':
-        "lokal um ctc_align erweitert",
     # feature/voice-verified-speakers fuegt voice_check an; lokal steht ctc_align
     # mit in derselben Zeile.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils", "voice_check")':
         "lokal um ctc_align erweitert",
-    # Der Schreib-Test hebt on_segment aus main.py; lokal liest es is_voxtral,
-    # also steht die Variable im Test-Scope und die Zeile endet anders.
-    "'speech_chunks': []}":
-        "lokal um is_voxtral ergaenzt (on_segment liest es nur hier)",
-    # Wo die Nummerierung nach Auftreten (feature/speakers-in-order-of-appearance)
-    # und die Stimmpruefung (warn-Parameter) zusammentreffen, lauten drei Zeilen
-    # lokal anders: die Warnbedingung traegt beide Zusaetze, und das Bewegungs-
-    # protokoll nennt den Sprecher unter dem Namen, unter dem er geschrieben
-    # wurde -- deshalb erst nach der Transkription.
-    'if names and idx == len(names):':
-        "lokal zusaetzlich mit 'and warn' (Stimmpruefung schreibt still neu)",
-    'if idx == len(names) and warn:':
-        "lokal zusaetzlich mit 'names and' (Nummerierung nach Auftreten)",
-    "f\"{before} -> {after}:{passage['text'][:60]}\", where='file')":
-        "lokal unter den geschriebenen Namen (shown(...)) und nach dem Neuschreiben",
-    # Der Voxtral-Worker ist ein drittes Spawn-Ziel und steht lokal mit in der
-    # Liste; die Branch-Zeile ist eine Teilmenge der lokalen.
-    'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker"]':
-        "lokal um voxtral_mp_worker erweitert",
-    '# Both are ctx.Process targets, so both are re-imported in a spawn child.':
-        "lokal auf drei Worker umformuliert",
     # feature/nemotron-diarization fuegt seinen Worker als vierten an; lokal
     # stehen alle vier in der Liste, die der Voxtral- und der Nemotron-Branch je
     # nur um ihren eigenen Worker erweitern.
@@ -119,12 +78,8 @@ INTENTIONAL = {
         "lokal zusaetzlich mit voice_check",
     '# with tools/quantize_voxtral.py).':
         "lokal geht der Kommentar mit Audiotest/ und venv/ weiter",
-    # Das Test-Harness der Stimmprüfung gibt on_segment lokal zusätzlich
-    # is_voxtral mit, das es nur zusammen mit dem Voxtral-Satz gibt.
-    "'speech_chunks': [], 'traceback': traceback, 'get_config': lambda key, default=None: default}":
-        "lokal mit is_voxtral im Harness-Scope",
-    # Seit dem Rebase auf upstream 0.8 steht transcript_start mit im Harness-Scope;
-    # lokal liegen dazwischen vad_future (fix/silero-beside-worker) und is_voxtral.
+    # Das Test-Harness der Stimmpruefung: lokal liegen zwischen den Zeilen des
+    # Branches vad_future (fix/silero-beside-worker) und is_voxtral (Voxtral-Satz).
     "'speech_chunks': [], 'traceback': traceback, 'get_config': lambda key, default=None: default,":
         "lokal mit vad_future statt speech_chunks (fix/silero-beside-worker)",
     "'transcript_start': 0}  # where the converted audio starts in the media":
