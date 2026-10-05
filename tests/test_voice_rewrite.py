@@ -235,8 +235,8 @@ def test_a_moved_answer_is_written_under_its_speaker():
 
 
 def test_the_log_file_says_what_moved_but_not_what_was_said():
-    """Upstream keeps transcript text out of the log file (34bd467); a moved
-    passage is logged by its place, its length and its speakers only."""
+    """The log file keeps no transcript text, as for every segment written; a
+    moved passage is logged by its place, its length and its speakers only."""
     turns, segments = two_people()
     h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
     for segment in segments:
