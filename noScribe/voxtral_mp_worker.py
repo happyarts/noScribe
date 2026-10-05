@@ -11,11 +11,17 @@ segments the same way regardless of the chosen engine:
     {"type": "result", "ok": False, "error": str, "trace": str}
 """
 
+import os
 import traceback
 
 
 def voxtral_proc_entrypoint(args: dict, q):
     try:
+        # huggingface_hub sends usage telemetry (library, versions) with its
+        # requests unless told not to, and reads this switch once, when it is
+        # imported. Keep noScribe processing local, even if the parent
+        # environment enables telemetry for other apps.
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         from noScribe import voxtral_engine
 
         def plog(level, msg):

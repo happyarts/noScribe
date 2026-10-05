@@ -64,3 +64,39 @@ def test_auto_needs_the_model_in_transformers_and_its_weights_on_disk(monkeypatc
         monkeypatch.setattr(huggingface_hub, 'try_to_load_from_cache',
                             lambda repo, name, cached=cached: f'/cache/{name}' if name in cached else None)
         assert nw.available() is expected, (spec, cached)
+
+
+@pytest.mark.parametrize("inherited", [None, "0", "false"])
+def test_hub_telemetry_is_off_before_transformers_is_imported(tmp_path, inherited):
+    """huggingface_hub reads HF_HUB_DISABLE_TELEMETRY once, at import, so the
+    worker has to set it before transformers pulls the hub in. A stand-in
+    transformers reports the value it was imported under through the worker's
+    own error path (the pattern of test_pyannote_font_cache)."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    (tmp_path / "torch").mkdir()
+    (tmp_path / "torch" / "__init__.py").write_text("def set_num_threads(n): pass\n")
+    (tmp_path / "transformers").mkdir()
+    (tmp_path / "transformers" / "__init__.py").write_text(
+        'import os\nraise RuntimeError("telemetry=%r" % os.environ.get("HF_HUB_DISABLE_TELEMETRY"))\n')
+    probe = textwrap.dedent("""
+        import queue
+        from noScribe.nemotron_mp_worker import nemotron_proc_entrypoint
+        q = queue.Queue()
+        nemotron_proc_entrypoint({"audio_path": "unused.wav"}, q)
+        while True:
+            message = q.get_nowait()
+            if message["type"] == "result":
+                print(message["error"])
+                break
+    """)
+    repo = str(Path(__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), repo])}
+    env.pop("HF_HUB_DISABLE_TELEMETRY", None)
+    if inherited is not None:
+        env["HF_HUB_DISABLE_TELEMETRY"] = inherited
+    proc = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "telemetry='1'" in proc.stdout, proc.stdout

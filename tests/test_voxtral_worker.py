@@ -98,3 +98,42 @@ def test_args_are_passed_through_by_name(monkeypatch):
     assert seen["speaker_names"] == ["Mona"]
     assert seen["ram_reserve_gb"] == 4
     assert seen["speaker_turns"] == [[0.0, 1.0, "S1"]]
+
+
+@pytest.mark.parametrize("inherited", [None, "0", "false"])
+def test_hub_telemetry_is_off_before_the_engine_is_imported(inherited):
+    """huggingface_hub reads HF_HUB_DISABLE_TELEMETRY once, at import, and the
+    engine pulls it in (model downloads, the aligner). A clean interpreter in
+    which importing voxtral_engine reports the value it was imported under,
+    through the worker's own error path."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+    probe = textwrap.dedent("""
+        import importlib.abc, importlib.machinery, os, queue, sys
+
+        class Report(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+            def find_spec(self, name, path, target=None):
+                if name == "noScribe.voxtral_engine":
+                    return importlib.machinery.ModuleSpec(name, self)
+            def create_module(self, spec):
+                return None
+            def exec_module(self, module):
+                raise RuntimeError("telemetry=%r" % os.environ.get("HF_HUB_DISABLE_TELEMETRY"))
+
+        sys.meta_path.insert(0, Report())
+        from noScribe.voxtral_mp_worker import voxtral_proc_entrypoint
+        q = queue.Queue()
+        voxtral_proc_entrypoint({}, q)
+        print(q.get_nowait()["error"])
+    """)
+    env = dict(os.environ)
+    env.pop("HF_HUB_DISABLE_TELEMETRY", None)
+    if inherited is not None:
+        env["HF_HUB_DISABLE_TELEMETRY"] = inherited
+    proc = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True,
+                          cwd=Path(__file__).resolve().parent.parent)
+    assert proc.returncode == 0, proc.stderr
+    assert "telemetry='1'" in proc.stdout, proc.stdout
