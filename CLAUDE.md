@@ -23,7 +23,7 @@ side rarely affect the other.
 
 Supporting code that is neither: `tools/` (model quantisation, loop-detection calibration, and
 `check_local_current.py`, which proves `main` still carries every line the open PR branches
-add), `docs/scripts/` (one-off measurement scripts behind the write-ups in `docs/`, plus
+add; `upgrade-checks/` logs every library version tried), `docs/scripts/` (one-off measurement scripts behind the write-ups in `docs/`, plus
 `docs/scripts/engines/` for scoring rival ASR engines), and
 `benchmarks-local/`, which is excluded through `.git/info/exclude` rather than `.gitignore` and
 therefore exists only in this working copy.
@@ -144,8 +144,9 @@ changing a number, and check whether a test in `tests/` pins it.
   the suite passes and the Nemotron worker's probabilities and turns are bit-identical to
   5.18.0.dev0 on CPU and MPS (four AMI test meetings, two German recordings). Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
-  `benchmarks-local/UPGRADE-CHECKS.md`; start a new check from there. That log, like all of
-  `benchmarks-local/`, is local only and never committed. `~/Documents/transformers-src`
+  `tools/upgrade-checks/README.md`, with each run's `bench_*.json` beside it; start a new
+  check from there. The scripts that produce them (`bench_stack.py`, `bench_nemotron.py`) and
+  their audio stay in `benchmarks-local/`. `~/Documents/transformers-src`
   is a clone of transformers for upstream work there; `~/Documents/transformers-src-analysis/README.md`
   says how to work in it (dev venv, checks, scripts, PR texts).
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
@@ -294,7 +295,7 @@ makes it look:
   call; leaving it in would push the fork's advertising into the upstream project.
 - **`CLAUDE.md`** — upstream has no such file, and this one describes the fork's own workflow.
 - **`tools/check_local_current.py`** — it checks `main` against the *fork's* PR branches;
-  upstream has nothing for it to do.
+  upstream has nothing for it to do. Nor for **`tools/upgrade-checks/`**, the fork's own log.
 - **The deletion of `environments/marked_for_deletion/`** — that directory is the upstream
   maintainers' own staging area (created 2025-05-29, and the name says they mean to remove it
   themselves). Removing it for them is not this fork's call, so the deletion stays local.

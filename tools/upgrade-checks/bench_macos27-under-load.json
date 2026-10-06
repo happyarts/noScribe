@@ -1,0 +1,52 @@
+{
+ "label": "macos27-under-load",
+ "sysinfo": {
+  "sw_vers": "27.0 (26A5388g)",
+  "uname": "macOS-27.0-arm64-arm-64bit",
+  "python": "3.12.8",
+  "mlx": "0.32.0",
+  "mlx_lm": "0.31.3",
+  "mlx_voxtral": "0.1.0",
+  "torch": "2.13.0",
+  "torchaudio": "2.11.0",
+  "transformers": "5.15.0.dev0",
+  "pyannote.audio": "4.0.7",
+  "numpy": "2.2.6"
+ },
+ "mlx_gemm_bf16": {
+  "tflops": 2.51,
+  "sec": 1.097
+ },
+ "mlx_quantized_matmul": {
+  "ms_per_iter": 0.829
+ },
+ "torch_mps_gemm": {
+  "tflops": 5.18
+ },
+ "forced_align_cpu": {
+  "sec": 0.574,
+  "paths_digest": "a70f3c508befdd8c",
+  "score_sum": -63949.88
+ },
+ "voxtral_e2e": {
+  "load_sec": 0.7,
+  "transcribe_sec": 13.0,
+  "realtime_x": 4.62,
+  "words": 167,
+  "text_sha": "b700dee60e432450",
+  "mlx_peak_gb": 6.79
+ },
+ "aligner": {
+  "load_sec": 4.0,
+  "align_sec": 6.8,
+  "n_words": 167,
+  "stamps_digest": "273fecfe84c32db9"
+ },
+ "pyannote": {
+  "sec": 20.7,
+  "n_segments": 242,
+  "n_speakers": 4,
+  "bounds_digest": "a22143a8c73f2f30"
+ },
+ "note": "ran concurrently with a live Voxtral transcription job (GPU contention) - perf numbers not comparable, digests still valid"
+}

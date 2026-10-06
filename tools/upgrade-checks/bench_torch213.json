@@ -1,0 +1,51 @@
+{
+ "label": "torch213",
+ "sysinfo": {
+  "sw_vers": "27.0 (26A5421a)",
+  "uname": "macOS-27.0-arm64-arm-64bit",
+  "python": "3.12.8",
+  "mlx": "0.32.1",
+  "mlx_lm": "0.31.3",
+  "mlx_voxtral": "0.0.6",
+  "torch": "2.13.0",
+  "torchaudio": "2.11.0",
+  "transformers": "5.16.1",
+  "pyannote.audio": "4.0.7",
+  "numpy": "2.2.6"
+ },
+ "mlx_gemm_bf16": {
+  "tflops": 5.9,
+  "sec": 0.466
+ },
+ "mlx_quantized_matmul": {
+  "ms_per_iter": 0.751
+ },
+ "torch_mps_gemm": {
+  "tflops": 6.02
+ },
+ "forced_align_cpu": {
+  "sec": 0.548,
+  "paths_digest": "a70f3c508befdd8c",
+  "score_sum": -63949.88
+ },
+ "voxtral_e2e": {
+  "load_sec": 0.6,
+  "transcribe_sec": 7.1,
+  "realtime_x": 8.49,
+  "words": 167,
+  "text_sha": "d21f430b54bfa7b2",
+  "mlx_peak_gb": 6.61
+ },
+ "aligner": {
+  "load_sec": 5.3,
+  "align_sec": 1.0,
+  "n_words": 167,
+  "stamps_digest": "4c7f0c12f6b61a1f"
+ },
+ "pyannote": {
+  "sec": 13.3,
+  "n_segments": 242,
+  "n_speakers": 4,
+  "bounds_digest": "a22143a8c73f2f30"
+ }
+}

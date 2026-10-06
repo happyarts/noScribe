@@ -1,0 +1,52 @@
+{
+ "label": "macos27-p99floor",
+ "sysinfo": {
+  "sw_vers": "27.0 (26A5416b)",
+  "uname": "macOS-27.0-arm64-arm-64bit",
+  "python": "3.12.8",
+  "mlx": "0.32.1",
+  "mlx_lm": "0.31.3",
+  "mlx_voxtral": "0.0.6",
+  "torch": "2.13.0",
+  "torchaudio": "2.11.0",
+  "transformers": "5.15.0.dev0",
+  "pyannote.audio": "4.0.7",
+  "numpy": "2.2.6"
+ },
+ "mlx_gemm_bf16": {
+  "tflops": 5.83,
+  "sec": 0.471
+ },
+ "mlx_quantized_matmul": {
+  "ms_per_iter": 0.943
+ },
+ "torch_mps_gemm": {
+  "tflops": 5.86
+ },
+ "forced_align_cpu": {
+  "sec": 0.555,
+  "paths_digest": "a70f3c508befdd8c",
+  "score_sum": -63949.88
+ },
+ "voxtral_e2e": {
+  "load_sec": 0.6,
+  "transcribe_sec": 6.7,
+  "realtime_x": 8.94,
+  "words": 167,
+  "text_sha": "d21f430b54bfa7b2",
+  "mlx_peak_gb": 6.83
+ },
+ "aligner": {
+  "load_sec": 4.9,
+  "align_sec": 1.0,
+  "n_words": 167,
+  "stamps_digest": "89e2c3691f436db7"
+ },
+ "pyannote": {
+  "sec": 12.5,
+  "n_segments": 242,
+  "n_speakers": 4,
+  "bounds_digest": "a22143a8c73f2f30"
+ },
+ "note": "first baseline after the percentile clamp floor (MEL_FLOOR_PERCENTILE=99, commit 624d9601): voxtral_e2e.text_sha and aligner.stamps_digest supersede all earlier baselines. Attribution checked: today's stack with the library max floor reproduces the July text b700dee60e432450 bit-identically (the floor is the only text change: one word, 'es'->'das'), and today's aligner reproduces the July stamps digest on the July text (see voxtral_60s_text_maxfloor.txt). Kernel, forced_align and pyannote digests unchanged vs macos26/macos27."
+}
