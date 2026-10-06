@@ -183,7 +183,7 @@ changing a number, and check whether a test in `tests/` pins it.
 ## The Voxtral pull request
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
-`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review; rebased with the other open branches onto upstream 0.8 on 2026-10-05, each now carrying its own adaptations of upstream's tests) from `upstream/main` plus `main`'s
+`feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review; rebased with the other open branches onto upstream 0.8 on 2026-10-05, each now carrying its own adaptations of upstream's tests, and again on 2026-10-06 onto upstream's `av<19` pin) from `upstream/main` plus `main`'s
 Voxtral set (the earlier branch of that name, tip `8f132bc`, was deleted once it had fallen far
 behind). It is cut from `upstream-main` and carries **neither of the still-open small PRs**, so its diff
 is Voxtral alone; it overlaps with both textually in `noScribe/main.py`, and whichever merges
@@ -262,7 +262,7 @@ Voxtral PR:
   call for a last chunk raises on short ends in a mode without look-ahead, which the worker's
   `(step, 0)` is (numbers in the docstring of `features`). Our fix is
   huggingface/transformers#49213; once a release carries it, the offline call can go.
-  The branch is two commits (worker, integration) ready for review; its PR text is in
+  The branch is four commits (worker, integration, the transformers 5.18 requirement, librosa) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
   and `nemotron_asr_streaming` plus torchcodec's metadata. PyInstaller, bisected on macOS: before
