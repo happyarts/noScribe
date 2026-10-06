@@ -136,10 +136,13 @@ changing a number, and check whether a test in `tests/` pins it.
 - **Models**: `models/` holds `fast`, `precise` and `voxtral-mini-8bit`; Voxtral repos are
   downloaded on first use, and so is `nvidia/Nemotron-3-Diarization` (HF cache) unless a copy
   sits in `models/nemotron-diarization`.
-- **This venv carries transformers 5.18.0**, the first release with Nemotron's model (installed
-  2026-09-30 in place of a 5.18.0.dev0 from git main). `benchmarks-local/bench_stack.py` gave
-  bit-identical Voxtral text, aligner stamps and pyannote bounds against 5.18.0.dev0 and 5.16.1
-  (`bench_tf5180.json`, `bench_tf518dev.json`, `bench_tf516.json`). Every library upgrade check
+- **This venv carries transformers 5.18.0 or 5.19.0**, depending on the machine; 5.18.0 is the
+  first release with Nemotron's model (installed 2026-09-30 in place of a 5.18.0.dev0 from git
+  main). `benchmarks-local/bench_stack.py` gave bit-identical Voxtral text, aligner stamps and
+  pyannote bounds against 5.18.0.dev0 and 5.16.1 (`bench_tf5180.json`, `bench_tf518dev.json`,
+  `bench_tf516.json`). 5.19.0 (checked 2026-10-06, `bench_tf519.json`) changes nothing either:
+  the suite passes and the Nemotron worker's probabilities and turns are bit-identical to
+  5.18.0.dev0 on CPU and MPS (four AMI test meetings, two German recordings). Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
   `benchmarks-local/UPGRADE-CHECKS.md`; start a new check from there. That log, like all of
   `benchmarks-local/`, is local only and never committed. `~/Documents/transformers-src`
