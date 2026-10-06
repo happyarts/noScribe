@@ -138,11 +138,7 @@ changing a number, and check whether a test in `tests/` pins it.
   sits in `models/nemotron-diarization`.
 - **This venv carries transformers 5.18.0 or 5.19.0**, depending on the machine; 5.18.0 is the
   first release with Nemotron's model (installed 2026-09-30 in place of a 5.18.0.dev0 from git
-  main). `tools/upgrade-checks/bench_stack.py` gave bit-identical Voxtral text, aligner stamps and
-  pyannote bounds against 5.18.0.dev0 and 5.16.1 (`bench_tf5180.json`, `bench_tf518dev.json`,
-  `bench_tf516.json`). 5.19.0 (checked 2026-10-06, `bench_tf519.json`) changes nothing either:
-  the suite passes and the Nemotron worker's probabilities and turns are bit-identical to
-  5.18.0.dev0 on CPU and MPS (four AMI test meetings, two German recordings). Every library upgrade check
+  main), and 5.19.0 changes no result (checked 2026-10-06). Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
   `tools/upgrade-checks/README.md`, with each run's `bench_*.json` beside it; start a new
   check from there, with the scripts beside it (`bench_stack.py`, `bench_nemotron.py`); only

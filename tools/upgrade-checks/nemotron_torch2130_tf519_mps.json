@@ -1,0 +1,11 @@
+{
+ "label": "torch2130_tf519",
+ "device": "mps",
+ "torch": "2.13.0",
+ "transformers": "5.19.0",
+ "sec": 1.6,
+ "n_turns": 145,
+ "n_speakers": 5,
+ "turns_digest": "d9e331984c0a553e",
+ "probs_digest": "b6b6f20381066cb4"
+}
