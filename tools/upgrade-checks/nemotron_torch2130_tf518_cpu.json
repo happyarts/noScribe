@@ -1,0 +1,11 @@
+{
+ "label": "torch2130_tf518",
+ "device": "cpu",
+ "torch": "2.13.0",
+ "transformers": "5.18.0",
+ "sec": 7.2,
+ "n_turns": 145,
+ "n_speakers": 5,
+ "turns_digest": "d9e331984c0a553e",
+ "probs_digest": "6371898baa2afc11"
+}

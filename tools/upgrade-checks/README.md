@@ -12,14 +12,16 @@ JSON is `bench_<label>.json` here.
 2. Interleave the runs, so that load on the machine does not read as a regression:
    baseline → candidate → baseline again, with the same label scheme
    (`<lib><version>_<other lib><version>`):
-   `venv/bin/python3 benchmarks-local/bench_stack.py <label>` (Voxtral, aligner,
+   `<venvX>/bin/python3 tools/upgrade-checks/bench_stack.py <label>` (Voxtral, aligner,
    forced_align, pyannote, raw GEMM), then `bench_nemotron.py <label>` for the Nemotron
-   worker on cpu and mps (`--compare` afterwards). Both scripts and their audio stay in
-   `benchmarks-local/` (local only); they write their JSON there.
+   worker on cpu and mps (`--compare` on either afterwards). Both write their JSON here.
+   Their audio (`speech_60s.wav`, `bench_4min.wav`) is a real recording and stays out of
+   git, in `benchmarks-local/` or wherever `NOSCRIBE_BENCH_AUDIO` points; so do the
+   Voxtral transcript and Nemotron's per-frame probabilities they write next to it.
 3. `<venvX>/bin/python3 -m pytest tests/ -q -p no:cacheprovider`.
 4. Read the release notes for what the stack touches: MPS, CPU attention/matmul,
    stft/FFT, removed APIs (grep noScribe, pyannote, transformers, speechbrain for them).
-5. Move the run's `bench_<label>.json` here, add a row below, delete the copied venv.
+5. Add a row below, delete the copied venv.
 
 The digests must stay equal; timings only mean something against the baseline
 run next to them. A digest that moved between rows with the *same* versions
