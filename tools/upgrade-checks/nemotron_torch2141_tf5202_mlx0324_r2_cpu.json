@@ -1,0 +1,11 @@
+{
+ "label": "torch2141_tf5202_mlx0324_r2",
+ "device": "cpu",
+ "torch": "2.14.1",
+ "transformers": "5.20.2",
+ "sec": 12.8,
+ "n_turns": 145,
+ "n_speakers": 5,
+ "turns_digest": "d9e331984c0a553e",
+ "probs_digest": "6371898baa2afc11"
+}

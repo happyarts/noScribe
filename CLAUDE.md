@@ -136,9 +136,12 @@ changing a number, and check whether a test in `tests/` pins it.
 - **Models**: `models/` holds `fast`, `precise` and `voxtral-mini-8bit`; Voxtral repos are
   downloaded on first use, and so is `nvidia/Nemotron-3-Diarization` (HF cache) unless a copy
   sits in `models/nemotron-diarization`.
-- **This venv carries transformers 5.18.0 or 5.19.0**, depending on the machine; 5.18.0 is the
-  first release with Nemotron's model (installed 2026-09-30 in place of a 5.18.0.dev0 from git
-  main), and 5.19.0 changes no result (checked 2026-10-06). Every library upgrade check
+- **The venv follows the requirements, not a frozen set**: on 2026-10-20 it was upgraded to what a
+  fresh install gets (transformers 5.20.2, huggingface_hub 2.2, librosa 1.0) plus the bumped
+  Voxtral pins (mlx 0.32.4, mlx-lm 0.32.2), with torch still 2.13; every result stayed
+  bit-identical. A machine on an older venv fails `tests/test_voxtral_pin.py` until it runs
+  `pip install --upgrade --upgrade-strategy eager -r` on both requirements files. 5.18.0 is the
+  first transformers with Nemotron's model, so `>=5.18` stays the floor. Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
   `tools/upgrade-checks/README.md`, with each run's `bench_*.json` beside it; start a new
   check from there, with the scripts beside it (`bench_stack.py`, `bench_nemotron.py`); only
