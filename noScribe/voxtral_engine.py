@@ -2115,10 +2115,13 @@ def _hub_offline():
 
 
 def _hub_reachable():
-    """Whether Hugging Face answers at all -- any HTTP answer counts."""
+    """Whether Hugging Face answers at all -- any HTTP answer counts.
+    httpx comes from huggingface_hub, which uses httpx up to 1.x and httpx2 from
+    2.0 on: with 2.x nothing installs httpx itself any more, and importing it
+    directly made every hub look unreachable."""
     try:
-        import httpx
         from huggingface_hub import constants
+        from huggingface_hub.utils import httpx
         httpx.head(constants.ENDPOINT, timeout=5)
         return True
     except Exception:
@@ -2162,7 +2165,8 @@ def _load_from_hub(load, what, repo, size_gb, log_cb):
         _log(log_cb, "info", f"Downloading the {what} {repo}{size}; this happens "
                              f"only once.")
     try:
-        from httpx import HTTPError as _TransportFailure
+        from huggingface_hub.utils import httpx   # httpx or httpx2, see _hub_reachable
+        _TransportFailure = httpx.HTTPError
     except Exception:
         _TransportFailure = OSError
     try:

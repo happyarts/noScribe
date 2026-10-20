@@ -7,6 +7,7 @@ error of its own -- a wrong prompt, memory not coming back, or a message
 naming an environment variable instead of the problem.
 """
 import gc
+import sys
 import weakref
 
 import numpy as np
@@ -299,8 +300,9 @@ def test_needs_download_asks_the_cache(monkeypatch, tmp_path):
 def test_a_download_that_stalls_says_so(monkeypatch, hub):
     """When the connection drops during the first download, huggingface_hub
     gives up with httpx's own error -- no OSError, so it slipped past the
-    rewording and the user read "The read operation timed out"."""
-    httpx = pytest.importorskip("httpx")
+    rewording and the user read "The read operation timed out". The error is
+    the hub's own client's: httpx up to huggingface_hub 1.x, httpx2 from 2.0 on."""
+    httpx = pytest.importorskip("huggingface_hub.utils").httpx
 
     def stalled(model):
         raise httpx.ReadTimeout("The read operation timed out")
@@ -309,6 +311,19 @@ def test_a_download_that_stalls_says_so(monkeypatch, hub):
     monkeypatch.setattr(v, "_Aligner", stalled)
     with pytest.raises(RuntimeError, match="not downloaded yet"):
         v._AlignerPool("de", None).aligner_for(GERMAN)
+
+
+def test_the_hub_is_asked_without_httpx_installed(monkeypatch):
+    """huggingface_hub 2.0 moved to httpx2, and a fresh install no longer brings
+    httpx. Importing httpx directly then made every hub look unreachable, so a
+    job whose aligner was not downloaded yet stopped with "no internet
+    connection" while online."""
+    utils = pytest.importorskip("huggingface_hub.utils")
+    client = utils.httpx
+    if client.__name__ != "httpx":                        # the hub's is httpx2
+        monkeypatch.setitem(sys.modules, "httpx", None)  # httpx not installed
+    monkeypatch.setattr(client, "head", lambda url, timeout: None)
+    assert v._hub_reachable()
 
 
 def test_a_refusal_names_what_the_model_really_needs(monkeypatch):

@@ -21,11 +21,13 @@ The author relicensed within a day of being asked. Do the migration only if one 
 * **mlx-voxtral goes quiet again** and a defect turns up that nobody upstream will
   fix.
 * **An MLX or mlx-lm bump breaks it.** The exposure is `mlx-lm`, but not for the
-  reason this brief used to give. `mlx-lm` has had no release since 0.31.3
-  (2026-04-22) although `main` is active (checked 2026-09-03); the engine drives
-  decoding through its `generate_step`, `KVCache` and `make_sampler`, so a
-  release that changes those, or a stale release that stops installing against
-  a newer `mlx`, breaks the decode loop. mlx-audio dropped `mlx-lm` as a core
+  reason this brief used to give. The engine drives decoding through `mlx-lm`'s
+  `generate_step`, `KVCache` and `make_sampler`, so a release that changes those,
+  or a stale release that stops installing against a newer `mlx`, breaks the
+  decode loop. After 0.31.3 (2026-04-22) it went six months without a release;
+  0.32.2 (2026-10-16), pinned since 2026-10-20, keeps all three as the engine
+  calls them (`generate_step` gained a `stream` parameter, which keyword
+  arguments do not reach) and needs `mlx` >= 0.32.2. mlx-audio dropped `mlx-lm` as a core
   dependency on 2026-08-09 and vendors a snapshot of 0.31.3 under
   `mlx_audio/lm`, so the move would make the engine independent of `mlx-lm`
   releases. That is the argument; the `mx.metal` one does not hold — see fact 4.
@@ -201,8 +203,8 @@ them `mlx_audio/stt/utils.py:wired_limit`, the context manager Voxtral's
 `stream_generate` runs inside. So whichever package the engine sits on, a
 removal of `mx.metal.is_available` breaks it, and only mlx-audio also breaks
 on the removal that is actually announced. Do not cite `mx.metal` as a reason
-to move. `mlx` itself is at 0.32.2 (2026-08-25); the pin stays at 0.32.1 until
-bumped deliberately.
+to move. The pin moved from 0.32.1 to `mlx` 0.32.4 on 2026-10-20, which warns
+about none of this either.
 
 ## The alignment path is not affected — but know this before you touch it
 

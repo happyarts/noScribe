@@ -383,7 +383,7 @@ predict the outcome: these models tie on FLEURS and lose on real conversation.
 
 ```bash
 # Parakeet (needs `pip install parakeet-mlx`, which is NOT in the requirements --
-# it pulls only dacite on top of what is already installed, and mlx 0.32.1
+# it pulls only dacite on top of what is already installed, and mlx 0.32.4
 # satisfies its floor, so it can be added and removed without disturbing the
 # pinned Voxtral stack)
 python docs/scripts/engines/parakeet_wer.py ref \
@@ -392,7 +392,7 @@ python docs/scripts/engines/parakeet_wer.py ref \
 python docs/scripts/engines/parakeet_wer.py fleurs 100
 
 # Nemotron 3.5 ASR (needs mlx-audio from git main -- nemotron_asr came after the
-# 0.5.5 release -- and mlx-audio wants mlx 0.32.2 over the pinned 0.32.1, so use
+# 0.5.5 release -- and it wanted mlx 0.32.2 when 0.32.1 was pinned, so use
 # a throwaway venv, not this one). arm = language[@right context]: de-DE is
 # 1120 ms chunks, de-DE@6 560 ms; auto and en-US for the cross-checks
 python docs/scripts/engines/nemotron_asr_wer.py ref \
