@@ -72,12 +72,33 @@ def test_without_turns_silero_stays(turns):
         assert not mapped and ft.get_speech_timestamps is silero
 
 
-def test_main_hands_the_diarization_to_the_whisper_worker(tmp_path, monkeypatch):
-    """The worker's arguments, taken where main.py starts the child process."""
-    pytest.importorskip("tkinter")
+def _diarization(engine, turns=((1500, 4200),)):
+    """A diarization as the job hands it to the worker (DiarizationResult.to_mapping())."""
+    from noScribe.inference import DiarizationResult, DiarizationSegment
+    extensions = {'pyannote': {'local-pyannote': {'centroids': {}}},
+                  'nemotron': {'local-nemotron': {'probabilities': {}}}}[engine]
+    return DiarizationResult(tuple(DiarizationSegment(s, e, 'SPEAKER_00') for s, e in turns),
+                             extensions).to_mapping()
+
+
+def test_only_pyannotes_turns_become_the_speech_map():
+    """Nemotron's many short turns cost words as Whisper's speech map on German
+    (see whisper_mp_worker.speech_turns_from), so only a diarization that carries
+    pyannote's evidence is turned into one -- in seconds, from the milliseconds
+    the job hands over."""
+    assert w.speech_turns_from(_diarization('pyannote')) == [[1.5, 4.2]]
+    assert w.speech_turns_from(_diarization('nemotron')) is None
+    assert w.speech_turns_from(_diarization('pyannote', turns=())) is None
+    assert w.speech_turns_from(None) is None
+
+
+def test_the_local_backend_hands_the_diarization_to_the_whisper_worker(monkeypatch):
+    """The worker's arguments, taken where the local backend starts the child process."""
     import queue
-    import noScribe.main as m
-    monkeypatch.setattr(m, "config", {})
+    from noScribe import inference
+    from noScribe.inference import (DiarizationResult, DiarizationSegment, LocalInferenceBackend,
+                                    TranscriptionRequest)
+    from noScribe.models import ModelRef
     seen = []
 
     class FakeProcess:
@@ -94,14 +115,24 @@ def test_main_hands_the_diarization_to_the_whisper_worker(tmp_path, monkeypatch)
         def join(self, timeout=None):
             pass
 
-    monkeypatch.setattr(m.mp, "get_context", lambda method: SimpleNamespace(Queue=queue.Queue, Process=FakeProcess))
-    app = m.HeadlessApp()
-    job = m.create_transcription_job(audio_file=str(tmp_path / "a.wav"), transcript_file=str(tmp_path / "a.html"),
-                                     speaker_detection="auto", cli_mode=True)
-    app._run_whisper_subprocess_stream("x.wav", job, lambda seg: None,
-                                       [{"start": 1500, "end": 4200, "label": "SPEAKER_00"}])
-    app._run_whisper_subprocess_stream("x.wav", job, lambda seg: None)
-    assert [a["speech_turns"] for a in seen] == [[[1.5, 4.2]], None]
+        def close(self):
+            pass
+
+    class FakeQueue(queue.Queue):
+        def close(self):
+            pass
+
+        def join_thread(self):
+            pass
+
+    monkeypatch.setattr(inference.mp, "get_context", lambda method: SimpleNamespace(Queue=FakeQueue, Process=FakeProcess))
+    backend = LocalInferenceBackend({"precise": "models/precise"})
+    diarization = DiarizationResult((DiarizationSegment(1500, 4200, "SPEAKER_00"),),
+                                    {"local-pyannote": {"centroids": {}}})
+    for handed in (diarization, None):
+        backend.transcribe(TranscriptionRequest("x.wav", ModelRef("local-whisper", "precise"),
+                                                diarization=handed), lambda seg: None)
+    assert [w.speech_turns_from(a["diarization"]) for a in seen] == [[[1.5, 4.2]], None]
 
 
 def test_the_worker_transcribes_inside_the_swap(tmp_path, monkeypatch):
@@ -132,8 +163,9 @@ def test_the_worker_transcribes_inside_the_swap(tmp_path, monkeypatch):
         asked.clear()
         messages = Queue()
         w.whisper_proc_entrypoint({
-            "whisper_model": SimpleNamespace(path=tmp_path), "device": "cpu", "audio_path": str(tmp_path / "a.wav"),
-            "language_name": language, "language_code": "de", "speech_turns": [[1.0, 2.0]]}, messages)
+            "model_path": str(tmp_path), "device": "cpu", "audio_path": str(tmp_path / "a.wav"),
+            "language": None if language == "Auto" else "de",
+            "diarization": _diarization("pyannote", turns=((1000, 2000),))}, messages)
         results = [m for m in list(messages.queue) if m["type"] == "result"]
         assert len(results) == 1 and results[0]["ok"], results
         assert asked == expected, language
@@ -141,58 +173,37 @@ def test_the_worker_transcribes_inside_the_swap(tmp_path, monkeypatch):
 
 def _whisper_stand_in(seen):
     """Records its arguments and says one word: a job without any text is an error."""
-    def stream(*args):
-        seen.append(args)
-        args[2]({"start": 0.5, "end": 1.0, "text": " Hallo", "words": []})
-        return SimpleNamespace(duration=3.0)
+    from noScribe.inference import TranscriptionInfo, TranscriptionSegment
+
+    def stream(*args, **kwargs):
+        seen.append((args, kwargs))
+        args[2](TranscriptionSegment(0.5, 1.0, " Hallo"))
+        return TranscriptionInfo(duration=3.0)
     return stream
 
 
 @pytest.mark.parametrize("detection, handed", [("auto", True), ("none", False)])
-def test_the_diarization_reaches_whisper(tmp_path, monkeypatch, detection, handed):
-    """Through the pipeline: with speaker detection the turns go to Whisper, without
-    it there are none (and diarization is None rather than unbound)."""
+def test_the_diarization_reaches_the_transcription(tmp_path, monkeypatch, detection, handed):
+    """Through the pipeline: with speaker detection the whole diarization goes to
+    the transcription, without it there is none (and it is None rather than
+    unbound). Which engine makes what of it is the worker's business
+    (test_only_pyannotes_turns_become_the_speech_map)."""
     pytest.importorskip("tkinter")
     import soundfile as sf
     import noScribe.main as m
+    from noScribe.inference import DiarizationResult, DiarizationSegment
     monkeypatch.setattr(m, "config_dir", str(tmp_path))
     monkeypatch.setattr(m, "config", {})
     audio = tmp_path / "a.wav"
     sf.write(audio, np.zeros(SR * 3, dtype=np.int16), SR)
     app = m.HeadlessApp()
-    turns = [{"start": 0, "end": 2000, "label": "SPEAKER_00"}]
-    # 'auto' takes Nemotron where its weights are on disk, and Nemotron's turns are
-    # kept from Whisper (test_only_pyannotes_turns_reach_whisper)
-    monkeypatch.setattr(app, "_diarization_engine", lambda job: "pyannote")
-    monkeypatch.setattr(app, "_run_diarize_subprocess", lambda *a, **k: turns)
+    result = DiarizationResult((DiarizationSegment(0, 2000, "SPEAKER_00"),), {"local-pyannote": {"centroids": {}}})
+    monkeypatch.setattr(app, "_run_diarize_subprocess", lambda *a, **k: result)
     seen = []
     monkeypatch.setattr(app, "_run_whisper_subprocess_stream", _whisper_stand_in(seen))
     job = m.create_transcription_job(audio_file=str(audio), transcript_file=str(tmp_path / "a.html"),
+                                     transcription_model="local-whisper:precise",
                                      speaker_detection=detection, cli_mode=True)
     app._process_single_job(job)
     assert seen, "Whisper was not started"
-    assert seen[0][3] == (turns if handed else None)
-
-
-@pytest.mark.parametrize("engine, handed", [("pyannote", True), ("nemotron", False)])
-def test_only_pyannotes_turns_reach_whisper(tmp_path, monkeypatch, engine, handed):
-    """Nemotron's many short turns cost words as Whisper's speech map on German
-    (see main.py where Whisper is started), so its diarization is not handed on."""
-    pytest.importorskip("tkinter")
-    import soundfile as sf
-    import noScribe.main as m
-    monkeypatch.setattr(m, "config_dir", str(tmp_path))
-    monkeypatch.setattr(m, "config", {})
-    audio = tmp_path / "a.wav"
-    sf.write(audio, np.zeros(SR * 3, dtype=np.int16), SR)
-    app = m.HeadlessApp()
-    turns = [{"start": 0, "end": 2000, "label": "SPEAKER_00"}]
-    monkeypatch.setattr(app, "_diarization_engine", lambda job: engine)
-    monkeypatch.setattr(app, "_run_diarize_subprocess", lambda *a, **k: turns)
-    seen = []
-    monkeypatch.setattr(app, "_run_whisper_subprocess_stream", _whisper_stand_in(seen))
-    job = m.create_transcription_job(audio_file=str(audio), transcript_file=str(tmp_path / "a.html"),
-                                     speaker_detection="auto", cli_mode=True)
-    app._process_single_job(job)
-    assert seen, "Whisper was not started"
-    assert seen[0][3] == (turns if handed else None)
+    assert seen[0][1]["diarization"] is (result if handed else None)

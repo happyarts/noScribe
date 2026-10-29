@@ -51,7 +51,7 @@ _EST_TOKENS_PER_SEC = 3.0
 def is_available():
     """True if the Voxtral backend and its dependencies can be imported.
 
-    Deliberately NOT cached: _register_voxtral_models re-checks this on every
+    Deliberately NOT cached: the local-voxtral plugin re-checks this on every
     dropdown open so a backend pip-installed while the app runs appears without a
     restart. The check is three cheap importlib.util.find_spec lookups (no heavy
     import), so re-running it per dropdown open is negligible."""
@@ -471,7 +471,7 @@ def _total_ram_gb():
     """Total physical RAM in GB (sysctl on macOS; psutil fallback; else 16).
 
     Cached: total RAM is a process constant, but this is queried once per model
-    on every model-dropdown open (via App.model_label) and again during a job,
+    on every model-dropdown open (the local-voxtral plugin's menu_hint) and again during a job,
     so without the cache each call would spawn a `sysctl` subprocess for a value
     that never changes."""
     try:

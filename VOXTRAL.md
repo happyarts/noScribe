@@ -192,9 +192,12 @@ This is not rare enough to skip: on a raw Zoom recording, 5 of 64 windows cut at
 speech. It depends on the recording — read-aloud benchmark audio never shows it.
 Measurements in [docs/voxtral-benchmarks.md](docs/voxtral-benchmarks.md), §5.
 
-To pin the length yourself, set `voxtral_chunk_sec:` (seconds) in `config.yml`
-(`0` = automatic). If other apps need RAM, raise `voxtral_ram_reserve_gb:`
-instead — that is the knob the automatic length is computed against. Raising it past 10 minutes
+To pin the length yourself, set `chunk_sec:` (seconds) in
+`plugin-settings/local-voxtral.yml` below noScribe's configuration directory
+(`0` = automatic). If other apps need RAM, raise `ram_reserve_gb:` there
+instead — that is the knob the automatic length is computed against. (The older
+`voxtral_chunk_sec:` and `voxtral_ram_reserve_gb:` in `config.yml` still count
+where the plugin file leaves a setting out.) Raising it past 10 minutes
 is refused — see the cap above.
 
 ## Correcting brand / product / programme names

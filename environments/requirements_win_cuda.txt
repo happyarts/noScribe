@@ -10,6 +10,7 @@ cpufeature
 customtkinter
 CTkToolTip
 faster-whisper
+fastapi>=0.115,<1
 importlib-resources>=5.10; python_version < "3.12"
 # transformers builds Nemotron's mel filters with librosa when it constructs the
 # processor (noScribe/nemotron_mp_worker.py), and nothing else here pulls it in.
@@ -28,3 +29,4 @@ soundfile
 # 5.18 or newer: the first release that carries Nemotron 3 Diarization, which
 # noScribe/nemotron_mp_worker.py runs.
 transformers>=5.18
+uvicorn>=0.30,<1

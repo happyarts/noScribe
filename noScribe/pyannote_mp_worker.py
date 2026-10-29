@@ -2,7 +2,7 @@ import contextlib
 import os
 import platform
 import sys
-import traceback
+from .worker_errors import WorkerState
 
 if sys.version_info >= (3, 12):
     import importlib.resources as impres
@@ -186,13 +186,19 @@ def _embed_spans(pipeline, waveform, sample_rate, spans, q):
     return out
 
 
+# The key this worker's own data travels under in DiarizationRequest and
+# DiarizationResult extensions: the plugin's backend ID.
+EXTENSION_KEY = "local-pyannote"
+
+
 def select_device(requested):
-    """'cpu' when asked for, else the platform's accelerator where it works:
-    MPS on macOS 12.3 and later, CUDA on Windows and Linux. Shared with
-    nemotron_mp_worker; torch is imported here, in the child, not at module load."""
+    """The device a plugin's settings name ('cpu', 'cuda', 'mps'), else, for ''
+    or 'auto', the platform's accelerator where it works: MPS on macOS 12.3 and
+    later, CUDA on Windows and Linux. Shared with nemotron_mp_worker; torch is
+    imported here, in the child, not at module load."""
     import torch
-    if requested == 'cpu':
-        return 'cpu'
+    if requested not in (None, '', 'auto'):
+        return requested
     if platform.system() == "Darwin":  # MAC
         return 'mps' if platform.mac_ver()[0] >= '12.3' and torch.backends.mps.is_available() else 'cpu'
     if platform.system() in ('Windows', 'Linux'):
@@ -209,16 +215,20 @@ def pyannote_proc_entrypoint(args: dict, q):
       {"type":"log","level":"info|warn|error|debug","msg":str}
       {"type":"progress","step":str,"pct":int}
       {"type":"result","ok":True,"segments":[{"start":ms,"end":ms,"label":str}],
-                                 "centroids":{label:[float]}}
-      {"type":"result","ok":False,"error":str,"trace":str}
+       "extensions":{"local-pyannote":{"centroids":{label:[float]}}}}
+      {"type":"state","device":str|None,"stage":str}
+      Failed results include the structured fields from worker_errors.error_result.
 
-    With ``args["embed_spans"]`` (a list of ``[start_s, end_s]``) the call does
-    not diarize: it returns one speaker embedding per span, from the pipeline's
-    own embedding model, for noScribe.voice_check:
-      {"type":"result","ok":True,"embeddings":[[float]|None]}
+    With ``embed_spans`` (a list of ``[start_s, end_s]``) in the request's
+    ``extensions["local-pyannote"]`` the call does not diarize: it returns one
+    speaker embedding per span, from the pipeline's own embedding model, for
+    noScribe.voice_check:
+      {"type":"result","ok":True,"segments":[],
+       "extensions":{"local-pyannote":{"embeddings":[[float]|None]}}}
     """
-    device = ''
+    state = WorkerState(q, args.get('device'))
     try:
+        state.update('imports')
         import torch
         if platform.system() == "Darwin" and platform.machine() == "x86_64":
            torch.set_num_threads(1)        
@@ -276,11 +286,13 @@ def pyannote_proc_entrypoint(args: dict, q):
 
         audio_file = args.get("audio_path")
         num_speakers = args.get("num_speakers")
+        embed_spans = ((args.get("extensions") or {}).get(EXTENSION_KEY) or {}).get("embed_spans")
         if not os.path.exists(audio_file):
             raise FileNotFoundError(audio_file)
 
         plog("debug", "Subprocess (diarize) started. Initializing PyAnnote pipeline...")
         
+        state.update('device_selection')
         device = select_device(args.get("device", ""))
 
         # Every unit is embedded at its own length, and MPS compiles and keeps one
@@ -291,9 +303,10 @@ def pyannote_proc_entrypoint(args: dict, q):
         # where 3 GB are to spare and not worth swapping for where they are not.
         # (torch.mps.empty_cache() holds the memory down but makes every call slower
         # than the CPU; the embeddings are the same either way.)
-        if args.get("embed_spans") is not None and device == 'mps' and _ram_gb() < EMBED_MPS_MIN_RAM_GB:
+        if embed_spans is not None and device == 'mps' and _ram_gb() < EMBED_MPS_MIN_RAM_GB:
             device = 'cpu'
 
+        state.update('model_loading', device=device)
         with impres.as_file(impres.files("pyannote")) as mypath, hide_speechbrain():
             pipeline = Pipeline.from_pretrained(mypath)
         # One embedding-model call per chunk instead of one per speaker slot;
@@ -306,12 +319,17 @@ def pyannote_proc_entrypoint(args: dict, q):
         except Exception:
             fast = False
         plog("debug", f"Fast embedding path active: {fast}")
+        state.update('audio_loading')
         waveform, sample_rate = load_waveform(audio_file)
+        state.update('device_transfer')
         pipeline.to(torch.device(device))
+        plog("info", f"using {device}")
 
-        if args.get("embed_spans") is not None:
-            embeddings = _embed_spans(pipeline, waveform, sample_rate, args["embed_spans"], q)
-            q.put({"type": "result", "ok": True, "embeddings": embeddings})
+        if embed_spans is not None:
+            state.update('voice_check')
+            embeddings = _embed_spans(pipeline, waveform, sample_rate, embed_spans, q)
+            q.put({"type": "result", "ok": True, "segments": [],
+                   "extensions": {EXTENSION_KEY: {"embeddings": embeddings}}})
             return
 
         seg_list = []
@@ -323,6 +341,7 @@ def pyannote_proc_entrypoint(args: dict, q):
         # too low -- KMeans splits a large speaker instead of finding the missed
         # one. That is why min_speakers/max_speakers, which the pipeline accepts,
         # are not surfaced (docs/surplus-speaker-labels.md).
+        state.update('diarization')
         with SimpleProgressHook() as hook:
             if num_speakers is not None:
                 diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, hook=hook, num_speakers=num_speakers)
@@ -342,20 +361,14 @@ def pyannote_proc_entrypoint(args: dict, q):
             plog("warn", f"No speaker centroids: {e}")
             centroids = {}
         try:
-            q.put({"type": "result", "ok": True, "segments": seg_list, "centroids": centroids})
+            q.put({"type": "result", "ok": True, "segments": seg_list,
+                   "extensions": {EXTENSION_KEY: {"centroids": centroids}}})
         except Exception:
             pass
 
     except Exception as e:
         try:
-            error_str = f"{type(e).__name__}: {e}"
-            error_str += f' (device_{device[:3]})' # device_cpu or device_cud or device_mps
-            q.put({
-                "type": "result",
-                "ok": False,
-                "error": error_str,
-                "trace": traceback.format_exc(),
-            })
+            q.put(state.failure(e))
         except Exception:
             pass
 

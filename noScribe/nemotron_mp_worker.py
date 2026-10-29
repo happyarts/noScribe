@@ -1,11 +1,13 @@
 """Speaker diarization with NVIDIA's Nemotron 3 Diarization, in a child process.
 
-An alternative to pyannote_mp_worker; main.App._diarization_engine picks one.
+An alternative to pyannote_mp_worker, run by the local-nemotron plugin
+(noScribe/plugins/local_nemotron); main.select_diarization_model picks one.
 It answers with the same result message -- turns as
 {"start": ms, "end": ms, "label": "SPEAKER_nn"} -- and instead of centroids it
-leaves the model's own speaker probabilities (one row per FRAME_S, one column
-per speaker, float16) in a .npy file next to the audio, which is what the voice
-check compares against (noScribe.voice_check.Probabilities).
+returns the model's own speaker probabilities (one row per FRAME_S, one column
+per speaker, float16), which is what the voice check compares against
+(noScribe.voice_check.Probabilities). They travel as data, base64 of the
+float16 rows, so a server can hand them to the desktop: about 7.7 MB per hour.
 
 Measured against pyannote (issue #360): on 15 of the 16 AMI test meetings (not
 in Nemotron's training data; VoxConverse and AMI train/dev are) 11.6 % of words
@@ -21,17 +23,20 @@ builds the processor's mel filters.
 
 Messages:
   {"type":"log","level":"info|warn|error|debug","msg":str}
-  {"type":"progress","pct":int}
+  {"type":"progress","step":"diarization","pct":int}
+  {"type":"state","device":str|None,"stage":str}
   {"type":"result","ok":True,"segments":[{"start":ms,"end":ms,"label":str}],
-                             "probabilities":{"path":str,"columns":[label],"frame_s":float}}
-  {"type":"result","ok":False,"error":str,"trace":str}
+   "extensions":{"local-nemotron":{"probabilities":
+       {"float16_base64":str,"shape":[rows,columns],"columns":[label],"frame_s":float}}}}
+  Failed results include the structured fields from worker_errors.error_result.
 
 Stdlib-only at import time, like the other workers: the heavy imports happen in
 the entrypoint.
 """
 import os
 import sys
-import traceback
+
+from .worker_errors import WorkerState
 
 if sys.version_info >= (3, 12):
     import importlib.resources as impres
@@ -45,6 +50,13 @@ MODEL_DIR = "nemotron-diarization"  # under models/
 # The model's output frame: transformers upsamples its 80 ms encoder frames to
 # the 10 ms of the spectrogram.
 FRAME_S = 0.01
+
+# The key this worker's own data travels under in DiarizationResult extensions:
+# the plugin's backend ID.
+EXTENSION_KEY = "local-nemotron"
+
+# A worker without steps of its own reports its whole run under this name.
+PROGRESS_STEP = "diarization"
 
 # A speaker counts as talking where the model's probability exceeds this: the
 # model card's and transformers' default, and what the measurement used.
@@ -75,11 +87,10 @@ def weights_on_disk():
         return False
 
 
-def available():
-    """Whether the installed transformers knows the model, librosa is there for its
-    processor (transformers builds the mel filters with it), and the weights are on
-    disk. Found without importing transformers: main.py asks this in the GUI
-    process, which never loads it."""
+def installed():
+    """Whether the installed transformers knows the model and librosa is there for
+    its processor (transformers builds the mel filters with it). Found without
+    importing transformers: the GUI process asks this and never loads it."""
     try:
         import importlib.util
         spec = importlib.util.find_spec("transformers")
@@ -87,11 +98,32 @@ def available():
             return False
         if not os.path.isdir(os.path.join(os.path.dirname(spec.origin), "models", "nemotron3_diarization")):
             return False
-        if importlib.util.find_spec("librosa") is None:
-            return False
-        return weights_on_disk()
+        return importlib.util.find_spec("librosa") is not None
     except Exception:
         return False
+
+
+def available():
+    """installed(), and the weights are on disk, so running it starts no download."""
+    return installed() and weights_on_disk()
+
+
+def encode_probabilities(probabilities, columns):
+    """The probability rows as JSON-compatible data: base64 of the float16 bytes,
+    exactly what the worker computed (decode_probabilities restores them)."""
+    import base64
+    import numpy as np
+    rows = np.ascontiguousarray(probabilities, dtype='<f2')
+    return {"float16_base64": base64.b64encode(rows.tobytes()).decode("ascii"),
+            "shape": list(rows.shape), "columns": list(columns), "frame_s": FRAME_S}
+
+
+def decode_probabilities(data):
+    """The numpy rows from encode_probabilities' data."""
+    import base64
+    import numpy as np
+    rows = np.frombuffer(base64.b64decode(data["float16_base64"]), dtype='<f2')
+    return rows.reshape(data["shape"])
 
 
 def label(column):
@@ -157,8 +189,9 @@ def nemotron_proc_entrypoint(args: dict, q):
         except Exception:
             pass
 
-    device = ''
+    state = WorkerState(q, args.get('device'))
     try:
+        state.update('imports')
         # huggingface_hub sends usage telemetry (library, versions) with its
         # requests unless told not to, and reads this switch once, when it is
         # imported. Keep noScribe processing local, even if the parent
@@ -179,16 +212,19 @@ def nemotron_proc_entrypoint(args: dict, q):
         audio_file = args["audio_path"]
         if not os.path.exists(audio_file):
             raise FileNotFoundError(audio_file)
+        state.update('device_selection')
         device = select_device(args.get("device", ""))
 
+        state.update('model_loading', device=device)
         source = model_source()
         # Weights on disk load without asking the Hub, so a job stays offline
         # and a new upload of the model cannot change results unannounced.
         offline = weights_on_disk()
         plog("debug", f"Loading Nemotron diarization from {source} on {device}")
-        q.put({"type": "progress", "pct": 0})
+        q.put({"type": "progress", "step": PROGRESS_STEP, "pct": 0})
         processor = AutoProcessor.from_pretrained(source, local_files_only=offline)
 
+        state.update('audio_loading')
         waveform, sample_rate = load_waveform(audio_file)
         audio = waveform[0].numpy()  # ToWav writes mono; a view, not a copy
         del waveform
@@ -203,22 +239,19 @@ def nemotron_proc_entrypoint(args: dict, q):
         inputs = inputs.to(device, dtype=model.dtype)
         # Offline mode: the whole recording in one call, cut into chunks with a
         # speaker cache inside the model, so there is no length limit.
+        state.update('diarization')
         with torch.inference_mode():
             logits = model(**inputs).logits
         mask = inputs.attention_mask
         del inputs  # the whole recording's features, on the device
         speaker_dicts = processor.extract_speaker_dict(logits, mask, threshold=THRESHOLD)[0]
         probabilities = torch.sigmoid(logits[0].float()).cpu().numpy().astype(np.float16)
-        probabilities_path = os.path.splitext(audio_file)[0] + ".speakers.npy"
-        np.save(probabilities_path, probabilities)
-        q.put({"type": "progress", "pct": 100})
+        q.put({"type": "progress", "step": PROGRESS_STEP, "pct": 100})
         q.put({"type": "result", "ok": True, "segments": turns(speaker_dicts),
-               "probabilities": {"path": probabilities_path, "frame_s": FRAME_S,
-                                 "columns": [label(k) for k in range(probabilities.shape[1])]}})
+               "extensions": {EXTENSION_KEY: {"probabilities": encode_probabilities(
+                   probabilities, [label(k) for k in range(probabilities.shape[1])])}}})
     except Exception as e:
         try:
-            q.put({"type": "result", "ok": False,
-                   "error": f"{type(e).__name__}: {e} (device_{device[:3]})",  # main.py's CUDA fallback reads this
-                   "trace": traceback.format_exc()})
+            q.put(state.failure(e))
         except Exception:
             pass

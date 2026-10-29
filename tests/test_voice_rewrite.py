@@ -37,19 +37,19 @@ pytest.importorskip("tkinter")  # noScribe.main, for App._apply_speaker_name
 from noScribe import utils, voice_check
 
 MAIN = Path(__file__).resolve().parents[1] / 'noScribe' / 'main.py'
-LIFTED = ('short_label', 'overlap_len', 'find_speaker', 'adjust_for_pause', 'on_segment', 'check_voices',
-          'run_voice_check')
+LIFTED = ('short_label', 'overlap_len', 'find_speaker', 'adjust_for_pause', 'reset_transcript', 'on_segment',
+          'check_voices', 'run_voice_check')
 VOICES = {'SPEAKER_00': [1.0, 0.0, 0.0], 'SPEAKER_01': [0.0, 1.0, 0.0], 'SPEAKER_02': [0.0, 0.0, 1.0]}
 
 HARNESS = '''
-def build(self, job, d, main_body, diarization, tmp_audio_file):
-    header_nodes = len(main_body.children)
+def build(self, job, d, main_body, diarization, diarization_result, tmp_audio_file):
     p = d.createElement('p')
     main_body.appendChild(p)
     speaker = speaker_disp = prev_speaker = ''
     last_auto_save = datetime.datetime.now()
     last_segment_end = last_timestamp_ms = 0
     first_segment = True
+    initial_document = d.asHTML()
     voice_segments = []
 
     def save_doc():
@@ -57,7 +57,11 @@ def build(self, job, d, main_body, diarization, tmp_audio_file):
 
 {lifted}
 
-    return on_segment, check_voices, run_voice_check, voice_segments, (lambda: first_segment)
+    def write(segment, *args):  # the tests hand in segments as the worker sends them
+        return on_segment(TranscriptionSegment.from_mapping(segment), *args)
+
+    return (write, check_voices, run_voice_check, voice_segments, (lambda: first_segment),
+            (lambda: d))
 '''
 
 
@@ -79,9 +83,12 @@ class FakeApp:
     """What the closures ask of `self`."""
     cancel = False
 
+    _engine_progress = False  # Whisper: the segments are the progress
+
     def __init__(self, voice_at):
         from noScribe.main import App
         self._apply_speaker_name = types.MethodType(App._apply_speaker_name, self)
+        self._voice_evidence = types.MethodType(App._voice_evidence, self)
         self.voice_at, self.logged, self.saved = voice_at, [], []
         self.in_file = []  # what reaches the log file
 
@@ -107,15 +114,24 @@ def _no_switch_from_the_shell(monkeypatch):
     monkeypatch.delenv('NOSCRIBE_VOICE_CHECK', raising=False)
 
 
-def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True):
+def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True, extensions=None):
+    """extensions: what the diarization brought besides its turns, by default
+    pyannote's centroids for VOICES."""
+    from noScribe.main import (LOCAL_DIARIZATION_BACKEND, DiarizationResult, DiarizationSegment, ModelRef,
+                               TranscriptionSegment, _segment_dict)
     job = types.SimpleNamespace(
-        start=0, timestamps=True, timestamp_interval=20000, timestamp_color='#78909C', pause=1,
-        pause_marker='.', speaker_detection='auto', overlapping=overlapping, file_ext=file_ext,
-        auto_save=False, speaker_names=list(names), speaker_name_map={}, speaker_centroids=VOICES,
-        speaker_probabilities={})
+        start=0, timestamps=True, pause=1, diarization_enabled=True, overlapping=overlapping,
+        output_format=file_ext, speaker_names=list(names), speaker_name_map={},
+        has_partial_transcript=False, pyannote_cpu_fallback=False,
+        diarization_model=ModelRef(LOCAL_DIARIZATION_BACKEND, 'default'))
+    if extensions is None:
+        extensions = {LOCAL_DIARIZATION_BACKEND: {'centroids': VOICES}}
+    segments = tuple(DiarizationSegment(turn['start'], turn['end'], turn['label']) for turn in diarization)
+    diarization_result = DiarizationResult(segments, extensions)
     d = AdvancedHTMLParser.AdvancedHTMLParser()
     d.parseStr('<html><head></head><body></body></html>')
     main_body = d.createElement('div')
+    main_body.addClass('WordSection1')
     d.body.appendChild(main_body)
     for title in ('title', 'subheader'):
         node = d.createElement('p')
@@ -128,13 +144,16 @@ def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True):
              't': lambda key, **kwargs: f'{key}{kwargs or ""}', 'duration': 3600.0, 'sampling_rate': 16000,
              'vad_future': vad_future, 'traceback': traceback, 'get_config': lambda key, default=None: default,
              'transcript_start': 0,  # where the converted audio starts in the media
-             'is_voxtral': False}  # the fork's main only: on_segment reads it, upstream's does not
+             'timestamp_interval': 20000, 'timestamp_color': '#78909C', 'pause_marker': '.',
+             'auto_save': False, 'speaker_setting': 'auto',
+             'TranscriptionSegment': TranscriptionSegment, 'DiarizationSegment': DiarizationSegment,
+             '_segment_dict': _segment_dict}
     exec(compile(_lift(), str(MAIN), 'exec'), scope)
-    on_segment, check_voices, run_voice_check, voice_segments, first_segment = scope['build'](
-        app, job, d, main_body, diarization, 'audio.wav')
-    return types.SimpleNamespace(app=app, job=job, d=d, scope=scope, on_segment=on_segment,
+    on_segment, check_voices, run_voice_check, voice_segments, first_segment, document = scope['build'](
+        app, job, d, main_body, list(segments), diarization_result, 'audio.wav')
+    return types.SimpleNamespace(app=app, job=job, scope=scope, on_segment=on_segment,
                                  check_voices=check_voices, run_voice_check=run_voice_check,
-                                 voice_segments=voice_segments,
+                                 voice_segments=voice_segments, document=document,
                                  first_segment=first_segment)
 
 
@@ -194,11 +213,11 @@ def test_writing_the_passages_again_reproduces_the_document(monkeypatch, file_ex
                     for seg, _, _ in h.voice_segments for u in voice_check.split_units(seg['words'])}
         h.app._run_voice_embeddings = lambda tmp, job, spans: [
             VOICES['SPEAKER_' + spans_of[(a, b)][1:]] for a, b in spans]
-        before, names_before = h.d.asHTML(), dict(h.job.speaker_name_map)
+        before, names_before = h.document().asHTML(), dict(h.job.speaker_name_map)
         monkeypatch.setattr(voice_check, 'relabel', one_fake_move)
         h.check_voices()
         monkeypatch.setattr(voice_check, 'relabel', real)
-        assert h.d.asHTML() == before, f'seed {seed}'
+        assert h.document().asHTML() == before, f'seed {seed}'
         assert h.job.speaker_name_map == names_before, f'seed {seed}'
 
 
@@ -217,7 +236,7 @@ def two_people():
 
 
 def paragraphs(h):
-    return [node.textContent.strip() for node in h.d.body.children[0].children[2:] if node.textContent.strip()]
+    return [node.textContent.strip() for node in h.document().body.children[0].children[2:] if node.textContent.strip()]
 
 
 def test_a_moved_answer_is_written_under_its_speaker():
@@ -249,23 +268,23 @@ def test_the_log_file_says_what_moved_but_not_what_was_said():
     assert words and not any(w in line for line in h.app.in_file for w in words)
 
 
-def test_a_diarization_with_its_own_probabilities_is_its_own_second_opinion(tmp_path):
-    """With job.speaker_probabilities (nemotron_mp_worker's result) the check reads
-    them instead of asking pyannote for voices: each column is the speaker the
-    worker's `columns` names, whatever the order, and a column the diarization
-    never named cannot win a unit even where it is loudest."""
+def test_a_diarization_with_its_own_probabilities_is_its_own_second_opinion():
+    """With speaker probabilities in the diarization's extensions (the
+    local-nemotron plugin's result) the check reads them instead of asking
+    pyannote for voices: each column is the speaker the worker's `columns`
+    names, whatever the order, and a column the diarization never named cannot
+    win a unit even where it is loudest."""
     import numpy as np
+    from noScribe.nemotron_mp_worker import EXTENSION_KEY, encode_probabilities
     turns, segments = two_people()
-    h = harness(turns, voice_at=None)
-    for segment in segments:
-        h.on_segment(segment)
     rows = np.zeros((1000, 3), dtype=np.float16)  # 10 s, columns: SPEAKER_01, SPEAKER_00, SPEAKER_02
     rows[:170, 1] = 0.9    # S00 asks, up to 1.7 s
     rows[170:, 0] = 0.9    # S01 from there on
     rows[:, 2] = 0.95      # never named, loudest everywhere
-    np.save(tmp_path / 'speakers.npy', rows)
-    h.job.speaker_probabilities = {'path': str(tmp_path / 'speakers.npy'), 'frame_s': 0.01,
-                                   'columns': ['SPEAKER_01', 'SPEAKER_00', 'SPEAKER_02']}
+    h = harness(turns, voice_at=None, extensions={EXTENSION_KEY: {'probabilities': encode_probabilities(
+        rows, ['SPEAKER_01', 'SPEAKER_00', 'SPEAKER_02'])}})
+    for segment in segments:
+        h.on_segment(segment)
 
     def no_voices(*args):
         raise AssertionError('the probabilities are the evidence; no embedding call')
@@ -342,17 +361,17 @@ def test_a_rewrite_that_fails_half_way_puts_everything_back(monkeypatch):
     h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'], names=('Mona', 'Lena'))
     for segment in segments:
         h.on_segment(segment)
-    before, names_before = h.d.asHTML(), dict(h.job.speaker_name_map)
+    before, names_before = h.document().asHTML(), dict(h.job.speaker_name_map)
     real = voice_check.relabel
 
     def poisoned(*args):
         passages, moves = real(*args)
-        return passages[:-1] + [({'start': None, 'end': None, 'text': 'x', 'words': None}, 'S01')], moves
+        return passages[:-1] + [({'start': 'broken', 'end': None, 'text': 'x', 'words': None}, 'S01')], moves
 
     monkeypatch.setattr(voice_check, 'relabel', poisoned)
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         h.check_voices()
-    assert h.d.asHTML() == before
+    assert h.document().asHTML() == before
     assert h.job.speaker_name_map == names_before
     assert h.first_segment() is False  # so the job still saves the transcript
     assert h.app.saved == [before]      # and it was saved before anything was touched
@@ -363,104 +382,78 @@ def test_a_cancel_during_the_rewrite_leaves_the_transcript_whole():
     h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
     for segment in segments:
         h.on_segment(segment)
-    before = h.d.asHTML()
+    before = h.document().asHTML()
     h.app._run_voice_embeddings = lambda tmp, job, spans: (
         setattr(h.app, 'cancel', True) or [h.app.voice_at((a + b) / 2) for a, b in spans])
     with pytest.raises(Exception, match='err_user_cancelation'):
         h.check_voices()
-    assert h.d.asHTML() == before
+    assert h.document().asHTML() == before
 
 
 def test_stop_during_the_check_ends_the_check_and_not_the_job():
     """Stop pressed while the check waits for its voices -- which can take
     minutes -- used to cancel the job, and a complete transcript was reported as
     canceled. The check is what Stop ends (the worker is terminated before the
-    cancel is raised, see _run_diarization_worker); the job goes on to finish with
+    cancel is raised, see LocalInferenceBackend._next_message); the job goes on to finish with
     the transcript as diarized, and the screen says why nothing was checked."""
     turns, segments = two_people()
     h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
     for segment in segments:
         h.on_segment(segment)
-    before = h.d.asHTML()
+    before = h.document().asHTML()
 
     def stopped(tmp, job, spans):
         h.app.cancel = True  # as the Stop button does, while the worker runs
         raise Exception('err_user_cancelation')
     h.app._run_voice_embeddings = stopped
     h.run_voice_check()  # does not raise: the job is not canceled
-    assert h.d.asHTML() == before
+    assert h.document().asHTML() == before
     assert 'voice_check_canceled\n' in h.app.logged and 'voice_check_skipped\n' not in h.app.logged
 
 
-def _pump(monkeypatch, messages, cancel_after=None):
-    """Run the real _run_diarization_worker against a worker that sends
-    `messages`, in a thread instead of a spawned process; returns what was
-    logged, as (text, where) pairs, and the error raised, if any."""
-    import queue
-    import threading
+def _embed(replay):
+    """Run the real App._run_voice_embeddings against a registry whose diarize
+    calls back as `replay(callbacks)` does; returns what was logged, as (text,
+    where) pairs, and the error raised, if any."""
     import noScribe.main as m
-    from noScribe import pyannote_mp_worker
 
-    class _Proc:
-        def __init__(self, target, args):
-            self.thread = threading.Thread(target=target, args=args, daemon=True)
-            self.exitcode = 0
-
-        def start(self):
-            self.thread.start()
-
-        def is_alive(self):
-            return self.thread.is_alive()
-
-        def join(self, timeout=None):
-            self.thread.join(timeout)
-
-        def terminate(self):
-            pass
-
-        def close(self):
-            pass
-
-    class _Queue(queue.Queue):
-        def close(self):
-            pass
-
-        def join_thread(self):
-            pass
-
-    ctx = types.SimpleNamespace(Queue=_Queue, Process=_Proc)
-    monkeypatch.setattr(m.mp, "get_context", lambda method: ctx)
-
-    def entrypoint(args, q):
-        for message in messages:
-            q.put(message)
-    monkeypatch.setattr(pyannote_mp_worker, "pyannote_proc_entrypoint", entrypoint)
+    class Registry:
+        def diarize(self, request, **callbacks):
+            assert request.extensions == {m.LOCAL_DIARIZATION_BACKEND: {'embed_spans': [[0.0, 1.0]]}}
+            replay(callbacks)
+            return m.DiarizationResult((), {m.LOCAL_DIARIZATION_BACKEND: {'embeddings': [[1.0]]}})
 
     logged = []
-    app = types.SimpleNamespace(cancel=False, _mp_proc=None, _mp_queue=None)
+    app = types.SimpleNamespace(cancel=False, inference_backend=Registry())
     app.log = lambda txt='', *a, where='both', **k: logged.append((txt, where))
     app.logn = lambda txt='', *a, where='both', **k: logged.append((f'{txt}\n', where))
     app.logr = lambda txt='', *a, where='both', **k: logged.append((txt, where))
-    app.set_progress = lambda *a, **k: None
-    job = types.SimpleNamespace(speaker_detection='auto')
+    job = types.SimpleNamespace(diarization_model=m.ModelRef(m.LOCAL_DIARIZATION_BACKEND, 'default'),
+                                pyannote_cpu_fallback=False)
     try:
-        m.App._run_diarization_worker(app, 'audio.wav', job, {}, 'pyannote', errors_to='file')
+        assert m.App._run_voice_embeddings(app, 'audio.wav', job, [[0.0, 1.0]]) == [[1.0]]
         return logged, None
     except Exception as err:
         return logged, err
 
 
-def test_a_message_after_a_progress_line_starts_a_line_of_its_own(monkeypatch):
+def test_a_message_after_a_progress_line_starts_a_line_of_its_own():
     """logr writes the progress without a line end, and what came after it was
     glued on: "voice_check: 100%PyAnnote error: ..." in the log file, and the
     first diarization segment after "discrete_diarization: 100%"."""
-    progress = {"type": "progress", "step": "voice_check", "pct": 100}
-    for last in ({"type": "result", "ok": True, "segments": []},
-                 {"type": "result", "ok": False, "error": "no span could be embedded"},
-                 {"type": "log", "level": "warn", "msg": "2 of 3 spans failed"}):
-        messages = [progress, last] + ([] if last["type"] == "result" else
-                                       [{"type": "result", "ok": True}])
-        logged, _ = _pump(monkeypatch, messages)
+    def progress(callbacks):
+        callbacks['on_progress']('voice_check', 100)
+
+    def then_log(callbacks):
+        progress(callbacks)
+        callbacks['on_log']('warn', '2 of 3 spans failed')
+
+    def then_fail(callbacks):
+        progress(callbacks)
+        raise RuntimeError('no span could be embedded')
+
+    for replay in (progress, then_log, then_fail):
+        logged, _ = _embed(replay)
         at = [text for text, _ in logged].index('voice_check: 100%')
         assert logged[at + 1] == ('\n', 'both'), logged
 
@@ -468,9 +461,10 @@ def test_a_message_after_a_progress_line_starts_a_line_of_its_own(monkeypatch):
 def test_stop_before_a_check_with_nothing_to_do_says_nothing():
     """With one voice there is nothing to check, so there is nothing a Stop
     could have ended either -- "voice check stopped" would be news of nothing."""
+    from noScribe.main import LOCAL_DIARIZATION_BACKEND
     turns, segments = two_people()
-    h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00'])
-    h.job.speaker_centroids = {'SPEAKER_00': VOICES['SPEAKER_00']}
+    h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00'],
+                extensions={LOCAL_DIARIZATION_BACKEND: {'centroids': {'SPEAKER_00': VOICES['SPEAKER_00']}}})
     for segment in segments:
         h.on_segment(segment)
     h.app.cancel = True
@@ -485,14 +479,14 @@ def test_stop_just_before_the_check_skips_it_without_starting_it():
     h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
     for segment in segments:
         h.on_segment(segment)
-    before = h.d.asHTML()
+    before = h.document().asHTML()
     h.app.cancel = True
 
     started = []
     h.app._run_voice_embeddings = lambda tmp, job, spans: started.append(spans) or []
     h.run_voice_check()
     assert started == []
-    assert h.d.asHTML() == before
+    assert h.document().asHTML() == before
     assert 'voice_check_canceled\n' in h.app.logged
 
 
@@ -506,13 +500,13 @@ def test_a_check_that_measured_no_voice_says_so():
     h = harness(turns, voice_at=None)
     for segment in segments:
         h.on_segment(segment)
-    before = h.d.asHTML()
+    before = h.document().asHTML()
 
     def worker_failed(tmp, job, spans):
         raise Exception('RuntimeError: no span could be embedded (device_mps)')
     h.app._run_voice_embeddings = worker_failed
     h.run_voice_check()
-    assert h.d.asHTML() == before
+    assert h.document().asHTML() == before
     assert 'voice_check_skipped\n' in h.app.logged
     assert not any(line.startswith('voice_check_done') for line in h.app.logged)
     assert any('no span could be embedded' in line for line in h.app.logged)  # the reason, for the log file
@@ -530,7 +524,7 @@ def test_a_job_stopped_during_the_voice_check_opens_no_editor(monkeypatch):
 
     class Job:
         def __init__(self):
-            self.status, self.file_ext, self.transcript_file = JobStatus.WAITING, 'html', 'x.html'
+            self.status, self.output_format, self.transcript_file = JobStatus.WAITING, 'html', 'x.html'
             self.audio_file, self.error_message = 'a.wav', None
 
         def set_finished(self):

@@ -52,6 +52,24 @@ en:
   voxtral_path_short: 'Voxtral engine: fast transcription without timestamps.'
   voxtral_no_disfluencies: 'Note: the Voxtral engine does not support the disfluencies option; fillers are transcribed as the model hears them.'
   label_add_custom_models: 'Add AI model...'
+  label_manage_servers: 'Add or manage server...'
+  server_manager_title: 'Manage transcription servers'
+  server_manager_profiles: 'Server profiles'
+  server_manager_name: 'Name:'
+  server_manager_url: 'Server URL:'
+  server_manager_api_key: 'API key:'
+  server_manager_enabled: 'Enabled'
+  server_manager_disabled_suffix: ' (disabled)'
+  server_manager_delete: 'Delete'
+  server_manager_close: 'Close'
+  server_manager_test: 'Test connection'
+  server_manager_testing: 'Testing connection...'
+  server_manager_test_ok: 'Connection successful. %{count} model(s) available.'
+  server_manager_test_failed: 'Connection failed: %{error}'
+  server_manager_saved: 'Server profile saved.'
+  server_manager_deleted: 'Server profile deleted.'
+  server_manager_delete_confirm: 'Delete the server profile "%{name}"?'
+  server_manager_busy: 'Server profiles cannot be changed while an inference job is running.'
   label_overlapping: 'Overlapping speech:'
   label_pause: 'Mark pause:'
   label_timestamps: 'Timestamps:'
@@ -71,6 +89,7 @@ en:
   # job status
   waiting: 'waiting'
   audio_conversion: 'audio conversion'
+  waiting_for_server: 'waiting for server slot'
   speaker_identification: 'speaker identification'
   transcription: 'transcription'
   canceling: 'canceling in progress'
@@ -103,15 +122,26 @@ en:
   loading_pyannote: 'Loading pyannote'
   loading_nemotron: 'Loading Nemotron'
   nemotron_all_speakers: "All 8 of Nemotron's speaker channels are in use: if more people speak, some were merged with others."
+  streaming_audio: 'Streaming audio to server...'
   start_canceling: 'Canceling... (please wait a second)'
   start_transcription: 'Transcription...'
   loading_whisper: 'Loading whisper'
   loading_voxtral: 'Loading Voxtral'
-  pyannote_cuda_retry: 'PyAnnote CUDA error detected. Retrying on CPU.'
-  nemotron_cuda_retry: 'Nemotron CUDA error detected. Retrying on CPU.'
-  whisper_cuda_retry: 'Whisper CUDA error detected. Retrying on CPU.'
+  pyannote_cuda_retry: |-
+    PyAnnote CUDA error detected. Retrying on CPU. This retry applies only to the current job.
+    To always use CPU and avoid this CUDA error, set force_pyannote_cpu: true in config.yml.
+  nemotron_cuda_retry: |-
+    Nemotron CUDA error detected. Retrying on CPU. This retry applies only to the current job.
+    To always use CPU and avoid this CUDA error, set force_nemotron_cpu: true in config.yml.
+  whisper_cuda_retry: |-
+    Whisper CUDA error detected. Retrying on CPU. This retry applies only to the current job.
+    To always use CPU and avoid this CUDA error, set force_whisper_cpu: true in config.yml.
+  gpu_worker_crash_retry: |-
+    The %{component} GPU worker exited unexpectedly (exit code %{exitcode}, last stage: %{stage}). The cause is unknown. Retrying this job on CPU.
+    To always use CPU, set %{option}: true in config.yml.
   vad: 'Voice activity detection...'
   language_detect: 'Detected language "%{lang}" with probability %{prob}'
+  server_queue_wait: 'Waiting for server slot (position %{position})'
   language_en_only: 'Note that the AI model selected for transcription is English-only.'
 
   transcription_finished: 'Transcription finished.' 
@@ -136,6 +166,8 @@ en:
   err_setup: 'An error occurred during the setup. Check if you have a working internet connection and restart the program.'
   err_invalid_time_string: 'This is not a valid time: "%{time}"'
   err_options: 'Error in options'
+  err_remote_backend_connection: "Could not connect remote backend '%{name}'."
+  err_remote_backend_refresh: 'Could not update the configured remote backends.'
   err_no_audio_file: 'Error: Please select an audio file.'
   err_no_transcript_file: 'Error: Please choose a filename for the finished transcript.'
   err_unsupported_output_format: 'Error: Output format "%{file_type}" is not supported.'
@@ -151,24 +183,6 @@ en:
   err_empty_transcript: 'No text was recognized in the selected range. Check the audio and transcription settings.'
   rescue_saving: 'Saving to the original filename failed. Saved instead in this file: %{file}'
   rescue_saving_failed: 'Error: Saving to the original filename failed. The alternate filename also exists. I have to quit. (Make sure your transcript is not already opened in Word!)'
-  pyannote_cuda_error_prompt: |-
-    PyAnnote diarization failed with a CUDA error:
-
-    %{error}
-
-    Switch to CPU processing and retry?
-  nemotron_cuda_error_prompt: |-
-    Nemotron diarization failed with a CUDA error:
-
-    %{error}
-
-    Switch to CPU processing and retry?
-  whisper_cuda_error_prompt: |-
-    Whisper transcription failed with a CUDA error:
-
-    %{error}
-
-    Switch to CPU processing and retry?
   err_noScribeEdit_not_found: 'Error: Could not find the noScribe Editor.'
   err_vtt_invalid_options: 'Warning: The options "overlapping speech", "Mark pause" and "Timestamps" are not supported in VTT files.'
   err_editor_invalid_format: 'The editor can only be used with html files. Do you want to start it anyway?'

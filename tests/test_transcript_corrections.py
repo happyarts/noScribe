@@ -449,31 +449,49 @@ def test_split_point_lands_in_the_pause():
     assert 99.9 <= cut <= 100.6
 
 
-def test_model_ram_hint_round_trips():
-    """The picker shows the RAM requirement, but the app must still get the
-    plain model name back out of the decorated entry."""
+def _registry_with_voxtral():
+    """The real registry, with a Voxtral plugin that offers its models whatever
+    the machine (the real one offers them on Apple Silicon only)."""
+    from noScribe.inference import LocalWorkerSettings
+    from noScribe.models import ModelDescriptor, ModelRef
+    from noScribe.plugins.factory import create_builtin_registry
+
+    registry = create_builtin_registry({"precise": "models/precise"}, LocalWorkerSettings())
+    plugin = registry.get("local-voxtral")
+    plugin.list_models = lambda: [ModelDescriptor(
+        ref=ModelRef("local-voxtral", name), display_name=name, engine="voxtral",
+        capabilities=plugin.manifest.capabilities) for name in ("voxtral-mini-8bit", "voxtral-small-4bit")]
+    return registry
+
+
+def test_model_ram_hint_shows_in_the_menu_but_not_in_the_header():
+    """The menu shows the RAM a Voxtral model needs; the selection still finds
+    the model behind the decorated entry, and the transcript header and the
+    queue name it without the hint."""
     from types import SimpleNamespace
     import noScribe.main as m
-    from noScribe import transcription, voxtral_engine as v
 
-    stub = SimpleNamespace(whisper_models={}, MODEL_LABEL_SEP=m.App.MODEL_LABEL_SEP,
-                           _model_label_to_name={})
-    stub.whisper_models["voxtral-mini-8bit"] = transcription.WhisperModel(
-        name="voxtral-mini-8bit", path=None, engine="voxtral",
-        repo="models/voxtral-mini-8bit")
-    stub.whisper_models["precise"] = transcription.WhisperModel(name="precise", path=None)
+    app = SimpleNamespace(inference_backend=_registry_with_voxtral())
+    m._update_transcription_model_catalog(app)
+    label = app.transcription_model_labels["local-voxtral:voxtral-mini-8bit"]
+    assert label.startswith("voxtral-mini-8bit") and "GB RAM" in label
+    assert str(app.transcription_model_options[label].ref) == "local-voxtral:voxtral-mini-8bit"
+    assert app.transcription_model_names["local-voxtral:voxtral-mini-8bit"] == "voxtral-mini-8bit"
+    # Whisper models are shown unchanged.
+    assert app.transcription_model_labels["local-whisper:precise"] == "precise"
 
-    label = m.App.model_label(stub, "voxtral-mini-8bit")
-    assert "GB RAM" in label
-    # As the dropdown does, remember the label -> name mapping.
-    stub._model_label_to_name = {label: "voxtral-mini-8bit"}
-    assert m.App.model_key(stub, label) == "voxtral-mini-8bit"
-    # A decorated label not in the map still round-trips via the separator split.
-    stub._model_label_to_name = {}
-    assert m.App.model_key(stub, label) == "voxtral-mini-8bit"
-    # non-Voxtral models are shown unchanged
-    assert m.App.model_label(stub, "precise") == "precise"
-    assert m.App.model_key(stub, "precise") == "precise"
+
+def test_a_model_remembered_before_the_plugins_finds_its_plugin():
+    """config.yml and scripts named Voxtral models bare, as Whisper's are named;
+    such a name must find the Voxtral plugin, and a renamed model its new name,
+    instead of becoming a Whisper model that does not exist."""
+    import noScribe.main as m
+
+    registry = _registry_with_voxtral()
+    assert str(m._model_ref("voxtral-mini-8bit", registry)) == "local-voxtral:voxtral-mini-8bit"
+    assert str(m._model_ref("voxtral-small-8bit", registry)) == "local-voxtral:voxtral-small-4bit"
+    assert str(m._model_ref("precise", registry)) == "local-whisper:precise"
+    assert str(m._model_ref("local-voxtral:voxtral-mini-8bit")) == "local-voxtral:voxtral-mini-8bit"
 
 
 def test_model_too_large_for_the_machine_is_refused():
@@ -965,17 +983,3 @@ def test_transcribe_asks_the_ladder_for_a_language():
     assert "_file_language(" in src, "the file language is not determined"
     # ...and whatever went out before the language became known is named.
     assert "already written out" in src
-
-
-def test_remembered_model_survives_the_decorated_picker():
-    """The model choice is stored as its plain name, not as the display text.
-
-    The picker shows "name   ·   N GB RAM"; at start-up the remembered value is
-    looked up in whisper_models, which holds plain names only. A merge had lost
-    the model_key() call, which would have silently forgotten the choice at
-    the next start."""
-    import inspect
-    import noScribe.main as m
-
-    src = inspect.getsource(m.App.save_ui_state)
-    assert "self.model_key(" in src, "save_ui_state stores the display text"

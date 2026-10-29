@@ -1,0 +1,153 @@
+"""Construction of the backend plugins shipped with noScribe."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping
+from pathlib import Path
+
+from ..inference import LocalInferenceBackend, LocalWorkerSettings
+from .local_nemotron import LocalNemotronPlugin
+from .local_nemotron.settings import NemotronWorkerSettings
+from .local_pyannote import LocalPyannotePlugin
+from .local_voxtral import LocalVoxtralPlugin
+from .local_voxtral.settings import VoxtralWorkerSettings
+from .local_whisper import LocalWhisperPlugin
+from .local_whisper.settings import WhisperWorkerSettings
+from .local_pyannote.settings import PyannoteWorkerSettings
+from .settings import PluginSettingsStore
+from .remote_http import NOSCRIBE_HTTP_DRIVER, RemoteHttpPlugin
+from .remote_profiles import RemoteBackendProfile
+from .registry import BackendRegistry
+
+
+@dataclass(frozen=True)
+class RemoteBackendRegistrationError:
+    profile: RemoteBackendProfile
+    message: str
+
+
+def create_builtin_registry(
+    whisper_models: Mapping[str, str],
+    settings: LocalWorkerSettings | None = None,
+    settings_dir: Path | None = None,
+    *,
+    voxtral_defaults: VoxtralWorkerSettings | None = None,
+    nemotron_defaults: NemotronWorkerSettings | None = None,
+    corrections_dir: Path | None = None,
+) -> BackendRegistry:
+    """Create the registry without treating built-ins as special at runtime.
+
+    The *_defaults stand in for absent fields of a plugin's settings file, as
+    the desktop's older config.yml entries do for Whisper and Pyannote above.
+    Voxtral keeps its corrections file in `corrections_dir`, by default the
+    directory above the plugin settings, else noScribe's configuration directory."""
+    store = PluginSettingsStore(settings_dir) if settings_dir is not None else None
+    whisper_settings = WhisperWorkerSettings.from_mapping(
+        store.load("local-whisper") if store else {},
+        defaults=WhisperWorkerSettings(
+            device="cpu" if settings.force_whisper_cpu else "auto",
+            cpu_threads=settings.cpu_threads,
+            vad_threshold=settings.vad_threshold,
+        ) if settings is not None else None,
+    )
+    diarization_settings = PyannoteWorkerSettings.from_mapping(
+        store.load("local-pyannote") if store else {},
+        defaults=PyannoteWorkerSettings(
+            device="cpu" if settings.force_diarization_cpu else "auto",
+        ) if settings is not None else None,
+    )
+    # Keep legacy desktop consumers (including its preliminary VAD) in sync.
+    if settings is not None:
+        settings.cpu_threads = whisper_settings.cpu_threads
+        settings.vad_threshold = whisper_settings.vad_threshold
+        settings.force_whisper_cpu = whisper_settings.device == "cpu"
+        settings.force_diarization_cpu = diarization_settings.device == "cpu"
+    host = LocalInferenceBackend(
+        whisper_models=whisper_models, settings=settings,
+        whisper_settings=whisper_settings, diarization_settings=diarization_settings,
+    )
+    voxtral_settings = VoxtralWorkerSettings.from_mapping(
+        store.load("local-voxtral") if store else {}, defaults=voxtral_defaults)
+    nemotron_settings = NemotronWorkerSettings.from_mapping(
+        store.load("local-nemotron") if store else {}, defaults=nemotron_defaults)
+    if corrections_dir is None:
+        if settings_dir is not None:
+            corrections_dir = Path(settings_dir).parent
+        else:
+            import appdirs
+            corrections_dir = Path(appdirs.user_config_dir('noScribe'))
+    return BackendRegistry([
+        LocalWhisperPlugin(host, whisper_models, settings_store=store),
+        LocalPyannotePlugin(host, settings_store=store),
+        LocalVoxtralPlugin(host, corrections_dir=corrections_dir,
+                           settings=voxtral_settings, settings_store=store),
+        LocalNemotronPlugin(host, settings=nemotron_settings, settings_store=store),
+    ])
+
+
+def register_remote_profiles(
+    registry: BackendRegistry,
+    profiles: tuple[RemoteBackendProfile, ...],
+) -> tuple[RemoteBackendRegistrationError, ...]:
+    """Connect enabled profiles without letting one failure block the rest."""
+    errors = []
+    for profile in profiles:
+        if not profile.enabled:
+            continue
+        try:
+            if profile.driver != NOSCRIBE_HTTP_DRIVER:
+                raise ValueError(
+                    f"Unsupported remote backend driver: {profile.driver!r}"
+                )
+            registry.register(RemoteHttpPlugin(profile))
+        except Exception as error:
+            errors.append(RemoteBackendRegistrationError(profile, str(error)))
+    return tuple(errors)
+
+
+def refresh_remote_profiles(
+    registry: BackendRegistry,
+    profiles: tuple[RemoteBackendProfile, ...],
+) -> tuple[RemoteBackendRegistrationError, ...]:
+    """Refresh connected remotes and retry profiles unavailable at startup."""
+    errors = []
+    for profile in profiles:
+        if not profile.enabled:
+            continue
+        try:
+            try:
+                plugin = registry.get(profile.id)
+            except ValueError:
+                plugin = RemoteHttpPlugin(profile)
+                registry.register(plugin)
+                continue
+            if not isinstance(plugin, RemoteHttpPlugin):
+                raise ValueError(
+                    f"Backend ID {profile.id!r} is already used by another plugin."
+                )
+            plugin.refresh_models()
+        except Exception as error:
+            errors.append(RemoteBackendRegistrationError(profile, str(error)))
+    return tuple(errors)
+
+
+def sync_remote_profiles(
+    registry: BackendRegistry,
+    profiles: tuple[RemoteBackendProfile, ...],
+) -> tuple[RemoteBackendRegistrationError, ...]:
+    """Make registered remote plugins match the persisted profile set."""
+    desired = {profile.id: profile for profile in profiles if profile.enabled}
+
+    for manifest in registry.list_plugins():
+        try:
+            plugin = registry.get(manifest.id)
+        except ValueError:
+            continue
+        if not isinstance(plugin, RemoteHttpPlugin):
+            continue
+        profile = desired.get(manifest.id)
+        if profile is None or plugin.profile != profile:
+            registry.unregister(manifest.id)
+
+    return refresh_remote_profiles(registry, tuple(desired.values()))

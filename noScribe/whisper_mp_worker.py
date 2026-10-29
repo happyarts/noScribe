@@ -4,7 +4,6 @@ import logging
 import os
 import platform
 import sys
-import traceback
 from dataclasses import asdict, is_dataclass
 
 if sys.version_info >= (3, 12):
@@ -12,7 +11,7 @@ if sys.version_info >= (3, 12):
 else:
     import importlib_resources as impres
 
-from i18n import t
+from .worker_errors import WorkerState
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,19 @@ def speech_map(turns, n_samples, sampling_rate=16000):
         else:
             out.append({'start': s, 'end': e})
     return out
+
+
+def speech_turns_from(diarization):
+    """[start_s, end_s] turns for the speech map from the diarization the job
+    hands the worker (DiarizationResult.to_mapping(): milliseconds), or None.
+
+    pyannote's turns only, recognised by the evidence its plugin adds: as the
+    speech map, Nemotron's many short turns cost words on the German hand
+    references (9.28 % -> 9.78 % WER against Silero; pyannote's 8.75 %)."""
+    if not diarization or "local-pyannote" not in (diarization.get("extensions") or {}):
+        return None
+    return [[seg["start"] / 1000.0, seg["end"] / 1000.0]
+            for seg in diarization.get("segments") or []] or None
 
 
 # With speaker detection, the diarization's turns tell Whisper where speech is,
@@ -80,48 +92,36 @@ def whisper_proc_entrypoint(args: dict, q):
     Runs in a child process. Streams progress/logs to parent via `q`.
     Messages put on `q` are dicts with one of the following shapes:
       {"type": "log", "level": "info"|"warn"|"error"|"debug", "msg": "..."}
+      {"type": "status", "level": str, "message_id": str, "params": {...}}
       {"type": "progress", "pct": float, "detail": "..."}   # optional
       {"type": "result", "ok": True, "segments": [...], "info": {...}}
-      {"type": "result", "ok": False, "error": str, "trace": str}
+      {"type": "state", "device": str|None, "stage": str}
+      Failed results include the structured fields from worker_errors.error_result.
     """
+    state = WorkerState(q, args.get('device'))
     try:
+        state.update('imports')
         # Import heavy libs only in the child
         from faster_whisper import WhisperModel
         from faster_whisper.audio import decode_audio
         from faster_whisper.vad import VadOptions
         import torch
         import yaml
-        import i18n
-
-        def plog(level, msg):
+        def status(message_id, params=None, level="info"):
             try:
-                q.put({"type": "log", "level": level, "msg": str(msg)})
+                q.put({
+                    "type": "status",
+                    "level": level,
+                    "message_id": message_id,
+                    "params": params or {},
+                })
             except Exception:
                 pass
-
-        # Initialize python-i18n in child process (PyInstaller uses spawn; no
-        # globals shared).
-        #
-        # TODO: python-i18n is unmaintained for more than five years.
-        #
-        # See the main file for more information on python-i18n and the
-        # approach. Here nothing should actually fail as any possible
-        # exceptions were already handled/checked in the main app.
-        i18n.set("filename_format", "{locale}.{format}")
-        i18n.set("enable_memoization", True)
-        i18n.set("fallback", "en")
-        i18n.set("locale", args.get("locale", "en"))
-
-        with impres.as_file(impres.files("trans")) as mypath:
-            i18n.load_path.append(mypath)
-
-            # Using `t` once here to load the localization files into memory.
-            # As there is no `print`, nothing happens really.
-            t("app_header")
         
+        state.update('device_selection')
         # determine device
         device = args.get("device", "")
-        if device != 'cpu':
+        if device in ('', 'auto'):
             if platform.system() == "Darwin":  # MAC
                 device = 'auto'
             elif platform.system() in ('Windows', 'Linux'):
@@ -132,25 +132,24 @@ def whisper_proc_entrypoint(args: dict, q):
             else:
                 raise Exception('Platform not supported yet.')
             
+        state.update('model_loading', device=device)
         # Build model in child using provided options
         model = WhisperModel(
-            str(args["whisper_model"].path),
+            str(args["model_path"]),
             device=device,
             compute_type=args.get("compute_type", "float16"),
             cpu_threads=args.get("cpu_threads", 4),
             local_files_only=args.get("local_files_only", True),
         )
-
-        # Define callbacks that forward to parent via queue (not used by faster-whisper directly, but kept for parity)
-        def log_cb(level, msg):
-            plog(level, msg)
+        state.update('audio_loading', device=getattr(model.model, 'device', device))
+        q.put({"type": "log", "level": "info", "msg": f"Whisper: using {state.device}"})
 
         # Prepare audio and VAD
         audio_path = args.get("audio_path")
         if not audio_path or not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio path does not exist: {audio_path}")
 
-        log_cb("info", t('vad'))
+        status("vad")
 
         # VAD options
         vad_threshold = float(args.get("vad_threshold", 0.5))
@@ -160,32 +159,26 @@ def whisper_proc_entrypoint(args: dict, q):
             vad_parameters = VadOptions(min_silence_duration_ms=500, onset=vad_threshold, speech_pad_ms=50)
 
         # Language handling
-        language_name = args.get("language_name")
-        language_code = args.get("language_code")
-        multilingual = False
-        whisper_lang = None
+        whisper_lang = args.get("language")
+        multilingual = bool(args.get("multilingual", False))
         
-        if not model.model.is_multilingual and language_code != 'en':
-            language_name = 'English'
-            language_code = 'en'
-            log_cb("info", t('language_en_only'))
+        if not model.model.is_multilingual and whisper_lang != 'en':
+            whisper_lang = 'en'
+            multilingual = False
+            status("language_en_only")
         
-        if language_name == "Multilingual":
-            multilingual = True
+        if multilingual:
             whisper_lang = None
-        elif language_name == "Auto":
-            whisper_lang = None
-        else:
-            whisper_lang = language_code
 
-        speech_turns = args.get("speech_turns")
+        speech_turns = speech_turns_from(args.get("diarization"))
 
         # Detect language if requested (Auto)
-        if language_name == "Auto":
+        if whisper_lang is None and not multilingual:
             audio = decode_audio(
                 audio_path, sampling_rate=model.feature_extractor.sampling_rate
             )
             try:
+                state.update('language_detection')
                 with _speech_map_from(speech_turns):
                     whisper_lang, language_probability, _ = model.detect_language(
                         audio, vad_filter=True, vad_parameters=vad_parameters
@@ -193,11 +186,14 @@ def whisper_proc_entrypoint(args: dict, q):
             finally:
                 del audio
                 gc.collect()
-            log_cb("info", t('language_detect', lang=whisper_lang, prob=f'{language_probability:.2f}'))
+            status("language_detect", {
+                "lang": whisper_lang,
+                "prob": f'{language_probability:.2f}',
+            })
 
         # Build prompt/hotwords if disfluencies suppression is requested
         prompt = ""
-        if args.get("disfluencies", False):
+        if args.get("include_disfluencies", False):
             prompt_file = impres.files("prompts") / "prompt.yml"
         else:
             prompt_file = impres.files("prompts") / "prompt_nd.yml"
@@ -206,10 +202,11 @@ def whisper_proc_entrypoint(args: dict, q):
                 prompt = yaml.safe_load(f).get(whisper_lang, "")
         except Exception as e:
             logger.exception(e)
-            log_cb('error', t('err_loading_prompt') + '\n')
+            status("err_loading_prompt", level="error")
 
         # Pass the path so faster-whisper can release its original waveform
         # after VAD, before allocating the full spectrogram (see 28650f2e).
+        state.update('preprocessing')
         # transcribe() takes its speech map before it returns the lazy segments,
         # so the swap need only last for the call.
         with _speech_map_from(speech_turns) as mapped:
@@ -226,11 +223,13 @@ def whisper_proc_entrypoint(args: dict, q):
                 vad_parameters=vad_parameters,
             )
         if speech_turns and not mapped:
-            log_cb("debug", "speech map from the diarization unavailable; Silero decides where speech is")
+            q.put({"type": "log", "level": "debug",
+                   "msg": "speech map from the diarization unavailable; Silero decides where speech is"})
         
-        log_cb('info', t('start_transcription') + '\n')
+        status("start_transcription")
         
         # Stream segments to parent as they arrive
+        state.update('transcription')
         for s in segments:
             try:
                 seg_d = {
@@ -278,15 +277,8 @@ def whisper_proc_entrypoint(args: dict, q):
         except Exception:
             pass
         gc.collect()
-        plog("debug", "Subprocess finished cleanly.")
-
     except Exception as e:
         try:
-            q.put({
-                "type": "result",
-                "ok": False,
-                "error": f"{type(e).__name__}: {e}",
-                "trace": traceback.format_exc(),
-            })
+            q.put(state.failure(e))
         except Exception:
             pass

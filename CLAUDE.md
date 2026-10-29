@@ -77,25 +77,41 @@ conspire here. Get any of them wrong and the test suite stays green while the fr
 be derived from source — prove them with a throwaway PyInstaller build (a minimal package that
 reproduces the structure freezes in about a minute and needs no models).
 
-### Worker protocol
+### Plugins and the worker protocol
 
-`whisper_mp_worker.py` and `voxtral_mp_worker.py` are interchangeable behind one queue message
-contract, which is why `main.py` consumes segments identically regardless of engine:
+Since upstream's api-server merge (#377, merged into `main` 2026-10-30) every engine is a
+**backend plugin** behind `noScribe/plugins/registry.py`; `main.py` never starts a worker
+itself. Models are `ModelRef`s (`local-whisper:precise`, `local-voxtral:voxtral-mini-8bit`),
+the GUI's model menu comes from the registry, and `noScribe/plugins/README.md` (upstream's)
+is the contract. Upstream ships `local_whisper`, `local_pyannote` and `remote_http`; the
+fork adds `local_voxtral` and `local_nemotron` (registered in `plugins/factory.py`). All
+local plugins share one `LocalInferenceBackend` (`inference.py`), whose
+`run_transcription_worker`/`run_diarization_worker` (a fork refactor of upstream's two
+loops) run any worker that speaks the queue contract:
 
 ```
 {"type": "log",      "level": "info|warn|error|debug", "msg": str}
-{"type": "progress", "pct": int}
+{"type": "status",   "message_id": str, "params": {...}, "level": str}  # translated in main.py
+{"type": "state",    "device": str|None, "stage": str}                   # for the CPU fallback
+{"type": "progress", "pct": int}                    # diarization adds "step"
 {"type": "segment",  "segment": {"start","end","text","words"}}
-{"type": "result",   "ok": True,  "info": {...}}
-{"type": "result",   "ok": False, "error": str, "trace": str}
+{"type": "result",   "ok": True,  "info": {...}}    # diarization: "segments", "extensions"
+{"type": "result",   "ok": False, ...}              # worker_errors.error_result()
 ```
 
-Not every worker sends every message: `whisper_mp_worker.py` emits no `progress`
-(its own docstring advertises one, and a `segments` list on the result, that it does
-not send), and `pyannote_mp_worker.py` speaks a different contract again, which
-`nemotron_mp_worker.py` shares (turns in `segments`; instead of pyannote's `centroids` it
-returns `probabilities`, the path, columns and frame length of its per-frame speaker
-probabilities saved next to the audio).
+Not every worker sends every message: Whisper emits no `progress` (main.py then derives it
+from the segments; an engine that sends its own, Voxtral, keeps the bar). Plugin-specific
+data travels in `extensions`, keyed by backend ID and JSON-compatible so a server can
+carry it: pyannote's `centroids` (and, on a second call with `embed_spans`, `embeddings`)
+under `local-pyannote`, Nemotron's per-frame `probabilities` as base64 float16 under
+`local-nemotron` (`nemotron_mp_worker.encode_probabilities`, ~7.7 MB per audio hour).
+main.py adds `extensions["noscribe"]` (`needs_timing`, `speaker_names`) to local
+transcription requests; Voxtral reads it. The diarization reaches the transcription as
+`TranscriptionRequest.diarization`: Voxtral cuts loops at its turns, and Whisper's speech
+map (`whisper_mp_worker.speech_turns_from`) uses pyannote's turns only.
+Per-plugin settings live in `plugin-settings/<backend-id>.yml` in the user config dir;
+the older config.yml keys (`force_nemotron_cpu`, `voxtral_chunk_sec`,
+`voxtral_ram_reserve_gb`) still fill fields a plugin file leaves out.
 
 A broken `segment` put is deliberately *not* swallowed — silently truncating a transcript while
 reporting success is worse than failing the job. Worker modules stay stdlib-only at import time
@@ -104,15 +120,16 @@ and defer heavy imports into the entrypoint.
 ### Pipeline
 
 `main.py` drives: convert to WAV (`noScribe/audio/convert.py`, PyAV) → diarize
-(`pyannote_mp_worker` or `nemotron_mp_worker`) → transcribe (whisper or voxtral worker) → merge
-and write the transcript. The diarization engine comes from `diarization_engine` in config.yml:
+(`pyannote_mp_worker` or `nemotron_mp_worker`) → transcribe (whisper or voxtral worker) → voice
+check → merge and write the transcript. `select_diarization_model` picks the diarization: a
+remote server's own first, else what `diarization_engine` in config.yml says:
 `auto` (default) takes Nemotron whenever the installed transformers knows
 `nemotron3_diarization`, librosa is installed (transformers builds the processor's mel filters
 with it) and its weights are on disk (shipped or in the HF cache), `pyannote`/`nemotron`
 force one (`nemotron` downloads the weights); a job with a fixed speaker count always stays with
 pyannote. The transcript header names the engine ("auto (Nemotron)").
-Which engine runs is decided by the `engine` field on the `WhisperModel` dataclass in
-`transcription.py` (`"whisper"` or `"voxtral"`).
+Which transcription engine runs is decided by the model's backend (`local-voxtral` or
+`local-whisper`); a bare model name saved before the plugins is migrated by `_model_ref`.
 
 `main.py` is large and mixes GUI, queue management and pipeline orchestration; expect to
 search rather than read it.
@@ -132,7 +149,8 @@ changing a number, and check whether a test in `tests/` pins it.
 ## State that lives outside the repository
 
 - **User config**: `appdirs.user_config_dir('noScribe')/config.yml`. Several behaviours are only
-  reachable through it (e.g. `pyannote_xpu`, `force_whisper_cpu`, `voxtral_ram_reserve_gb`).
+  reachable through it (e.g. `pyannote_xpu`, `force_whisper_cpu`, `diarization_engine`), and the
+  plugins read `plugin-settings/<backend-id>.yml` beside it.
 - **Models**: `models/` holds `fast`, `precise` and `voxtral-mini-8bit`; Voxtral repos are
   downloaded on first use, and so is `nvidia/Nemotron-3-Diarization` (HF cache) unless a copy
   sits in `models/nemotron-diarization`.
@@ -186,6 +204,12 @@ changing a number, and check whether a test in `tests/` pins it.
   checklist box only once it is true.
 
 ## The Voxtral pull request
+
+**State on 2026-10-30:** `main` carries upstream's plugin architecture with Voxtral and
+Nemotron as plugins, but the open PR branches (#351, #352, #361, #362 and
+`feature/nemotron-diarization`) were still built for the pre-plugin `main.py`; until they
+are rebuilt on it, `tools/check_local_current.py` reports their lines as missing. What is
+said below about their contents describes those branches, not `main`.
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
 `feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review; rebased with the other open branches onto upstream 0.8 on 2026-10-05, each now carrying its own adaptations of upstream's tests, and again on 2026-10-06 onto upstream's `av<19` pin) from `upstream/main` plus `main`'s
@@ -253,7 +277,8 @@ Voxtral PR:
   evidence object, `Voice` (pyannote's embeddings against its centroids, what was measured) or
   `Probabilities` (on the Nemotron branch below).
 - **Nemotron 3 Diarization** (`noScribe/nemotron_mp_worker.py`, `voice_check.Probabilities`,
-  `_diarization_engine` in `main.py`, `loading_nemotron` in all nine languages,
+  `select_diarization_model` in `main.py`, `noScribe/plugins/local_nemotron/`,
+  `loading_nemotron` in all nine languages,
   `tests/test_nemotron_worker.py`) has its own branch, `feature/nemotron-diarization`, stacked on
   `feature/voice-verified-speakers` rather than cut from `upstream-main`, and merged into `main`.
   Proposed upstream in issue #360 (Kai agreed on transformers, no pyannote fallback, 8 speakers

@@ -71,6 +71,7 @@ ja:
   # ジョブの状態
   waiting: '待機中'
   audio_conversion: 'オーディオ変換'
+  waiting_for_server: 'サーバーの空き待ち'
   speaker_identification: '話者識別'
   transcription: '転写'
   canceling: 'キャンセル中'
@@ -102,13 +103,23 @@ ja:
   loading_pyannote: 'pyannoteの読み込み中'
   loading_nemotron: 'Nemotronの読み込み中'
   nemotron_all_speakers: "Nemotron の話者チャンネル 8 つがすべて使用されています。話者がそれ以上いる場合、一部は他の話者にまとめられています。"
+  streaming_audio: '音声をサーバーに転送しています...'
   start_canceling: 'キャンセル中...（しばらくお待ちください）'
   start_transcription: '転写を開始中...'
   loading_whisper: 'whisperの読み込み中'
   loading_voxtral: 'Voxtralの読み込み中'
-  pyannote_cuda_retry: 'PyAnnote の CUDA エラーを検出しました。CPU で再試行します。'
-  nemotron_cuda_retry: 'Nemotron の CUDA エラーを検出しました。CPU で再試行します。'
-  whisper_cuda_retry: 'Whisper の CUDA エラーを検出しました。CPU で再試行します。'
+  pyannote_cuda_retry: |-
+    PyAnnote の CUDA エラーを検出しました。CPU で再試行します。 この再試行は現在のジョブにのみ適用されます。
+    常に CPU を使用してこの CUDA エラーを回避するには、config.yml で force_pyannote_cpu: true を設定してください。
+  nemotron_cuda_retry: |-
+    Nemotron の CUDA エラーを検出しました。CPU で再試行します。 この再試行は現在のジョブにのみ適用されます。
+    常に CPU を使用してこの CUDA エラーを回避するには、config.yml で force_nemotron_cpu: true を設定してください。
+  whisper_cuda_retry: |-
+    Whisper の CUDA エラーを検出しました。CPU で再試行します。 この再試行は現在のジョブにのみ適用されます。
+    常に CPU を使用してこの CUDA エラーを回避するには、config.yml で force_whisper_cpu: true を設定してください。
+  gpu_worker_crash_retry: |-
+    %{component} の GPU ワーカーが予期せず終了しました（終了コード %{exitcode}、最後の処理段階: %{stage}）。原因は不明です。このジョブを CPU で再試行します。
+    常に CPU を使用するには、config.yml で %{option}: true を設定してください。
   vad: '音声活動検出...'
   language_detect: '検出された言語は「%{lang}」（確率 %{prob}）'
   language_en_only: '選択した文字起こし用のAIモデルは英語専用です。'
@@ -129,6 +140,7 @@ ja:
     出力ファイルを上書きしますか？
   err_invalid_time_string: '無効な時間です：" %{time}"'
   err_options: 'オプションのエラー'
+  err_remote_backend_connection: 'リモートバックエンド「%{name}」に接続できません。'
   err_unsupported_output_format: 'エラー: 出力形式 "%{file_type}" はサポートされていません。'
   err_no_audio_file: 'エラー：音声ファイルを選択してください。'
   err_no_transcript_file: 'エラー：転写が完了したファイル名を選択してください。'
@@ -144,24 +156,6 @@ ja:
   err_empty_transcript: '選択した範囲でテキストが認識されませんでした。音声と文字起こしの設定を確認してください。'
   rescue_saving: '元のファイル名への保存に失敗しました。代わりにこのファイルに保存されました：%{file}'
   rescue_saving_failed: 'エラー：元のファイル名への保存に失敗しました。代替のファイル名も存在します。終了する必要があります。（Wordでトランスクリプトが既に開かれていないことを確認してください！）'
-  pyannote_cuda_error_prompt: |-
-    PyAnnote の話者分離が CUDA エラーで失敗しました。
-
-    %{error}
-
-    CPU 処理に切り替えて再試行しますか？
-  nemotron_cuda_error_prompt: |-
-    Nemotron の話者分離が CUDA エラーで失敗しました。
-
-    %{error}
-
-    CPU 処理に切り替えて再試行しますか？
-  whisper_cuda_error_prompt: |-
-    Whisper の文字起こしが CUDA エラーで失敗しました。
-
-    %{error}
-
-    CPU 処理に切り替えて再試行しますか？
   err_noScribeEdit_not_found: 'エラー: noScribe エディターが見つかりませんでした。'
   err_vtt_invalid_options: '警告: 「オーバーラッピング・スピーチ」、「マークはポーズをとる」と「タイムスタンプ」は VTT ファイルでサポートされていません。'
   err_editor_invalid_format: 'エディターは html ファイルでのみ使用できます。それでも起動しますか？'

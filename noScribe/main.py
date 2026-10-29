@@ -27,6 +27,7 @@ import platform
 import queue as pyqueue
 import re
 import sys
+import time
 import tkinter as tk
 import traceback
 import urllib
@@ -34,13 +35,11 @@ import urllib.parse
 import wave
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from enum import Enum
 from functools import partial
 from pathlib import Path
 from subprocess import Popen, run
 from tempfile import TemporaryDirectory
 from threading import Thread, get_ident
-from typing import Optional
 
 if sys.version_info >= (3, 12):
     import importlib.resources as impres
@@ -60,7 +59,39 @@ from PIL import Image
 
 from . import audio, exception, transcription, utils, voice_check
 from .CTkToolTips import CTkToolTip
+from .inference import (
+    DiarizationRequest,
+    DiarizationResult,
+    DiarizationSegment,
+    InferenceWorkflowRequest,
+    InferenceWorkerError,
+    LOCAL_DIARIZATION_BACKEND,
+    LOCAL_WHISPER_BACKEND,
+    LocalWorkerSettings,
+    TranscriptionRequest,
+    TranscriptionSegment,
+)
+from .jobs import JobStatus, TranscriptionJob, TranscriptionQueue
+from .models import ModelRef
+from .plugins.factory import (
+    create_builtin_registry,
+    register_remote_profiles,
+    sync_remote_profiles,
+)
+from .plugins.local_nemotron.settings import NemotronWorkerSettings
+from .plugins.local_voxtral.settings import VoxtralWorkerSettings
+from .plugins.manifest import ExecutionType
+from .plugins.remote_http import NOSCRIBE_HTTP_DRIVER, RemoteHttpPlugin
+from .plugins.remote_profiles import (
+    REMOTE_PROFILE_SCHEMA_VERSION,
+    RemoteBackendProfile,
+    delete_remote_profile,
+    load_remote_profiles,
+    new_remote_profile_id,
+    save_remote_profile,
+)
 from .tkHyperlinkManager import HyperlinkManager
+from .worker_errors import WorkerError, WorkerRetryError
 
 if platform.system() == "Darwin": # = MAC
     from subprocess import check_output
@@ -115,6 +146,9 @@ def local_build_stamp():
         pass
     when = datetime.datetime.fromtimestamp(Path(__file__).stat().st_mtime)
     return f'{app_version} · MK {when:%Y-%m-%d %H:%M}'
+
+
+REMOTE_MODEL_REFRESH_SECONDS = 15.0
 
 ctk.set_appearance_mode('dark')
 ctk.set_default_color_theme('blue')
@@ -235,27 +269,27 @@ def get_config_flag(key: str, default: bool) -> bool:
         return False
     return default
 
+# Runtime CPU fallback must not overwrite these saved preferences.
 force_pyannote_cpu = get_config_flag('force_pyannote_cpu', False)
 force_nemotron_cpu = get_config_flag('force_nemotron_cpu', False)
 force_whisper_cpu = get_config_flag('force_whisper_cpu', False)
 
-_CUDA_ERROR_KEYWORDS = (
-    'cuda',
-    'cublas',
-    'cudnn',
-    'cufft',
-    'device-side assert',
-    'invalid device function',
-    'nccl',
-    'gpu driver',
-    'compute capability',
-    'hip error',
-)
-
 PAUSE_OPTIONS = ['none', '1sec+', '2sec+', '3sec+']
 
-# The diarization engines by the name their log lines and the transcript header give them.
-DIARIZATION_ENGINES = {'pyannote': 'pyannote', 'nemotron': 'Nemotron'}
+# The bundled plugins beside Whisper and Pyannote, and what main.py asks them.
+LOCAL_VOXTRAL_BACKEND = 'local-voxtral'
+LOCAL_NEMOTRON_BACKEND = 'local-nemotron'
+# Diarization plugins that run on this machine and may retry on its CPU.
+LOCAL_DIARIZATION_BACKENDS = {LOCAL_DIARIZATION_BACKEND: 'pyannote', LOCAL_NEMOTRON_BACKEND: 'nemotron'}
+
+# Model names that were published under another name before: a choice saved
+# under the old one (config.yml, a script's --model) means the new one, and was
+# otherwise silently replaced by the first Whisper model.
+RENAMED_MODELS = {'voxtral-small-8bit': 'voxtral-small-4bit'}
+
+# The job data main.py adds to every transcription request for the plugins
+# (noScribe/plugins/local_voxtral reads it).
+JOB_EXTENSION = 'noscribe'
 
 
 def pause_label(pause) -> str:
@@ -274,14 +308,6 @@ def pause_label(pause) -> str:
             and 0 <= pause < len(PAUSE_OPTIONS):
         return PAUSE_OPTIONS[pause]
     return str(pause)
-
-def _is_cuda_error_message(message: str) -> bool:
-    if not message:
-        return False
-    if message.find('(device_cpu)') != -1:
-        return False
-    lower_message = message.lower()
-    return any(keyword in lower_message for keyword in _CUDA_ERROR_KEYWORDS)
 
 def version_higher(version1, version2, subversion_level=99) -> int:
     """Will return 
@@ -362,295 +388,143 @@ else:
 timestamp_re = re.compile(r'\[\d\d:\d\d:\d\d.\d\d\d --> \d\d:\d\d:\d\d.\d\d\d\]')
 
 
-# Transcription Job Management Classes
+# GUI presentation for the UI-independent job model.
+def format_job_summary(
+    job: TranscriptionJob, transcription_model_name: str | None = None
+) -> str:
+    """Build a localized, multi-line summary for GUI tooltips."""
+    lines = []
 
-class JobStatus(Enum):
-    WAITING = "waiting"
-    AUDIO_CONVERSION = "audio_conversion"
-    SPEAKER_IDENTIFICATION = "speaker_identification"
-    TRANSCRIPTION = "transcription"
-    CANCELING = "canceling"
-    CANCELED = "canceled"
-    FINISHED = "finished"
-    ERROR = "error"
+    def yn(value: bool) -> str:
+        return '✓' if bool(value) else '✗'
 
-class TranscriptionJob:
-    """Represents a single transcription job with all its parameters and status"""
-    
-    def __init__(self):
-        # Status tracking
-        self.status: JobStatus = JobStatus.WAITING
-        self.error_message: Optional[str] = None
-        self.error_tb: Optional[str] = None
-        self.created_at: datetime.datetime = datetime.datetime.now()
-        self.started_at: Optional[datetime.datetime] = None
-        self.finished_at: Optional[datetime.datetime] = None
-        
-        # Progress tracking
-        self.progress: float = 0.0  # Progress from 0.0 to 1.0
-        
-        # File paths
-        self.audio_file: str = ''
-        self.transcript_file: str = ''
-        # Partial transcript tracking
-        self.has_partial_transcript: bool = False
-        
-        # Time range
-        self.start: int = 0  # milliseconds
-        self.stop: int = 0   # milliseconds (0 means until end)
-        
-        # Language and model settings
-        self.language_name: str = 'Auto'
-        self.whisper_model: transcription.WhisperModel = None
-        
-        # Processing options
-        self.speaker_detection: str = 'auto'
-        self.speaker_names: list = []  # real names, mapped in order of first appearance
-        self.speaker_centroids: dict = {}  # diarization label -> voice centroid, for voice_check
-        self.speaker_probabilities: dict = {}  # path, columns, frame_s of a diarization's own, for voice_check
-        # Built while this job's segments stream in: diarization label -> name.
-        # Lives on the job, so mappings can never leak between queued jobs, and
-        # is rebuilt by set_running() so a repeated job starts from scratch too.
-        self.speaker_name_map: dict = {}
-        self.overlapping: bool = True
-        self.timestamps: bool = False
-        self.disfluencies: bool = True
-        self.pause: int = 0  # index value (0=none, 1=1sec+, etc.)
-        
-        # Config-based options
-        self.whisper_beam_size: int = 1
-        self.whisper_temperature: float = 0.0
-        self.whisper_compute_type: str = 'default'
-        self.timestamp_interval: int = 60_000
-        self.timestamp_color: str = '#78909C'
-        self.pause_marker: str = '.'
-        self.auto_save: bool = True
-        self.whisper_xpu: str = 'cpu' 
-        self.vad_threshold: float = 0.5
-        
-        # Derived properties
-        self.file_ext: str = ''
-    
-    def set_running(self):
-        """Mark job as running and record start time"""
-        self.status = JobStatus.AUDIO_CONVERSION
-        self.started_at = datetime.datetime.now()
-        # Names are assigned in order of first appearance, so the mapping has
-        # to be built from this run's diarization. A repeated job (the queue's
-        # repeat button) keeps its object, and pyannote may hand out different
-        # labels the second time -- carrying the old mapping over would shift
-        # every name that is first seen on the retry.
-        self.speaker_name_map = {}
-    
-    def set_finished(self):
-        """Mark job as finished and record completion time"""
-        self.status = JobStatus.FINISHED
-        self.finished_at = datetime.datetime.now()
-    
-    def set_error(self, error_message: str, error_tb: str = ''):
-        """Mark job as failed and store error message"""
-        self.status = JobStatus.ERROR
-        self.error_message = error_message
-        self.error_tb = error_tb
-        self.finished_at = datetime.datetime.now()
+    out_name = os.path.basename(job.transcript_file) if job.transcript_file else ''
+    lines.append(f"{t('job_tt_transcript_file')} {out_name}")
 
-    def set_canceled(self, message: Optional[str] = None):
-        """Mark job as canceled by the user"""
-        self.status = JobStatus.CANCELED
-        self.error_message = message
-        self.finished_at = datetime.datetime.now()
-    
-    def get_duration(self) -> Optional[datetime.timedelta]:
-        """Get processing duration if job is completed"""
-        if self.started_at and self.finished_at:
-            return self.finished_at - self.started_at
-        return None
+    start_txt = utils.ms_to_str(job.start) if job.start > 0 else '00:00:00'
+    stop_txt = utils.ms_to_str(job.stop) if job.stop > 0 else 'end'
+    lines.append(f"{t('label_start')} {start_txt}")
+    lines.append(f"{t('label_stop')} {stop_txt}")
+    lines.append(f"{t('label_language')} {_job_language_name(job)}")
 
-    def format_summary(self) -> str:
-        """Build a concise, multi-line summary for tooltips.
+    model_name = transcription_model_name or job.transcription_model.model_id
+    lines.append(f"{t('label_whisper_model')} {model_name}")
+    lines.append(f"{t('label_pause')} {pause_label(job.pause)}")
+    lines.append(f"{t('label_speaker')} {_job_speaker_setting(job)}")
+    if job.speaker_names:
+        lines.append(f"{t('label_speaker_names')} {', '.join(job.speaker_names)}")
+    lines.append(f"{t('label_overlapping')} {yn(job.overlapping)}")
+    lines.append(f"{t('label_disfluencies')} {yn(job.disfluencies)}")
+    lines.append(f"{t('label_timestamps')} {yn(job.timestamps)}")
+    return "\n".join(line for line in lines if line)
 
-        Uses localized UI labels where available and simple symbols for booleans.
-        """
-        lines = []
 
-        def yn(v: bool) -> str:
-            return '✓' if bool(v) else '✗'
+def transcription_model_name(model_labels: dict[str, str], model: ModelRef) -> str:
+    """Return the same model label that the model selector shows."""
+    return model_labels.get(str(model), model.model_id)
 
-        # Output file (show basename and format)
-        try:
-            out_name = os.path.basename(self.transcript_file) if self.transcript_file else ''
-            lines.append(f"{t('job_tt_transcript_file')} {out_name}")
-        except Exception:
-            pass
 
-        # Time range
-        try:
-            start_ms = getattr(self, 'start', 0) or 0
-            stop_ms = getattr(self, 'stop', 0) or 0
-            start_txt = utils.ms_to_str(start_ms) if start_ms > 0 else '00:00:00'
-            stop_txt = utils.ms_to_str(stop_ms) if stop_ms > 0 else 'end'
-            lines.append(f"{t('label_start')} {start_txt}")
-            lines.append(f"{t('label_stop')} {stop_txt}")
-        except Exception:
-            pass
+def format_transcript_options(
+    job: TranscriptionJob, model_name: str, diarization_name: str | None = None
+) -> str:
+    """Build the localized options line stored in the transcript header.
 
-        # Language
-        try:
-            lines.append(f"{t('label_language')} {self.language_name}")
-        except Exception:
-            pass
+    diarization_name names the engine behind the speakers, as in "auto (Nemotron)"."""
+    options = []
+    # Use a non-ASCII colon in times so MAXQDA does not interpret these
+    # header values as transcript time markers.
+    if job.start > 0:
+        options.append(
+            f'{t("label_start")} {utils.ms_to_str(job.start)}'.replace(':', '꞉')
+        )
+    if job.stop > 0:
+        options.append(
+            f'{t("label_stop")} {utils.ms_to_str(job.stop)}'.replace(':', '꞉')
+        )
+    language_name = _job_language_name(job)
+    language_code = job.language or ('multilingual' if job.multilingual else 'auto')
+    options.append(f'{t("label_language")} {language_name} ({language_code})')
+    options.append(f'{t("label_whisper_model")} {model_name}')
+    engine = f' ({diarization_name})' if diarization_name and job.diarization_enabled else ''
+    options.append(f'{t("label_speaker")} {_job_speaker_setting(job)}{engine}')
+    if job.speaker_names:
+        options.append(f'{t("label_speaker_names")} {", ".join(job.speaker_names)}')
+    # Store localized yes/no values instead of Python's True/False literals.
+    yes, no = t('opt_yes'), t('opt_no')
+    options.append(f'{t("label_overlapping")} {yes if job.overlapping else no}')
+    options.append(f'{t("label_timestamps")} {yes if job.timestamps else no}')
+    options.append(f'{t("label_disfluencies")} {yes if job.disfluencies else no}')
+    options.append(f'{t("label_pause")} {pause_label(job.pause)}')
+    return ' | '.join(options)
 
-        # Model. whisper_model is a transcription.WhisperModel, so os.path
-        # functions raise TypeError on it -- which the except below swallowed,
-        # dropping this line from every tooltip.
-        try:
-            model_disp = getattr(self.whisper_model, 'name', None) or str(self.whisper_model or '')
-            lines.append(f"{t('label_whisper_model')} {model_disp}")
-        except Exception:
-            pass
 
-        # Pause threshold (map int index back to label)
-        try:
-            lines.append(f"{t('label_pause')} {pause_label(self.pause)}")
-        except Exception:
-            pass
+def _job_language_name(job: TranscriptionJob) -> str:
+    if job.multilingual:
+        return 'Multilingual'
+    if job.language is None:
+        return 'Auto'
+    return next(
+        (name for name, code in languages.items() if code == job.language),
+        job.language,
+    )
 
-        # Speaker detection
-        try:
-            lines.append(f"{t('label_speaker')} {self.speaker_detection}")
-        except Exception:
-            pass
 
-        # Speaker names (only when the user set any)
-        try:
-            if self.speaker_names:
-                lines.append(f"{t('label_speaker_names')} {', '.join(self.speaker_names)}")
-        except Exception:
-            pass
+def _num_speakers(speaker_setting) -> int | None:
+    """The fixed number of speakers a speaker setting asks for, or None."""
+    return int(speaker_setting) if str(speaker_setting).isdigit() else None
 
-        # Overlapping speech
-        try:
-            lines.append(f"{t('label_overlapping')} {yn(self.overlapping)}")
-        except Exception:
-            pass
 
-        # Disfluencies
-        try:
-            lines.append(f"{t('label_disfluencies')} {yn(self.disfluencies)}")
-        except Exception:
-            pass
+def _segment_dict(segment: TranscriptionSegment) -> dict:
+    """A segment as the worker sent it, the form noScribe.voice_check reads;
+    TranscriptionSegment.from_mapping() turns it back."""
+    return {
+        'start': segment.start, 'end': segment.end, 'text': segment.text,
+        'words': [{'word': w.word, 'start': w.start, 'end': w.end, 'prob': w.probability}
+                  for w in segment.words],
+    }
 
-        # Timestamps
-        try:
-            lines.append(f"{t('label_timestamps')} {yn(self.timestamps)}")
-        except Exception:
-            pass
 
-        return "\n".join([ln for ln in lines if ln])
-    
-class TranscriptionQueue:
-    """Manages a queue of transcription jobs"""
-    
-    def __init__(self):
-        self.jobs: list[TranscriptionJob] = []
-        self.current_job: Optional[TranscriptionJob] = None  # Track currently running job
-    
-    def add_job(self, job: TranscriptionJob):
-        """Add a job to the queue"""
-        self.jobs.append(job)
-    
-    def get_waiting_jobs(self) -> list[TranscriptionJob]:
-        """Get all jobs with WAITING status"""
-        return [job for job in self.jobs if job.status == JobStatus.WAITING]
-    
-    def get_running_jobs(self) -> list[TranscriptionJob]:
-        """Get all jobs currently being processed"""
-        return [job for job in self.jobs if job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION, JobStatus.CANCELING]]
-    
-    def get_finished_jobs(self) -> list[TranscriptionJob]:
-        """Get all successfully completed jobs"""
-        return [job for job in self.jobs if job.status == JobStatus.FINISHED]
-    
-    def get_failed_jobs(self) -> list[TranscriptionJob]:
-        """Get all jobs that encountered errors"""
-        return [job for job in self.jobs if job.status == JobStatus.ERROR]
+def _job_extension(job: TranscriptionJob) -> dict:
+    """The job data every transcription request carries for the plugins
+    (JOB_EXTENSION): whether the output needs times -- .html and .vtt embed
+    audio-sync anchors, so only a plain .txt without timestamps, speakers or
+    pause marks does without -- and the speaker names the user entered."""
+    return {JOB_EXTENSION: {
+        'needs_timing': bool(job.output_format != 'txt' or job.timestamps
+                             or job.diarization_enabled or job.pause > 0),
+        'speaker_names': list(job.speaker_names or []),
+    }}
 
-    def get_canceled_jobs(self) -> list[TranscriptionJob]:
-        """Get all jobs that were canceled by the user"""
-        return [job for job in self.jobs if job.status == JobStatus.CANCELED]
-    
-    def has_pending_jobs(self) -> bool:
-        """Check if there are jobs waiting to be processed"""
-        return len(self.get_waiting_jobs()) > 0
-    
-    def is_running(self) -> bool:
-        """Check if any job are currently beeing processed"""
-        return len(self.get_running_jobs()) > 0
-    
-    def get_next_waiting_job(self) -> Optional[TranscriptionJob]:
-        """Get the next job to process"""
-        waiting_jobs = self.get_waiting_jobs()
-        return waiting_jobs[0] if waiting_jobs else None
-    
-    def get_queue_summary(self) -> dict:
-        """Get summary statistics of the queue"""
-        return {
-            'total': len(self.jobs),
-            'waiting': len(self.get_waiting_jobs()),
-            'running': len(self.get_running_jobs()),
-            'finished': len(self.get_finished_jobs()),
-            'errors': len(self.get_failed_jobs()),
-            'canceled': len(self.get_canceled_jobs()),
-        }
-    
-    def is_empty(self) -> bool:
-        """Check if queue is empty"""
-        return len(self.jobs) == 0
 
-    def has_inactive_jobs(self) -> bool:
-        """Whether clear_inactive() would remove anything."""
-        return len(self.jobs) > len(self.get_running_jobs())
+def _job_speaker_setting(job: TranscriptionJob) -> str:
+    if not job.diarization_enabled:
+        return 'none'
+    return str(job.num_speakers) if job.num_speakers is not None else 'auto'
 
-    def clear_inactive(self) -> None:
-        """Remove all jobs that are not currently being processed (waiting,
-        finished, canceled and failed ones). A running job keeps its place."""
-        # get_running_jobs() filters self.jobs, so it is already exactly the
-        # list to keep, in queue order.
-        self.jobs = self.get_running_jobs()
-    
-    def has_output_conflict(self, transcript_file: str, ignore_job: Optional[TranscriptionJob] = None) -> bool:
-        """Check if another queue job uses the same output file.
-        Ignores jobs in ERROR, CANCELING, CANCELED and optionally a given job."""
-        try:
-            target = os.path.abspath(transcript_file)
-        except Exception:
-            return False
-        try:
-            for j in self.jobs:
-                try:
-                    if not j or j is ignore_job:
-                        continue
-                    tf = getattr(j, 'transcript_file', None)
-                    if not tf:
-                        continue
-                    if os.path.abspath(tf) == target and j.status not in [JobStatus.ERROR, JobStatus.CANCELING, JobStatus.CANCELED]:
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            return False
-        return False
 
-    def confirm_output_override(self, transcript_file: str, ignore_job: Optional[TranscriptionJob] = None) -> bool:
-        """Prompt the user if a conflicting output file is found. Returns True to proceed."""
-        try:
-            if self.has_output_conflict(transcript_file, ignore_job=ignore_job):
-                msg = t('output_override')
-                return tk.messagebox.askyesno(title='noScribe', message=msg)
-        except Exception:
-            pass
-        return True
-    
+def _model_ref(value: str, inference_backend=None) -> ModelRef:
+    """Accept a qualified ref or migrate a legacy bare local model ID: a renamed
+    model to its new name, and a Voxtral model, saved before the plugins, to the
+    plugin that offers it now (when the registry is given to ask)."""
+    if ':' in value:
+        return ModelRef.parse(value)
+    value = RENAMED_MODELS.get(value, value)
+    if inference_backend is not None:
+        for model in inference_backend.list_models('transcription'):
+            if model.ref.backend_id == LOCAL_VOXTRAL_BACKEND and model.ref.model_id == value:
+                return model.ref
+    return ModelRef(LOCAL_WHISPER_BACKEND, value)
+
+
+def confirm_output_override(
+        queue: TranscriptionQueue,
+        transcript_file: str,
+        ignore_job: TranscriptionJob | None = None) -> bool:
+    """Ask before reusing an output path already present in the queue."""
+    if queue.has_output_conflict(transcript_file, ignore_job=ignore_job):
+        return tk.messagebox.askyesno(title='noScribe', message=t('output_override'))
+    return True
+
 
 # Command Line Interface
 
@@ -682,7 +556,8 @@ def parse_speaker_names(speaker_names):
 
 
 def create_transcription_job(audio_file=None, transcript_file=None, start_time=None, stop_time=None,
-                           language_name=None, whisper_model_name=None, speaker_detection=None,
+                           language_name=None, transcription_model=None, diarization_model=None,
+                           speaker_detection=None,
                            speaker_names=None,
                            overlapping=None, timestamps=None, disfluencies=None, pause=None,
                            cli_mode=False) -> TranscriptionJob:
@@ -697,9 +572,8 @@ def create_transcription_job(audio_file=None, transcript_file=None, start_time=N
     job.audio_file = audio_file or ''
     job.transcript_file = transcript_file or ''
     if job.transcript_file:
-        job.file_ext = os.path.splitext(job.transcript_file)[1][1:]
-        if not job.file_ext in ['html', 'txt', 'vtt']:
-            raise Exception(t('err_unsupported_output_format', file_type=job.file_ext))
+        if job.output_format not in ['html', 'txt', 'vtt']:
+            raise Exception(t('err_unsupported_output_format', file_type=job.output_format))
     
     # Time range
     job.start = start_time if start_time is not None else 0
@@ -708,26 +582,37 @@ def create_transcription_job(audio_file=None, transcript_file=None, start_time=N
     # Language - handle both language names and codes
     if language_name:
         if language_name in languages.values():
-            # Find language name by code
-            job.language_name = next(name for name, code in languages.items() if code == language_name)
+            job.multilingual = language_name == 'multilingual'
+            job.language = None if language_name in ('auto', 'multilingual') else language_name
         elif language_name in languages.keys():
-            # Language name provided directly
-            job.language_name = language_name
+            job.multilingual = language_name == 'Multilingual'
+            job.language = None if language_name in ('Auto', 'Multilingual') else languages[language_name]
         else:
             raise ValueError(f"Unknown language: {language_name}")
-    else:
-        job.language_name = 'Auto'
-    
-    # Model (will be validated later when we have access to the app instance)
-    job.whisper_model = whisper_model_name or 'precise'
+
+    if isinstance(transcription_model, ModelRef):
+        job.transcription_model = transcription_model
+    elif transcription_model:
+        model_value = str(transcription_model)
+        job.transcription_model = (
+            ModelRef.parse(model_value)
+            if ':' in model_value
+            else ModelRef(LOCAL_WHISPER_BACKEND, model_value)
+        )
+    if isinstance(diarization_model, ModelRef):
+        job.diarization_model = diarization_model
+    elif diarization_model:
+        job.diarization_model = ModelRef.parse(str(diarization_model))
     
     # Processing options with defaults
-    job.speaker_detection = speaker_detection if speaker_detection is not None else 'auto'
+    speaker_setting = speaker_detection if speaker_detection is not None else 'auto'
+    job.diarization_enabled = speaker_setting != 'none'
+    job.num_speakers = int(speaker_setting) if str(speaker_setting).isdigit() else None
     # Hidden GUI names must not appear in job metadata when detection is off.
-    job.speaker_names = parse_speaker_names(speaker_names) if job.speaker_detection != 'none' else []
-    job.overlapping = overlapping if overlapping is not None else True
-    job.timestamps = timestamps if timestamps is not None else False
-    job.disfluencies = disfluencies if disfluencies is not None else True
+    job.speaker_names = parse_speaker_names(speaker_names) if job.diarization_enabled else []
+    job.overlapping = bool(overlapping) if overlapping is not None else True
+    job.timestamps = bool(timestamps) if timestamps is not None else False
+    job.disfluencies = bool(disfluencies) if disfluencies is not None else True
     
     # Pause setting
     if pause is not None:
@@ -741,37 +626,10 @@ def create_transcription_job(audio_file=None, transcript_file=None, start_time=N
     else:
         job.pause = 1  # default to '1sec+'
     
-    # Config-based options (use defaults from config)
-    job.whisper_beam_size = get_config('whisper_beam_size', 1)
-    job.whisper_temperature = get_config('whisper_temperature', 0.0)
-    job.whisper_compute_type = get_config('whisper_compute_type', 'default')
-    job.timestamp_interval = get_config('timestamp_interval', 60_000)
-    job.timestamp_color = get_config('timestamp_color', '#78909C')
-    job.pause_marker = get_config('pause_seconds_marker', '.')
     job.auto_save = get_config_flag('auto_save', True)
-        
-    job.vad_threshold = float(get_config('voice_activity_detection_threshold', '0.5'))
-    
-    # Platform-specific XPU settings
-    """    
-    if platform.system() == "Darwin":  # MAC
-        xpu = get_config('pyannote_xpu', 'mps' if platform.mac_ver()[0] >= '12.3' else 'cpu')
-        job.pyannote_xpu = 'mps' if xpu == 'mps' else 'cpu'
-    elif platform.system() in ('Windows', 'Linux'):
-        try:
-            cuda_available = torch.cuda.is_available() and get_cuda_device_count() > 0
-        except:
-            cuda_available = False
-        xpu = get_config('pyannote_xpu', 'cuda' if cuda_available else 'cpu')
-        job.pyannote_xpu = 'cuda' if xpu == 'cuda' else 'cpu'
-        whisper_xpu = get_config('whisper_xpu', 'cuda' if cuda_available else 'cpu')
-        job.whisper_xpu = 'cuda' if whisper_xpu == 'cuda' else 'cpu'
-    else:
-        raise Exception('Platform not supported yet.')
-    """    
-    
+
     # Check for invalid VTT options
-    if job.file_ext == 'vtt' and (job.pause > 0 or job.overlapping or job.timestamps):
+    if job.output_format == 'vtt' and (job.pause > 0 or job.overlapping or job.timestamps):
         if cli_mode:
             print("Warning: VTT format doesn't support pause markers, overlapping speech, or timestamps. These options will be disabled.")
         job.pause = 0
@@ -779,6 +637,55 @@ def create_transcription_job(audio_file=None, transcript_file=None, start_time=N
         job.timestamps = False
     
     return job
+
+
+def select_diarization_model(inference_backend, transcription_model: ModelRef,
+                             num_speakers: int | None = None) -> ModelRef:
+    """Prefer diarization on the selected remote profile, then the local engine
+    that `diarization_engine` in config.yml names, then local Pyannote.
+
+    `auto` (the default) takes Nemotron when its weights are on disk, shipped in
+    models/ or in the Hugging Face cache, so it never starts a download;
+    `nemotron` downloads them on first use, `pyannote` keeps the old engine.
+    Nemotron finds the number of speakers itself and cannot be held to one, so a
+    job with a fixed number stays with Pyannote."""
+    models = inference_backend.list_models("diarization")
+    for model in models:
+        if model.ref.backend_id == transcription_model.backend_id:
+            return model.ref
+    nemotron = ModelRef(LOCAL_NEMOTRON_BACKEND, "default")
+    if num_speakers is None and any(model.ref == nemotron for model in models):
+        engine = str(get_config('diarization_engine', 'auto')).lower()
+        if engine == 'nemotron' or (
+                engine == 'auto' and inference_backend.get(LOCAL_NEMOTRON_BACKEND).ready()):
+            return nemotron
+    local_default = ModelRef(LOCAL_DIARIZATION_BACKEND, "default")
+    if any(model.ref == local_default for model in models):
+        return local_default
+    if models:
+        return models[0].ref
+    return local_default
+
+
+def model_uses_remote_backend(inference_backend, model: ModelRef) -> bool:
+    return (
+        inference_backend.get(model.backend_id).manifest.execution.type
+        is ExecutionType.REMOTE
+    )
+
+
+def _backend_configuration_busy(app) -> bool:
+    if app.inference_backend.busy:
+        return True
+    active_states = {
+        JobStatus.AUDIO_CONVERSION,
+        JobStatus.WAITING_FOR_SERVER,
+        JobStatus.SPEAKER_IDENTIFICATION,
+        JobStatus.TRANSCRIPTION,
+        JobStatus.CANCELING,
+    }
+    return any(job.status in active_states for job in app.queue.jobs)
+
 
 def create_job_from_cli_args(args) -> TranscriptionJob:
     """Create a TranscriptionJob from command line arguments"""
@@ -792,7 +699,7 @@ def create_job_from_cli_args(args) -> TranscriptionJob:
         start_time=start_time,
         stop_time=stop_time,
         language_name=args.language,
-        whisper_model_name=args.model,
+        transcription_model=args.model,
         speaker_detection=args.speaker_detection,
         speaker_names=args.speaker_names,
         overlapping=args.overlapping,
@@ -836,7 +743,7 @@ Examples:
     parser.add_argument('--language', default=None,
                        help='Language code (e.g., en, de, fr) or "auto" for auto-detection')
     parser.add_argument('--model', default=None,
-                       help='Whisper model to use (use --help-models to see available models)')
+                       help='Qualified model reference (for example local-whisper:precise); legacy bare local model IDs are also accepted')
     parser.add_argument('--speaker-detection', choices=['none', 'auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], default=None,
                        help='Speaker detection/diarization setting')
     parser.add_argument('--speaker-names', default=None,
@@ -1038,6 +945,10 @@ def _init_app_state(app):
     app._headless = False
     app.user_models_dir = Path(config_dir) / "whisper_models"
     app.user_models_dir.mkdir(exist_ok=True)
+    app.remote_backends_dir = Path(config_dir) / "backends"
+    remote_profiles = load_remote_profiles(app.remote_backends_dir)
+    app.remote_backend_profiles = remote_profiles.profiles
+    app.remote_backend_profile_errors = remote_profiles.errors
     whisper_models_readme = app.user_models_dir / "readme.txt"
     if not whisper_models_readme.exists():
         with open(whisper_models_readme, "w") as file:
@@ -1045,11 +956,6 @@ def _init_app_state(app):
                        'See here for more information: https://github.com/kaixxx/noScribe/wiki/Add-custom-Whisper-models-for-transcription')
 
     app.queue = TranscriptionQueue()
-    # Maps each decorated picker label back to its plain model name, so the
-    # selected model is recovered by lookup rather than by string-splitting the
-    # display label on a separator (see model_key). Rebuilt whenever the dropdown
-    # is populated.
-    app._model_label_to_name = {}
     app.audio_files_list = []
     app.transcript_files_list = []
     app.log_file = None
@@ -1059,55 +965,139 @@ def _init_app_state(app):
     app.current_progress = -1
     # Track background activity for robust shutdown
     app._worker_threads = []
-    app._mp_proc = None
-    app._mp_queue = None
     app._ffmpeg_proc = None
     app._shutting_down = False
     app._ui_thread_id = get_ident()
     app._ui_tasks = pyqueue.Queue()
+    app._remote_model_refresh_in_progress = False
+    app._remote_model_refresh_pending = False
+    app._remote_models_refreshed_at = float('-inf')
+    app._last_remote_refresh_errors = ()
+    app._engine_progress = False
 
     # Get a list of available Whisper models.
     tmp = transcription.WhisperModelManager(app.user_models_dir)
-    app.whisper_models = tmp.get_installed_models()
-
-    _register_voxtral_models(app)
-
-
-# Model names that were published under another name before: a choice saved
-# under the old one (config.yml, a script's --model) means the new one, and was
-# otherwise silently replaced by the first Whisper model.
-RENAMED_MODELS = {'voxtral-small-8bit': 'voxtral-small-4bit'}
-
-
-def _register_voxtral_models(app):
-    """Add the Voxtral engine as additional model choices (Apple Silicon only,
-    where mlx-voxtral runs on the GPU). Called at startup and again when the
-    model dropdown opens, so a build converted while the app is running
-    (tools/quantize_voxtral.py) appears without a restart."""
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
-        return
+    app.local_whisper_models = tmp.get_installed_models()
     try:
-        from noScribe import voxtral_engine
-        if voxtral_engine.is_available():
-            for _name, _repo in voxtral_engine.VOXTRAL_MODELS.items():
-                # Skip a (hypothetical future) local-only entry whose build is not
-                # present yet. Shipped builds download on first use, so this is
-                # currently always true for them.
-                if not voxtral_engine.has_local_build(_name):
-                    continue
-                resolved = voxtral_engine.resolve_model(_name, _repo)
-                existing = app.whisper_models.get(_name)
-                # (Re)register when new, or when the resolved repo changed -- e.g.
-                # a build converted mid-session (tools/quantize_voxtral.py) flips
-                # the resolved repo from the HF id to the now-present local path,
-                # so it is picked up on the next dropdown open without a restart
-                # (as this function's docstring promises).
-                if existing is None or getattr(existing, "repo", None) != resolved:
-                    app.whisper_models[_name] = transcription.WhisperModel(
-                        name=_name, path=Path(_name), engine="voxtral",
-                        repo=resolved)
-    except Exception as e:
-        logger.warning("Could not register Voxtral engine: %s", e)
+        vad_threshold = float(get_config('voice_activity_detection_threshold', '0.5'))
+    except (TypeError, ValueError):
+        vad_threshold = 0.5
+        config['voice_activity_detection_threshold'] = '0.5'
+    app.worker_settings = LocalWorkerSettings(
+        cpu_threads=int(number_threads),
+        force_whisper_cpu=force_whisper_cpu,
+        force_diarization_cpu=force_pyannote_cpu,
+        vad_threshold=vad_threshold,
+    )
+    app.inference_backend = create_builtin_registry(
+        whisper_models={
+            name: str(model.path)
+            for name, model in app.local_whisper_models.items()
+        },
+        settings=app.worker_settings,
+        settings_dir=Path(config_dir) / "plugin-settings",
+        voxtral_defaults=VoxtralWorkerSettings(
+            chunk_sec=_config_number('voxtral_chunk_sec'),
+            ram_reserve_gb=_config_number('voxtral_ram_reserve_gb'),
+        ),
+        nemotron_defaults=NemotronWorkerSettings(
+            device='cpu' if force_nemotron_cpu else 'auto',
+        ),
+        corrections_dir=Path(config_dir),
+    )
+    app.remote_backend_registration_errors = register_remote_profiles(
+        app.inference_backend,
+        app.remote_backend_profiles,
+    )
+    _update_transcription_model_catalog(app)
+
+
+def _config_number(key: str) -> float:
+    """A number from config.yml, 0 when absent or unreadable: a value written as a
+    YAML string ("0", "high") must neither slip through truthy nor abort a job."""
+    try:
+        return max(0.0, float(config.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _menu_hint(inference_backend, model) -> str:
+    """What a plugin adds after a model's name in the menu (Voxtral: its RAM)."""
+    try:
+        hint = getattr(inference_backend.get(model.ref.backend_id), 'menu_hint', None)
+        return hint(model) if hint else ''
+    except Exception:
+        return ''
+
+
+def _update_transcription_model_catalog(app) -> None:
+    app.transcription_models = {
+        str(model.ref): model
+        for model in app.inference_backend.list_models("transcription")
+    }
+    options = app.inference_backend.model_options("transcription")
+    # The transcript header and the queue name a model as the menu does, but
+    # without the hint a plugin adds there.
+    app.transcription_model_names = {
+        str(model.ref): label for label, model in options.items()
+    }
+    app.transcription_model_options = {
+        label + _menu_hint(app.inference_backend, model): model
+        for label, model in options.items()
+    }
+    app.transcription_model_labels = {
+        str(model.ref): label
+        for label, model in app.transcription_model_options.items()
+    }
+
+
+def _model_menu_values(app) -> list[str]:
+    return [
+        *app.transcription_model_options,
+        '--------------------',
+        t('label_add_custom_models'),
+        t('label_manage_servers'),
+    ]
+
+
+def _prepare_model_menu(app, menu) -> None:
+    """Retry remote discovery on every opening, before posting the native menu."""
+    menu.configure(values=_model_menu_values(app))
+    app.refresh_remote_models(force=True)
+
+
+def _model_selection_label(app, preferred_ref: str | None) -> str | None:
+    """Keep an available selection, otherwise prefer the bundled precise model."""
+    for ref in (preferred_ref, str(ModelRef(LOCAL_WHISPER_BACKEND, "precise"))):
+        if ref in app.transcription_model_labels:
+            return app.transcription_model_labels[ref]
+    return next(iter(app.transcription_model_options), None)
+
+
+def _remote_backend_error_details(error) -> str:
+    """Return the diagnostic form of a remote backend connection error."""
+    return (
+        f"Could not connect remote backend {error.profile.name!r}: "
+        f"{error.message}"
+    )
+
+
+def _gui_error_message(error: BaseException, fallback: str | None = None) -> str:
+    """Return a concise translated message without discarding diagnostics.
+
+    Wrapping exceptions are common in the three processing phases, so inspect
+    the complete exception chain before falling back to its technical text.
+    """
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, InferenceWorkerError):
+            message_id = current.user_message_id
+            if message_id:
+                return t(message_id, **current.user_message_params)
+        current = current.__cause__ or current.__context__
+    return fallback or str(error)
 
 
 class App(ctk.CTk):
@@ -1245,24 +1235,13 @@ class App(ctk.CTk):
 
             def _clicked(self, event=0):
                 self.old_value = self.get()
-                # Pick up models that appeared since startup (e.g. a Voxtral
-                # build converted while the app is running).
-                _register_voxtral_models(self.noScribe_parent)
-                names = list(self.noScribe_parent.whisper_models.keys())
-                self._values = [self.noScribe_parent.model_label(n) for n in names]
-                # Remember label -> name so the selection is recovered by lookup,
-                # not by splitting the label on MODEL_LABEL_SEP.
-                self.noScribe_parent._model_label_to_name = dict(
-                    zip(self._values, names))
-                self._values.append('--------------------')
-                self._values.append(t('label_add_custom_models'))
-                self._dropdown_menu.configure(values=self._values)
+                _prepare_model_menu(self.noScribe_parent, self)
                 super()._clicked(event)
                 
             def _dropdown_callback(self, value: str):
-                if value == self._values[-2]:  # divider
+                if value == '--------------------':
                     return
-                if value == self._values[-1]:  # Add custom model
+                if value == t('label_add_custom_models'):
                     # show custom model folder
                     path = self.noScribe_parent.user_models_dir
                     try:
@@ -1277,6 +1256,8 @@ class App(ctk.CTk):
                             raise OSError(f"Unsupported operating system: {os_type}")
                     except Exception as e:
                         self.noScribe_parent.logn(f"Failed to open folder: {e}")
+                elif value == t('label_manage_servers'):
+                    self.noScribe_parent.open_server_manager()
                 else:
                     super()._dropdown_callback(value)
         
@@ -1286,15 +1267,14 @@ class App(ctk.CTk):
         self.option_menu_whisper_model = CustomCTkOptionMenu(self, 
                                                        self.frame_options, 
                                                        width=100,
-                                                       values=list(self.whisper_models.keys()),
+                                                       values=list(self.transcription_model_options.keys()),
                                                        dynamic_resizing=False)
         self.option_menu_whisper_model.grid(column=1, row=3, sticky='e', pady=5)
-        last_whisper_model = get_config('last_whisper_model', 'precise')
-        last_whisper_model = RENAMED_MODELS.get(last_whisper_model, last_whisper_model)
-        if last_whisper_model in self.whisper_models:
-            self.option_menu_whisper_model.set(last_whisper_model)
-        elif len(self.whisper_models) > 0:
-            self.option_menu_whisper_model.set(next(iter(self.whisper_models)))
+        last_whisper_model = str(_model_ref(get_config('last_whisper_model', 'precise'),
+                                            self.inference_backend))
+        selected_label = _model_selection_label(self, last_whisper_model)
+        if selected_label is not None:
+            self.option_menu_whisper_model.set(selected_label)
 
         # Mark pauses
         self.label_pause = ctk.CTkLabel(self.frame_options, text=t('label_pause'))
@@ -1545,6 +1525,19 @@ class App(ctk.CTk):
         self.log(t('welcome_credits', v=app_version, y=app_year))
         self.logn('https://github.com/kaixxx/noScribe', link='https://github.com/kaixxx/noScribe#readme')
         self.logn(t('welcome_instructions'))
+        for error in self.remote_backend_profile_errors:
+            self.logn(
+                f"Could not load remote backend profile {error.path.name!r}: "
+                f"{error.message}",
+                'error',
+            )
+        for error in self.remote_backend_registration_errors:
+            print(_remote_backend_error_details(error), file=sys.stderr)
+            self.logn(
+                t('err_remote_backend_connection', name=error.profile.name),
+                'error',
+                where='screen',
+            )
         
         # check for new releases
         if get_config_flag('check_for_update', True):
@@ -1588,6 +1581,511 @@ class App(ctk.CTk):
                 logger.exception("Error handling a UI task")
         self.after(20, self._drain_ui_tasks)
 
+    def refresh_remote_models(self, *, force: bool = False) -> None:
+        """Refresh remote model catalogs without blocking the Tk event loop."""
+        now = time.monotonic()
+        if self._remote_model_refresh_in_progress:
+            if force:
+                self._remote_model_refresh_pending = True
+            return
+        if (
+            self.inference_backend.busy
+            or (not force and now - self._remote_models_refreshed_at
+                < REMOTE_MODEL_REFRESH_SECONDS)
+        ):
+            return
+        self._remote_model_refresh_in_progress = True
+
+        def refresh() -> None:
+            refresh_failure = None
+            try:
+                errors = sync_remote_profiles(
+                    self.inference_backend, self.remote_backend_profiles
+                )
+            except Exception as error:
+                errors = ()
+                refresh_failure = error
+                print(
+                    f"Could not synchronize remote backends: {error}",
+                    file=sys.stderr,
+                )
+
+            def apply() -> None:
+                # The user may have selected another model during discovery.
+                selected = self.transcription_model_options.get(
+                    self.option_menu_whisper_model.get()
+                )
+                selected_ref = str(selected.ref) if selected is not None else None
+                self._remote_model_refresh_in_progress = False
+                self._remote_models_refreshed_at = time.monotonic()
+                self.remote_backend_registration_errors = errors
+                _update_transcription_model_catalog(self)
+
+                menu_values = _model_menu_values(self)
+                self.option_menu_whisper_model.configure(values=menu_values)
+                selected_label = _model_selection_label(self, selected_ref)
+                if selected_label is not None:
+                    self.option_menu_whisper_model.set(selected_label)
+
+                error_keys = tuple(
+                    (error.profile.id, error.message) for error in errors
+                )
+                if error_keys != self._last_remote_refresh_errors:
+                    for error in errors:
+                        print(_remote_backend_error_details(error), file=sys.stderr)
+                        self.logn(
+                            t(
+                                'err_remote_backend_connection',
+                                name=error.profile.name,
+                            ),
+                            'error',
+                            where='screen',
+                        )
+                    self._last_remote_refresh_errors = error_keys
+                if refresh_failure is not None:
+                    self.logn(t('err_remote_backend_refresh'), 'error', where='screen')
+                try:
+                    self._worker_threads.remove(worker)
+                except ValueError:
+                    pass
+                if self._remote_model_refresh_pending:
+                    self._remote_model_refresh_pending = False
+                    self.after(0, lambda: self.refresh_remote_models(force=True))
+
+            self._dispatch_ui(apply)
+
+        worker = Thread(target=refresh, daemon=True)
+        self._worker_threads.append(worker)
+        worker.start()
+
+    def open_server_manager(self) -> None:
+        """Open the editor for independently stored remote server profiles."""
+        if _backend_configuration_busy(self):
+            tk.messagebox.showerror(
+                title='noScribe', message=t('server_manager_busy')
+            )
+            return
+        existing_dialog = getattr(self, '_server_manager_dialog', None)
+        if existing_dialog is not None and existing_dialog.winfo_exists():
+            existing_dialog.focus()
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        self._server_manager_dialog = dlg
+        dlg.title(t('server_manager_title'))
+        dlg.geometry('780x440')
+        dlg.minsize(720, 400)
+        dlg.transient(self)
+        dlg.grid_columnconfigure(0, weight=0)
+        dlg.grid_columnconfigure(1, weight=1)
+        dlg.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(dlg, width=240)
+        left.grid(row=0, column=0, padx=(15, 8), pady=15, sticky='nsew')
+        left.grid_propagate(False)
+        left.grid_rowconfigure(1, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            left, text=t('server_manager_profiles'), anchor='w'
+        ).grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky='ew')
+        # Native Tk widgets do not observe CustomTkinter's widget scaling.
+        # Apply the current CTk font scaling explicitly so the profile list
+        # matches the labels and entries on high-DPI displays.
+        try:
+            profile_list_font = left._apply_font_scaling(ctk.CTkFont())
+        except Exception:
+            profile_list_font = ('TkDefaultFont', -26)
+        profile_list = tk.Listbox(
+            left,
+            exportselection=False,
+            borderwidth=0,
+            highlightthickness=0,
+            activestyle='none',
+            font=profile_list_font,
+            bg='#2b2b2b',
+            fg='#f2f2f2',
+            selectbackground='#1f6aa5',
+            selectforeground='white',
+        )
+        profile_list.grid(
+            row=1, column=0, columnspan=2, padx=10, pady=5, sticky='nsew'
+        )
+
+        right = ctk.CTkFrame(dlg)
+        right.grid(row=0, column=1, padx=(8, 15), pady=15, sticky='nsew')
+        right.grid_columnconfigure(1, weight=1)
+
+        fields = {}
+        for row, (key, label_key) in enumerate((
+            ('name', 'server_manager_name'),
+            ('url', 'server_manager_url'),
+            ('api_key', 'server_manager_api_key'),
+        )):
+            ctk.CTkLabel(right, text=t(label_key), anchor='w').grid(
+                row=row, column=0, padx=(15, 10), pady=(18 if row == 0 else 8, 4),
+                sticky='w',
+            )
+            entry = ctk.CTkEntry(right)
+            entry.grid(
+                row=row, column=1, padx=(0, 15), pady=(18 if row == 0 else 8, 4),
+                sticky='ew',
+            )
+            fields[key] = entry
+
+        enabled_var = tk.BooleanVar(value=True)
+        enabled_checkbox = ctk.CTkCheckBox(
+            right,
+            text=t('server_manager_enabled'),
+            variable=enabled_var,
+            onvalue=True,
+            offvalue=False,
+        )
+        enabled_checkbox.grid(
+            row=3, column=1, padx=(0, 15), pady=(12, 8), sticky='w'
+        )
+
+        status_label = ctk.CTkLabel(
+            right, text='', anchor='w', justify='left', wraplength=430
+        )
+        status_label.grid(
+            row=4, column=0, columnspan=2, padx=15, pady=(12, 5), sticky='ew'
+        )
+        right.grid_rowconfigure(4, weight=1)
+
+        current_id: str | None = None
+        visible_profiles: list[RemoteBackendProfile] = []
+        form_dirty = False
+        changing_form = False
+
+        def profile_by_id(profile_id: str | None):
+            return next(
+                (profile for profile in self.remote_backend_profiles
+                 if profile.id == profile_id),
+                None,
+            )
+
+        def set_entry(entry, value: str) -> None:
+            entry.delete(0, tk.END)
+            entry.insert(0, value)
+
+        def show_profile(profile: RemoteBackendProfile | None) -> None:
+            nonlocal current_id, form_dirty, changing_form
+            changing_form = True
+            current_id = profile.id if profile is not None else None
+            set_entry(fields['name'], profile.name if profile else '')
+            set_entry(fields['url'], profile.url if profile else '')
+            set_entry(fields['api_key'], profile.api_key if profile else '')
+            enabled_var.set(profile.enabled if profile else True)
+            changing_form = False
+            form_dirty = False
+            status_label.configure(text='')
+            fields['name'].focus()
+
+        def refresh_list(selected_id: str | None = None) -> None:
+            nonlocal visible_profiles
+            visible_profiles = sorted(
+                self.remote_backend_profiles,
+                key=lambda profile: profile.name.casefold(),
+            )
+            profile_list.delete(0, tk.END)
+            selected_index = None
+            for index, profile in enumerate(visible_profiles):
+                suffix = '' if profile.enabled else t('server_manager_disabled_suffix')
+                profile_list.insert(tk.END, f'{profile.name}{suffix}')
+                if profile.id == selected_id:
+                    selected_index = index
+            if selected_index is not None:
+                profile_list.selection_set(selected_index)
+                profile_list.see(selected_index)
+
+        def candidate_from_form() -> RemoteBackendProfile:
+            existing = profile_by_id(current_id)
+            name = fields['name'].get().strip()
+            profile_id = (
+                existing.id if existing is not None
+                else new_remote_profile_id(
+                    name,
+                    {
+                        manifest.id
+                        for manifest in self.inference_backend.list_plugins()
+                    } | {
+                        profile.id for profile in self.remote_backend_profiles
+                    },
+                )
+            )
+            return RemoteBackendProfile.from_mapping({
+                'schema_version': REMOTE_PROFILE_SCHEMA_VERSION,
+                'id': profile_id,
+                'name': name,
+                'driver': NOSCRIBE_HTTP_DRIVER,
+                'enabled': bool(enabled_var.get()),
+                'url': fields['url'].get().strip(),
+                'api_key': fields['api_key'].get().strip(),
+            }, source=existing.source if existing is not None else None)
+
+        def mark_dirty(_event=None) -> None:
+            nonlocal form_dirty
+            if not changing_form:
+                form_dirty = True
+
+        def update_list_label(profile: RemoteBackendProfile) -> None:
+            for index, value in enumerate(visible_profiles):
+                if value.id != profile.id:
+                    continue
+                visible_profiles[index] = profile
+                suffix = (
+                    '' if profile.enabled
+                    else t('server_manager_disabled_suffix')
+                )
+                profile_list.delete(index)
+                profile_list.insert(index, f'{profile.name}{suffix}')
+                profile_list.selection_set(index)
+                return
+
+        def persist_profile(*, show_error: bool) -> bool:
+            nonlocal current_id, form_dirty
+            if not form_dirty:
+                return True
+            if _backend_configuration_busy(self):
+                message = t('server_manager_busy')
+                status_label.configure(text=message)
+                if show_error:
+                    tk.messagebox.showerror(
+                        title='noScribe', message=message, parent=dlg
+                    )
+                return False
+            try:
+                candidate = candidate_from_form()
+            except (OSError, ValueError) as error:
+                message = str(error)
+                status_label.configure(text=message)
+                if show_error:
+                    tk.messagebox.showerror(
+                        title='noScribe', message=message, parent=dlg
+                    )
+                return False
+            existing = profile_by_id(current_id)
+            if existing == candidate:
+                form_dirty = False
+                return True
+            try:
+                profile = save_remote_profile(
+                    self.remote_backends_dir, candidate
+                )
+            except OSError as error:
+                message = str(error)
+                status_label.configure(text=message)
+                if show_error:
+                    tk.messagebox.showerror(
+                        title='noScribe', message=message, parent=dlg
+                    )
+                return False
+            profiles = [
+                value for value in self.remote_backend_profiles
+                if value.id != profile.id
+            ]
+            profiles.append(profile)
+            self.remote_backend_profiles = tuple(profiles)
+            was_new = current_id is None
+            current_id = profile.id
+            form_dirty = False
+            if was_new:
+                dlg.after_idle(
+                    lambda saved_id=profile.id: (
+                        refresh_list(saved_id)
+                        if current_id == saved_id and dlg.winfo_exists()
+                        else None
+                    )
+                )
+            else:
+                for index, value in enumerate(visible_profiles):
+                    if value.id == profile.id:
+                        visible_profiles[index] = profile
+                        break
+                # Do not rewrite Listbox rows inside a FocusOut event: the
+                # focus may be moving to another profile and mutating the
+                # selection here would swallow that click.
+                dlg.after_idle(
+                    lambda saved=profile: (
+                        update_list_label(saved)
+                        if current_id == saved.id and dlg.winfo_exists()
+                        else None
+                    )
+                )
+            status_label.configure(text=t('server_manager_saved'))
+            self.refresh_remote_models(force=True)
+            return True
+
+        def save_on_focus_out(_event=None) -> None:
+            persist_profile(show_error=False)
+
+        def selected(_event=None) -> None:
+            selection = profile_list.curselection()
+            if not selection:
+                return
+            target_id = visible_profiles[selection[0]].id
+            if target_id == current_id:
+                return
+            if not persist_profile(show_error=True):
+                refresh_list(current_id)
+                return
+            target = profile_by_id(target_id)
+            if target is not None:
+                refresh_list(target.id)
+                show_profile(target)
+
+        def add_profile() -> None:
+            if not persist_profile(show_error=True):
+                refresh_list(current_id)
+                return
+            profile_list.selection_clear(0, tk.END)
+            show_profile(None)
+
+        def remove_profile() -> None:
+            nonlocal current_id
+            profile = profile_by_id(current_id)
+            if profile is None:
+                return
+            if _backend_configuration_busy(self):
+                tk.messagebox.showerror(
+                    title='noScribe', message=t('server_manager_busy'), parent=dlg
+                )
+                return
+            if not tk.messagebox.askyesno(
+                title='noScribe',
+                message=t('server_manager_delete_confirm', name=profile.name),
+                parent=dlg,
+            ):
+                return
+            try:
+                delete_remote_profile(self.remote_backends_dir, profile)
+            except (OSError, ValueError) as error:
+                tk.messagebox.showerror(
+                    title='noScribe', message=str(error), parent=dlg
+                )
+                return
+            self.remote_backend_profiles = tuple(
+                value for value in self.remote_backend_profiles
+                if value.id != profile.id
+            )
+            current_id = None
+            refresh_list()
+            show_profile(None)
+            status_label.configure(text=t('server_manager_deleted'))
+            self.refresh_remote_models(force=True)
+
+        def test_connection() -> None:
+            if _backend_configuration_busy(self):
+                tk.messagebox.showerror(
+                    title='noScribe', message=t('server_manager_busy'), parent=dlg
+                )
+                return
+            try:
+                profile = candidate_from_form()
+            except ValueError as error:
+                tk.messagebox.showerror(
+                    title='noScribe', message=str(error), parent=dlg
+                )
+                return
+            test_button.configure(state=tk.DISABLED)
+            status_label.configure(text=t('server_manager_testing'))
+
+            def run_test() -> None:
+                plugin = None
+                try:
+                    plugin = RemoteHttpPlugin(profile)
+                    count = len(plugin.list_models())
+                    error = None
+                except Exception as caught:
+                    count = 0
+                    error = caught
+                    print(
+                        f"Could not test remote backend {profile.name!r}: {caught}",
+                        file=sys.stderr,
+                    )
+                finally:
+                    if plugin is not None:
+                        plugin.close()
+
+                def finish_test() -> None:
+                    try:
+                        self._worker_threads.remove(worker)
+                    except ValueError:
+                        pass
+                    if not dlg.winfo_exists():
+                        return
+                    test_button.configure(state=tk.NORMAL)
+                    status_label.configure(
+                        text=(
+                            t('server_manager_test_ok', count=count)
+                            if error is None
+                            else t('server_manager_test_failed', error=str(error))
+                        )
+                    )
+
+                self._dispatch_ui(finish_test)
+
+            worker = Thread(target=run_test, daemon=True)
+            self._worker_threads.append(worker)
+            worker.start()
+
+        for entry in fields.values():
+            entry.bind('<KeyRelease>', mark_dirty, add='+')
+            entry.bind('<FocusOut>', save_on_focus_out, add='+')
+
+        def enabled_changed() -> None:
+            mark_dirty()
+            persist_profile(show_error=True)
+
+        enabled_checkbox.configure(command=enabled_changed)
+
+        ctk.CTkButton(left, text='+', width=42, command=add_profile).grid(
+            row=2, column=0, padx=(10, 4), pady=(5, 10), sticky='w'
+        )
+        ctk.CTkButton(
+            left,
+            text=t('server_manager_delete'),
+            width=100,
+            fg_color='#8b2f2f',
+            hover_color='#6f2525',
+            command=remove_profile,
+        ).grid(row=2, column=1, padx=(4, 10), pady=(5, 10), sticky='e')
+
+        actions = ctk.CTkFrame(right, fg_color='transparent')
+        actions.grid(row=5, column=0, columnspan=2, padx=15, pady=15, sticky='e')
+        test_button = ctk.CTkButton(
+            actions,
+            text=t('server_manager_test'),
+            width=120,
+            command=test_connection,
+        )
+        test_button.pack(side='left', padx=(0, 8))
+
+        def close_dialog() -> None:
+            if not persist_profile(show_error=True):
+                return
+            self._server_manager_dialog = None
+            dlg.grab_release()
+            dlg.destroy()
+
+        ctk.CTkButton(
+            actions,
+            text=t('server_manager_close'),
+            width=100,
+            command=close_dialog,
+        ).pack(side='left')
+
+        profile_list.bind('<<ListboxSelect>>', selected)
+        dlg.protocol('WM_DELETE_WINDOW', close_dialog)
+        refresh_list()
+        if visible_profiles:
+            profile_list.selection_set(0)
+            show_profile(visible_profiles[0])
+        else:
+            show_profile(None)
+        dlg.grab_set()
+        dlg.focus()
+
     def on_whisper_model_selected(self, value):
         print(self.option_menu_whisper_model.old_value)
         print(value)
@@ -1628,7 +2126,7 @@ class App(ctk.CTk):
             if job.status == JobStatus.WAITING:
                 status_color = "gray"
                 job_tooltip = t('job_tt_waiting')
-            elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
+            elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
                 status_color = "orange"
                 audio_name = '\u23F5 ' + audio_name
                 job_tooltip = t('job_tt_running')
@@ -1649,7 +2147,10 @@ class App(ctk.CTk):
 
             # Append a real, concise summary of the job's options
             try:
-                job_tooltip += '\n\n' + job.format_summary()
+                model_name = transcription_model_name(
+                    self.transcription_model_names, job.transcription_model
+                )
+                job_tooltip += '\n\n' + format_job_summary(job, model_name)
             except Exception:
                 pass
 
@@ -1665,7 +2166,7 @@ class App(ctk.CTk):
                 row['frame'].set_status_text(status_text, status_color)
                 
                 # Update progress bar visibility based on job status
-                is_processing = job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]
+                is_processing = job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]
                 if is_processing:
                     row['frame'].set_progress(job.progress, show_progress=True)
                 else:
@@ -1704,7 +2205,7 @@ class App(ctk.CTk):
                     try:
                         row['cancel_btn'].configure(command=lambda j=job: self._on_queue_row_action(j))
                         # Color: red if running, gray otherwise
-                        if job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
+                        if job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
                             row['cancel_btn'].configure(fg_color='darkred', hover_color='darkred')
                         else:
                             row['cancel_btn'].configure(fg_color=btn_color, hover_color='darkred')
@@ -1714,7 +2215,7 @@ class App(ctk.CTk):
                         # Update tooltip on the X button to reflect current status
                         if job.status == JobStatus.WAITING:
                             cancel_tt_text = t('queue_tt_remove_waiting')
-                        elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION, JobStatus.CANCELING]:
+                        elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION, JobStatus.CANCELING]:
                             cancel_tt_text = t('queue_tt_remove_entry')
                         else:
                             cancel_tt_text = t('queue_tt_remove_entry')
@@ -1798,7 +2299,7 @@ class App(ctk.CTk):
                 entry_frame.set_status_text(status_text, status_color)
                 
                 # Set progress bar visibility based on job status
-                is_processing = job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]
+                is_processing = job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]
                 if is_processing:
                     entry_frame.set_progress(job.progress, show_progress=True)
                 else:
@@ -1811,7 +2312,7 @@ class App(ctk.CTk):
                     text='X',
                     width=24,
                     height=20,
-                    fg_color=('darkred' if job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION] else btn_color),
+                    fg_color=('darkred' if job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION] else btn_color),
                     hover_color=('darkred'),
                     command=lambda j=job: self._on_queue_row_action(j)
                 )
@@ -1819,7 +2320,7 @@ class App(ctk.CTk):
                 # Tooltip for X button per status
                 if job.status == JobStatus.WAITING:
                     cancel_tt_text = t('queue_tt_remove_waiting')
-                elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
+                elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
                     cancel_tt_text = t('queue_tt_cancel_running')
                 else:
                     cancel_tt_text = t('queue_tt_remove_entry')
@@ -2008,7 +2509,7 @@ class App(ctk.CTk):
                     except ValueError:
                         pass
                     self.update_queue_table()
-            elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
+            elif job.status in [JobStatus.AUDIO_CONVERSION, JobStatus.WAITING_FOR_SERVER, JobStatus.SPEAKER_IDENTIFICATION, JobStatus.TRANSCRIPTION]:
                 # Confirm cancel of running job
                 if tk.messagebox.askyesno(title='noScribe', message=t('transcription_canceled')):
                     self.logn()
@@ -2023,24 +2524,7 @@ class App(ctk.CTk):
                     # Only cancel the current job, not the entire queue
                     self._cancel_job_only = True
                     self.cancel = True
-                    # Try to terminate active whisper subprocess if present
-                    try:
-                        if getattr(self, "_mp_proc", None) is not None and self._mp_proc.is_alive():
-                            try:
-                                self._mp_proc.terminate()
-                            except Exception:
-                                pass
-                            try:
-                                self._mp_proc.join(timeout=0.3)
-                            except Exception:
-                                pass
-                            try:
-                                self._mp_proc.close()
-                            except Exception:
-                                pass
-                    finally:
-                        self._mp_proc = None
-                        self._mp_queue = None
+                    self.inference_backend.cancel()
             else:
                 # Finished, canceling or error -> remove from list after confirmation
                 if tk.messagebox.askyesno(title='noScribe', message=t('queue_remove_entry')):
@@ -2059,7 +2543,7 @@ class App(ctk.CTk):
             if job.status not in [JobStatus.ERROR, JobStatus.CANCELED]:
                 return
             # Confirm override if output file conflicts with other jobs (ignore this job itself)
-            if not self.queue.confirm_output_override(job.transcript_file, ignore_job=job):
+            if not confirm_output_override(self.queue, job.transcript_file, ignore_job=job):
                 return
             # reset job timing and messages
             job.error_message = None
@@ -2185,6 +2669,11 @@ class App(ctk.CTk):
         
         # Handle screen logging if requested and textbox exists
         if where != 'file': 
+            # Whether the screen log now ends mid-line, so a message arriving
+            # while transcript text streams in (written without a trailing
+            # newline) can start on a fresh line (end_open_line).
+            if txt:
+                self._log_line_open = not txt.endswith('\n')
             if txt[:-1] != t('welcome_instructions'):
                 print(txt, end='')            
             if not getattr(self, '_headless', False):
@@ -2200,14 +2689,9 @@ class App(ctk.CTk):
                 if tags == 'error':
                     txt = f'ERROR: {txt}'
                 if tb != '':
-                    txt = f'{txt}\nTraceback:\n{tb}'
+                    txt = f'{txt}\nTraceback:\n{tb}' 
                 self.log_file.write(txt)
                 self.log_file.flush()
-                # Track whether the log currently ends mid-line, so status
-                # messages arriving while transcript text streams in (which is
-                # written without a trailing newline) can start on a fresh line.
-                if txt:
-                    self._log_line_open = not txt.endswith('\n')
             except Exception as e:
                 # If we get here, both screen and file logging failed
                 # As a last resort, print to stderr to not lose the error
@@ -2237,32 +2721,44 @@ class App(ctk.CTk):
                     tags='error', where='file', tb=tb
                 )
 
+    def _replace_log_text(self, txt, tags, link, tb, where):
+        """Replace the current screen-log line as one atomic UI operation."""
+        if not hasattr(self, 'log_textbox') or not self.log_textbox.winfo_exists():
+            return
+        try:
+            self.log_textbox.configure(state=tk.NORMAL)
+            previous = self.log_textbox.get("end-1c linestart", "end-1c")
+            self.log_textbox.delete("end-1c linestart", "end-1c")
+            self.log_len = max(0, self.log_len - len(previous))
+            self.log_textbox.configure(state=tk.DISABLED)
+            self._append_log_text(txt, tags, link, tb, where)
+        except Exception as error:
+            if where == 'both':
+                self.log(
+                    f"Error replacing log_textbox line: {error}\nOriginal error: {txt}",
+                    tags='error', where='file', tb=tb
+                )
+
     def logn(self, txt: str = '', tags: list = [], where: str = 'both', link:str = '', tb: str = '') -> None:
         """ Log with a newline appended """
         self.log(f'{txt}\n', tags, where, link, tb)
 
     def end_open_line(self) -> None:
-        """Finish a line left open -- streamed transcript text, or a progress
-        line from logr -- so the next message does not get glued onto it."""
+        """Finish a line left open by streamed transcript text, so the next
+        message does not get glued onto it."""
         if getattr(self, '_log_line_open', False):
-            self.logn()
+            self.logn(where='screen')
 
     def logr(self, txt: str = '', tags: list = [], where: str = 'both', link:str = '', tb: str = '') -> None:
         """ Replace the last line of the log """
-        if where != 'file' and not getattr(self, '_headless', False):
-            # Queued like the insert that log() queues next, so it removes the
-            # line written before it -- not whatever the window shows now.
-            self._dispatch_ui(self._remove_last_log_line)
-        self.log(txt, tags, where, link, tb)
-
-    def _remove_last_log_line(self):
-        if not hasattr(self, 'log_textbox') or not self.log_textbox.winfo_exists():
-            return
-        self.log_textbox.configure(state=ctk.NORMAL)
-        tmp_txt = self.log_textbox.get("end-1c linestart", "end-1c")
-        self.log_textbox.delete("end-1c linestart", "end-1c")
-        self.log_len -= len(tmp_txt)
-        self.log_textbox.configure(state=ctk.DISABLED)
+        if where != 'file':
+            print(f'\r{txt}', end='')
+            if not getattr(self, '_headless', False):
+                self._dispatch_ui(
+                    lambda: self._replace_log_text(txt, tags, link, tb, where)
+                )
+        if where != 'screen':
+            self.log(txt, tags, 'file', link, tb)
 
     def create_default_transcript_names(self, dir=None):
         self.transcript_files_list = []
@@ -2504,47 +3000,6 @@ class App(ctk.CTk):
                     if hasattr(row['frame'], 'set_progress'):
                         row['frame'].set_progress(progr)
 
-    MODEL_LABEL_SEP = '   ·   '
-
-    def model_label(self, name):
-        """Model name plus the RAM it needs.
-
-        Choosing a model that does not fit does not merely run slowly: the
-        machine starts swapping and the run stops making progress, which is
-        impossible to diagnose from the outside. Showing the requirement at the
-        point of choice is the cheapest way to prevent that.
-        """
-        model = self.whisper_models.get(name)
-        if getattr(model, 'engine', 'whisper') != 'voxtral':
-            return name
-        try:
-            from noScribe import voxtral_engine
-            need = voxtral_engine.min_ram_gb(getattr(model, 'repo', name))
-            total = voxtral_engine._total_ram_gb()
-            mark = '' if need <= total else '  ⚠'
-            return f'{name}{self.MODEL_LABEL_SEP}{need:.0f} GB RAM{mark}'
-        except Exception as e:
-            # Degrade to the bare name rather than break the picker, but leave a
-            # trail: the RAM hint (and its ⚠ overfit marker) is a memory-safety
-            # cue, so its silent absence would otherwise be undiagnosable.
-            logger.warning("Could not compute RAM hint for model %r: %s", name, e)
-            return name
-
-    def model_key(self, label):
-        """Plain model name from a decorated picker entry.
-
-        Prefers the label->name map built when the dropdown was populated, so a
-        model name that happens to contain the separator is still recovered
-        exactly. Falls back to splitting on MODEL_LABEL_SEP for values that never
-        passed through the dropdown (e.g. a plain name restored at startup, which
-        has no separator and so returns unchanged)."""
-        if not label:
-            return label
-        mapped = self._model_label_to_name.get(label)
-        if mapped is not None:
-            return mapped
-        return label.split(self.MODEL_LABEL_SEP)[0].strip()
-
     def _on_speaker_detection_changed(self, value=None):
         """Show the speaker-names field only when speaker detection is active.
         With detection off ('none') there are no speakers to map names to."""
@@ -2561,17 +3016,15 @@ class App(ctk.CTk):
         config['last_speaker'] = self.option_menu_speaker.get()
         # Names belong to the selected recording, not to future sessions.
         config.pop('last_speaker_names', None)
-        # model_key(): the picker shows "name   ·   N GB RAM", but startup looks
-        # the remembered value up in whisper_models by plain name -- storing the
-        # decorated label would silently forget the choice on the next start.
-        config['last_whisper_model'] = self.model_key(self.option_menu_whisper_model.get())
+        selected_model = self.transcription_model_options.get(
+            self.option_menu_whisper_model.get()
+        )
+        if selected_model is not None:
+            config['last_whisper_model'] = str(selected_model.ref)
         config['last_pause'] = self.option_menu_pause.get()
         config['last_overlapping'] = self.check_box_overlapping.get()
         config['last_timestamps'] = self.check_box_timestamps.get()
         config['last_disfluencies'] = self.check_box_disfluencies.get()
-        config['force_pyannote_cpu'] = str(force_pyannote_cpu)
-        config['force_nemotron_cpu'] = str(force_nemotron_cpu)
-        config['force_whisper_cpu'] = str(force_whisper_cpu)
         save_config()
 
     def collect_transcription_options(self) -> TranscriptionQueue:
@@ -2596,9 +3049,10 @@ class App(ctk.CTk):
             stop_time = utils.str_to_ms(val)
         
         # Get whisper model path
-        sel_whisper_model = self.model_key(self.option_menu_whisper_model.get())
-        if sel_whisper_model not in self.whisper_models:
+        sel_whisper_model = self.option_menu_whisper_model.get()
+        if sel_whisper_model not in self.transcription_model_options:
             raise FileNotFoundError(f"The whisper model '{sel_whisper_model}' does not exist.")
+        transcription_model = self.transcription_model_options[sel_whisper_model].ref
         # Persist the options the moment they are actually used. Saving only in
         # on_closing loses the last change
         # whenever the shutdown path bails early or is bypassed (Cmd+Q).
@@ -2615,7 +3069,11 @@ class App(ctk.CTk):
                 start_time=start_time,
                 stop_time=stop_time,
                 language_name=self.option_menu_language.get(),
-                whisper_model_name=self.whisper_models[sel_whisper_model],  # Pass the full model object
+                transcription_model=transcription_model,
+                diarization_model=select_diarization_model(
+                    self.inference_backend, transcription_model,
+                    _num_speakers(self.option_menu_speaker.get()),
+                ),
                 speaker_detection=self.option_menu_speaker.get(),
                 speaker_names=self.entry_speaker_names.get(),
                 overlapping=self.check_box_overlapping.get(),
@@ -2625,7 +3083,7 @@ class App(ctk.CTk):
                 cli_mode=False
             )
             # Handle VTT format warnings in GUI mode
-            if job.file_ext == 'vtt' and (job.pause > 0 or job.overlapping or job.timestamps):
+            if job.output_format == 'vtt' and (job.pause > 0 or job.overlapping or job.timestamps):
                 self.logn()
                 self.logn(t('err_vtt_invalid_options'), 'error')
             
@@ -2739,7 +3197,7 @@ class App(ctk.CTk):
                     
                 except Exception as e:
                     # Distinguish cancellation from real errors
-                    error_msg = job.error_message or str(e)
+                    error_msg = _gui_error_message(e, job.error_message)
                     if str(e) == t('err_user_cancelation') or self.cancel:
                         # A user cancel is not an error: log the plain message,
                         # not a traceback that makes it look like a crash.
@@ -2778,7 +3236,7 @@ class App(ctk.CTk):
             if not getattr(self, '_headless', False) \
                     and queue_jobs_processed == 1 \
                     and job \
-                    and job.file_ext == 'html' \
+                    and job.output_format == 'html' \
                     and job.status == JobStatus.FINISHED \
                     and not stopped_by_user \
                     and get_config_flag('auto_edit_transcript', True):
@@ -2809,46 +3267,43 @@ class App(ctk.CTk):
         self.update_queue_table()
         
         tmpdir = TemporaryDirectory('noScribe')
+        remote_audio = model_uses_remote_backend(
+            self.inference_backend, job.transcription_model
+        ) or (
+            job.diarization_enabled
+            and model_uses_remote_backend(
+                self.inference_backend, job.diarization_model
+            )
+        )
         tmp_audio_file = os.path.join(tmpdir.name, 'tmp_audio.wav')
+        tmp_remote_audio_file = (
+            os.path.join(tmpdir.name, 'tmp_audio.flac') if remote_audio else None
+        )
         orig_transcript_file = job.transcript_file
+        speaker_setting = _job_speaker_setting(job)
+        timestamp_interval = int(get_config('timestamp_interval', 60_000))
+        timestamp_color = str(get_config('timestamp_color', '#78909C'))
+        pause_marker = str(get_config('pause_seconds_marker', '.'))
+        auto_save = job.auto_save
 
         try:
-            # Decided here, so the header can name the engine behind the speakers
-            diarization_engine = self._diarization_engine(job) if job.speaker_detection != 'none' else None
-
-            # Create option info string for logging
-            option_info = ''
-            if job.start > 0:
-                option_info += f'{t("label_start")} {utils.ms_to_str(job.start)} | '.replace(':', '꞉') # replace the normal colon here in the header with a special character so that MAXQDA does not misinterpret it as a time marker in the transcript.
-            if job.stop > 0:
-                option_info += f'{t("label_stop")} {utils.ms_to_str(job.stop)} | '.replace(':', '꞉')
-            option_info += f'{t("label_language")} {job.language_name} ({languages[job.language_name]}) | '
-            option_info += f'{t("label_whisper_model")} {getattr(job.whisper_model, "name", None) or str(job.whisper_model)} | '
-            engine = f' ({DIARIZATION_ENGINES[diarization_engine]})' if diarization_engine else ''
-            option_info += f'{t("label_speaker")} {job.speaker_detection}{engine} | '
-            if job.speaker_names:
-                option_info += f'{t("label_speaker_names")} {", ".join(job.speaker_names)} | '
-            # Render the on/off options as localized yes/no and the pause
-            # threshold as its label, so this header -- which ends up in the
-            # transcript itself -- never mixes True/False with a raw 0. The job
-            # tooltip shows the same values, but as ✓/✗ where space is tight.
-            yes, no = t('opt_yes'), t('opt_no')
-            option_info += f'{t("label_overlapping")} {yes if job.overlapping else no} | '
-            option_info += f'{t("label_timestamps")} {yes if job.timestamps else no} | '
-            option_info += f'{t("label_disfluencies")} {yes if job.disfluencies else no} | '
-            option_info += f'{t("label_pause")} {pause_label(job.pause)}'
+            model_name = transcription_model_name(
+                self.transcription_model_names, job.transcription_model
+            )
+            # The engines behind the speakers and the text, for the header and
+            # the log ("loading_nemotron", "loading_voxtral").
+            diarization_engine = self._model_engine(job.diarization_model, 'pyannote')
+            transcription_engine = self._model_engine(job.transcription_model, 'whisper')
+            option_info = format_transcript_options(
+                job, model_name, self._model_display_name(job.diarization_model))
 
             # Create log file
             if not os.path.exists(f'{config_dir}/log'):
                 os.makedirs(f'{config_dir}/log')
             self.log_file = open(f'{config_dir}/log/{Path(job.transcript_file).stem}.log', 'w', encoding="utf-8")
 
-            # Log job configuration
-            self.logn(f'whisper beam size: {job.whisper_beam_size}', where='file')
-            self.logn(f'whisper temperature: {job.whisper_temperature}', where='file')
-            self.logn(f'whisper compute type: {job.whisper_compute_type}', where='file')
-            self.logn(f'timestamp_interval: {job.timestamp_interval}', where='file')
-            self.logn(f'timestamp_color: {job.timestamp_color}', where='file')
+            # Log backend-independent job configuration.
+            self.logn(f'transcription model: {job.transcription_model}', where='file')
 
             # Log CPU capabilities
             self.logn("=== CPU FEATURES ===", where="file")
@@ -2858,17 +3313,6 @@ class App(ctk.CTk):
                     self.logn('    {:24}: {}'.format(key, value), where="file")
             elif platform.system() == "Darwin": # = MAC
                 self.logn(f"System: MAC {platform.machine()}", where="file")
-                """
-                if platform.mac_ver()[0] >= '12.3': # MPS needs macOS 12.3+
-                    if job.pyannote_xpu == 'mps':
-                        self.logn("macOS version >= 12.3:\nUsing MPS (with PYTORCH_ENABLE_MPS_FALLBACK enabled)", where="file")
-                    elif job.pyannote_xpu == 'cpu':
-                        self.logn("macOS version >= 12.3:\nUser selected to use CPU (results will be better, but you might wanna make yourself a coffee)", where="file")
-                    else:
-                        self.logn("macOS version >= 12.3:\nInvalid option for 'pyannote_xpu' in config.yml (should be 'mps' or 'cpu')\nYou might wanna change this\nUsing MPS anyway (with PYTORCH_ENABLE_MPS_FALLBACK enabled)", where="file")
-                else:
-                    self.logn("macOS version < 12.3:\nMPS not available: Using CPU\nPerformance might be poor\nConsider updating macOS, if possible", where="file")
-                """
             try:
 
                 #-------------------------------------------------------
@@ -2923,7 +3367,6 @@ class App(ctk.CTk):
                         self._ffmpeg_proc.close()
                         self._ffmpeg_proc = None
 
-                self.logn(t('audio_conversion_finished'))
                 if decode_error_count > 0:
                     self.logn(
                         t(
@@ -2931,15 +3374,50 @@ class App(ctk.CTk):
                             count=decode_error_count,
                         )
                     )
-                self.set_progress(1, 100, job.speaker_detection)
+
+                if tmp_remote_audio_file:
+                    try:
+                        self._ffmpeg_proc = audio.convert.ToFlac(
+                            Path(tmp_audio_file),
+                            Path(tmp_remote_audio_file),
+                            force=True,
+                        )
+                        self._ffmpeg_proc.open()
+                        while self._ffmpeg_proc.convert():
+                            if self.cancel:
+                                raise Exception(t('err_user_cancelation'))
+                    except Exception as e:
+                        traceback_str = traceback.format_exc()
+                        if str(e) == t('err_user_cancelation') or self.cancel:
+                            job.set_canceled(t('err_user_cancelation'))
+                            self.update_queue_table()
+                            raise
+                        job.set_error(
+                            f"{t('err_converting_audio')}: {e}", traceback_str
+                        )
+                        self.update_queue_table()
+                        raise Exception(t('err_ffmpeg'), job.error_message) from e
+                    finally:
+                        if self._ffmpeg_proc is not None:
+                            self._ffmpeg_proc.close()
+                            self._ffmpeg_proc = None
+                self.logn(t('audio_conversion_finished'))
+                self.set_progress(1, 100, speaker_setting)
+                remote_workflow_result = None
+                diarization = []
+                diarization_result = None
+                remote_workflow_pending = (
+                    job.diarization_enabled
+                    and self.inference_backend.supports_workflow(
+                        job.diarization_model,
+                        job.transcription_model,
+                    )
+                )
 
                 #-------------------------------------------------------
                 # 2) Speaker identification (diarization) with pyannote
 
                 # Helper Functions:
-
-                def short_label(label):
-                    return f'S{label[8:]}'  # "SPEAKER_01" > "S01"
 
                 def overlap_len(ss_start, ss_end, ts_start, ts_end):
                     # ss...: speaker segment start and end in milliseconds (from pyannote)
@@ -2962,7 +3440,14 @@ class App(ctk.CTk):
                     ol_len = overlap_end - overlap_start + 1
                     return ol_len / ts_len
 
-                def find_speaker(diarization, transcript_start, transcript_end) -> str:
+                def short_label(label):
+                    return f'S{label[8:]}'  # "SPEAKER_01" > "S01"
+
+                def find_speaker(
+                    diarization: list[DiarizationSegment],
+                    transcript_start,
+                    transcript_end,
+                ) -> str:
                     # Looks for the shortest segment in diarization that has at least 80% overlap 
                     # with transcript_start - trancript_end.  
                     # Returns the speaker name if found.
@@ -2975,12 +3460,12 @@ class App(ctk.CTk):
                     is_overlapping = False
 
                     for segment in diarization:
-                        t = overlap_len(segment["start"], segment["end"], transcript_start, transcript_end)
+                        t = overlap_len(segment.start_ms, segment.end_ms, transcript_start, transcript_end)
                         if t is None: # we are already after transcript_end
                             break
 
-                        current_segment_len = segment["end"] - segment["start"] # Length of the current segment
-                        current_segment_spkr = short_label(segment["label"])
+                        current_segment_len = segment.end_ms - segment.start_ms # Length of the current segment
+                        current_segment_spkr = short_label(segment.label)
 
                         if overlap_found >= overlap_threshold: # we already found a fitting segment, compare length now
                             if (t >= overlap_threshold) and (current_segment_len < segment_len): # found a shorter (= better fitting) segment that also overlaps well
@@ -3000,37 +3485,51 @@ class App(ctk.CTk):
 
                 # Start Diarization:
 
-                diarization = None
-                if job.speaker_detection != 'none':
+                if job.diarization_enabled:
                     try:
                         job.status = JobStatus.SPEAKER_IDENTIFICATION
                         self.update_queue_table()
 
                         self.logn()
                         self.logn(t('start_identifying_speakers'), 'highlight')
-                        self.logn(t(f'loading_{diarization_engine}'))
-                        # self.set_progress(1, 100, job.speaker_detection)
+                        self.logn(t(f'loading_{diarization_engine}'
+                                    if diarization_engine in ('pyannote', 'nemotron')
+                                    else 'loading_pyannote'))
+                        # self.set_progress(1, 100, speaker_setting)
 
-                        while True:
+                        while not remote_workflow_pending:
                             try:
-                                diarization = self._run_diarize_subprocess(tmp_audio_file, job, diarization_engine)
+                                diarization_audio = (
+                                    tmp_remote_audio_file
+                                    if model_uses_remote_backend(
+                                        self.inference_backend,
+                                        job.diarization_model,
+                                    )
+                                    else tmp_audio_file
+                                )
+                                diarization_result = self._run_diarize_subprocess(
+                                    diarization_audio, job
+                                )
+                                diarization = list(diarization_result)
                                 break
                             except Exception as err:
-                                if self._handle_cuda_fallback(diarization_engine, err):
-                                    self.logn(t(f'{diarization_engine}_cuda_retry'), 'highlight')
+                                if self._handle_cuda_fallback(
+                                    'pyannote', err, job
+                                ):  # 'pyannote' stands for the local diarization
                                     continue
                                 raise
 
                         # Nemotron has eight speaker channels and folds any further voice into them
-                        if diarization_engine == 'nemotron' and len({s['label'] for s in diarization}) >= 8:
+                        if diarization_engine == 'nemotron' and len({s.label for s in diarization}) >= 8:
                             self.logn(t('nemotron_all_speakers'), 'highlight')
 
-                        # write segments to log file
-                        for segment in diarization:
-                            line = f'{utils.ms_to_str(transcript_start + segment["start"], include_ms=True)} - {utils.ms_to_str(transcript_start + segment["end"], include_ms=True)} {segment["label"]}'
-                            self.logn(line, where='file')
+                        if not remote_workflow_pending:
+                            # write segments to log file
+                            for segment in diarization:
+                                line = f'{utils.ms_to_str(transcript_start + segment.start_ms, include_ms=True)} - {utils.ms_to_str(transcript_start + segment.end_ms, include_ms=True)} {segment.label}'
+                                self.logn(line, where='file')
 
-                        self.logn(where='file')  # the pump ended the progress line
+                            self.logn()
 
                     except Exception as e:
                         traceback_str = traceback.format_exc()
@@ -3046,21 +3545,15 @@ class App(ctk.CTk):
                 #-------------------------------------------------------
                 # 3) Transcribe with faster-whisper or Voxtral
 
-                job.status = JobStatus.TRANSCRIPTION
-                self.update_queue_table()
+                if not remote_workflow_pending:
+                    job.status = JobStatus.TRANSCRIPTION
+                    self.update_queue_table()
 
-                self.logn()
-                self.logn(t('start_transcription'), 'highlight')
-                # Bound once: which engine runs decides the log line, the
-                # subprocess, whether the per-segment progress source is used,
-                # and whether a CUDA failure may retry on CPU.
-                engine = getattr(job.whisper_model, "engine", "whisper")
-                is_voxtral = engine == "voxtral"
-                if is_voxtral:
-                    self.logn(t('loading_voxtral'))
-                else:
-                    self.logn(t('loading_whisper'))
+                    self.logn()
+                    self.logn(t('start_transcription'), 'highlight')
+                    self.logn(t('loading_voxtral' if transcription_engine == 'voxtral' else 'loading_whisper'))
 
+                info = None
                 transcription_success = False
                 while True:
                     retry_cuda = False
@@ -3112,7 +3605,6 @@ class App(ctk.CTk):
                     p.appendChild(s)
                     main_body.appendChild(p)
 
-                    header_nodes = len(main_body.children)  # the transcript follows these
                     p = d.createElement('p')
                     main_body.appendChild(p)
 
@@ -3127,14 +3619,14 @@ class App(ctk.CTk):
                     def save_doc():
                         nonlocal last_auto_save
                         txt = ''
-                        if job.file_ext == 'html':
+                        if job.output_format == 'html':
                             txt = d.asHTML()
-                        elif job.file_ext == 'txt':
+                        elif job.output_format == 'txt':
                             txt = utils.html_to_text(d.asHTML(), use_only_body=True)
-                        elif job.file_ext == 'vtt':
-                            txt = utils.html_to_webvtt(d.asHTML())
+                        elif job.output_format == 'vtt':
+                            txt = utils.html_to_webvtt(d.asHTML(), media_path=job.audio_file)
                         else:
-                            raise TypeError(f'Invalid file type "{job.file_ext}".')
+                            raise TypeError(f'Invalid file type "{job.output_format}".')
                         try:
                             if txt != '':
                                 with open(job.transcript_file, 'w', encoding="utf-8") as f:
@@ -3161,21 +3653,17 @@ class App(ctk.CTk):
 
                     # VAD data for pause adjustment (audio is 16 kHz mono PCM
                     # after conversion by PyAV, so the header gives its length).
-                    try:
-                        job.vad_threshold = float(config['voice_activity_detection_threshold'])
-                    except Exception:
-                        config['voice_activity_detection_threshold'] = '0.5'
-                        job.vad_threshold = 0.5
+                    vad_threshold = self.worker_settings.vad_threshold
                     sampling_rate = 16000
                     with wave.open(tmp_audio_file) as wav:
                         duration = wav.getnframes() / wav.getframerate()
                     try:
                         vad_parameters = VadOptions(min_silence_duration_ms=500,
-                                                    threshold=job.vad_threshold,
+                                                    threshold=vad_threshold,
                                                     speech_pad_ms=0)
                     except TypeError:
                         vad_parameters = VadOptions(min_silence_duration_ms=500,
-                                                    onset=job.vad_threshold,
+                                                    onset=vad_threshold,
                                                     speech_pad_ms=0)
 
                     # Silero runs beside the engine worker: nothing needs its
@@ -3223,12 +3711,26 @@ class App(ctk.CTk):
                     last_segment_end = 0
                     last_timestamp_ms = 0
                     first_segment = True
+                    initial_document = d.asHTML()
+
+                    def reset_transcript():
+                        nonlocal main_body, p, speaker, speaker_disp, prev_speaker
+                        nonlocal last_segment_end, last_timestamp_ms, first_segment
+                        d.parseStr(initial_document)
+                        main_body = d.getElementsByClassName('WordSection1')[0]
+                        p = main_body.lastElementChild
+                        speaker = speaker_disp = prev_speaker = ''
+                        last_segment_end = last_timestamp_ms = 0
+                        first_segment = True
+                        job.speaker_name_map = {}
+                        job.has_partial_transcript = False
+
                     # For noScribe.voice_check: every segment as streamed, with the
                     # speaker it was written under and whether it only inherited
                     # that speaker because the diarization was silent there.
                     voice_segments = []
 
-                    def on_segment(seg, speaker_override=None):
+                    def on_segment(segment: TranscriptionSegment, speaker_override=None):
                         """Write one segment. With speaker_override the transcript is
                         being written a second time (check_voices): the speaker is
                         given, and log, autosave and progress stay quiet."""
@@ -3236,22 +3738,12 @@ class App(ctk.CTk):
                         quiet = speaker_override is not None
                         say = (lambda *args, **kwargs: None) if quiet else self.log
                         sayn = (lambda *args, **kwargs: None) if quiet else self.logn
-
-                        # Map dict to simple object-like for existing code
-                        class _Seg:
-                            __slots__ = ("start", "end", "text", "words")
-                            def __init__(self, d):
-                                self.start = d.get('start')
-                                self.end = d.get('end')
-                                self.text = d.get('text')
-                                self.words = d.get('words')
-                        segment = _Seg(seg)
-
                         # Empty segments must not create speaker labels, pauses,
                         # or autosaves that look like a meaningful transcript.
                         if not segment.text or not segment.text.strip():
                             return
 
+                        as_streamed = _segment_dict(segment)  # before the pause adjustment
                         segment = adjust_for_pause(segment)
 
                         # get time of the segment in milliseconds
@@ -3273,7 +3765,7 @@ class App(ctk.CTk):
                             elif pause_len >= 10: # longer than 10 seconds
                                 pause_str = ' ' + t('pause_seconds', seconds=pause_len)
                             else: # less than 10 seconds
-                                pause_str = ' (' + (job.pause_marker * pause_len) + ')'
+                                pause_str = ' (' + (pause_marker * pause_len) + ')'
 
                             if first_segment:
                                 pause_str = pause_str.lstrip() + ' '
@@ -3295,7 +3787,7 @@ class App(ctk.CTk):
                         seg_text = segment.text
                         seg_html = html.escape(seg_text, quote=False)
 
-                        if job.speaker_detection != 'none':
+                        if job.diarization_enabled:
                             # Speaker *identity* (change detection, overlap marker)
                             # is decided on the raw diarization label; the mapped
                             # user name is only for display. Keeping them apart
@@ -3333,11 +3825,11 @@ class App(ctk.CTk):
                                     speaker_disp = new_speaker_disp
                                     # add timestamp
                                     if job.timestamps:
-                                        seg_html = f'{speaker_disp}: <span style="color: {job.timestamp_color}" >{ts}</span>{html.escape(seg_text, quote=False)}'
+                                        seg_html = f'{speaker_disp}: <span style="color: {timestamp_color}" >{ts}</span>{html.escape(seg_text, quote=False)}'
                                         seg_text = f'{speaker_disp}: {ts}{seg_text}'
                                         last_timestamp_ms = start
                                     else:
-                                        if job.file_ext != 'vtt': # in vtt files, speaker names are added as special voice tags so skip this here
+                                        if job.output_format != 'vtt': # in vtt files, speaker names are added as special voice tags so skip this here
                                             seg_text = f'{speaker_disp}:{seg_text}'
                                             seg_html = html.escape(seg_text, quote=False)
                                         else:
@@ -3346,16 +3838,16 @@ class App(ctk.CTk):
                                         
                             else: # same speaker
                                 if job.timestamps:
-                                    if (start - last_timestamp_ms) > job.timestamp_interval:
-                                        seg_html = f' <span style=\"color: {job.timestamp_color}\" >{ts}</span>{html.escape(seg_text, quote=False)}'
+                                    if (start - last_timestamp_ms) > timestamp_interval:
+                                        seg_html = f' <span style=\"color: {timestamp_color}\" >{ts}</span>{html.escape(seg_text, quote=False)}'
                                         seg_text = f' {ts}{seg_text}'
                                         last_timestamp_ms = start
                                     else:
                                         seg_html = html.escape(seg_text, quote=False)
 
                         else: # no speaker detection
-                            if job.timestamps and (first_segment or (start - last_timestamp_ms) > job.timestamp_interval):
-                                seg_html = f' <span style=\"color: {job.timestamp_color}\" >{ts}</span>{html.escape(seg_text, quote=False)}'
+                            if job.timestamps and (first_segment or (start - last_timestamp_ms) > timestamp_interval):
+                                seg_html = f' <span style=\"color: {timestamp_color}\" >{ts}</span>{html.escape(seg_text, quote=False)}'
                                 seg_text = f' {ts}{seg_text}'
                                 last_timestamp_ms = start
                             else:
@@ -3384,12 +3876,12 @@ class App(ctk.CTk):
                         first_segment = False
                         if quiet:
                             return
-                        inherited = job.speaker_detection != 'none' and new_speaker == ''
-                        voice_segments.append((seg, speaker, inherited))
+                        inherited = job.diarization_enabled and new_speaker == ''
+                        voice_segments.append((as_streamed, speaker, inherited))
 
                         # auto save periodically
                         nonlocal last_auto_save
-                        if job.auto_save:
+                        if auto_save:
                             if (datetime.datetime.now() - last_auto_save).total_seconds() > 5:
                                 save_doc()
                                 job.has_partial_transcript = True
@@ -3399,16 +3891,15 @@ class App(ctk.CTk):
                         # this is its only source. Voxtral does send them, and its
                         # own estimate runs ahead of the segments it has already
                         # emitted -- feeding both to the same bar made it jump
-                        # back roughly 28 points per chunk. The engine's stream is
-                        # authoritative there and is kept monotonic at the source
-                        # (voxtral_engine._emit_progress).
-                        if not is_voxtral:
+                        # back roughly 28 points per chunk. An engine's own stream
+                        # is authoritative wherever there is one.
+                        if not self._engine_progress:
                             try:
                                 progr = round((segment.end/duration) * 100)
-                                self.set_progress(3, progr, job.speaker_detection)
+                                self.set_progress(3, progr, speaker_setting)
                             except Exception:
                                 pass
-                    
+
                     def check_voices():
                         """Second look at every passage's speaker (noScribe.voice_check).
 
@@ -3416,24 +3907,11 @@ class App(ctk.CTk):
                         cost a finished job: on any failure the transcript stays
                         as the diarization alone had it.
                         """
-                        nonlocal first_segment, last_segment_end, last_timestamp_ms, p, speaker, speaker_disp, prev_speaker
-                        turns = [dict(turn, label=short_label(turn['label'])) for turn in diarization]
-                        # A diarization that reports its own speaker probabilities
-                        # is its own second opinion; otherwise the voice is asked.
-                        probabilities = job.speaker_probabilities
-                        if probabilities:
-                            import numpy as np
-                            named = {turn['label'] for turn in turns}
-                            evidence = voice_check.Probabilities(
-                                np.load(probabilities['path'], mmap_mode='r'),
-                                {short_label(label): column for column, label in enumerate(probabilities['columns'])
-                                 if short_label(label) in named},
-                                probabilities['frame_s'])
-                        else:
-                            evidence = voice_check.Voice(
-                                {short_label(k): v for k, v in (job.speaker_centroids or {}).items()},
-                                lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans))
-                        if len(evidence.labels) < 2 or not voice_segments:
+                        nonlocal first_segment, main_body
+                        turns = [{'start': turn.start_ms, 'end': turn.end_ms, 'label': short_label(turn.label)}
+                                 for turn in diarization]
+                        evidence = self._voice_evidence(diarization_result, job, tmp_audio_file, turns, short_label)
+                        if evidence is None or len(evidence.labels) < 2 or not voice_segments:
                             return
                         if self.cancel:  # Stop came just before: start nothing
                             raise Exception(t('err_user_cancelation'))
@@ -3444,14 +3922,7 @@ class App(ctk.CTk):
                         passages, moves = voice_check.relabel(voice_segments, turns, evidence)
                         if moves:
                             # Write the transcript again from the top, header kept.
-                            written = list(main_body.children)[header_nodes:]
-                            for node in written:  # front to back: removal is a list.remove
-                                main_body.removeChild(node)
-                            p = d.createElement('p')
-                            main_body.appendChild(p)
-                            speaker = speaker_disp = prev_speaker = ''
-                            last_segment_end = last_timestamp_ms = 0
-                            first_segment = True
+                            written = d.asHTML()
                             # Names go to the voices in the order they are first
                             # heard, as everywhere (the user enters them in that
                             # order), and the check may have changed who that is.
@@ -3465,6 +3936,7 @@ class App(ctk.CTk):
                             # newcomers are numbered after them.
                             names_given = job.speaker_name_map
                             names = job.speaker_names or []
+                            reset_transcript()
                             try:
                                 heard = list(dict.fromkeys(s.lstrip('/') for _, s in passages if s.lstrip('/')))
                                 named = {label for label, name in names_given.items() if name in names}
@@ -3477,17 +3949,15 @@ class App(ctk.CTk):
                                 for passage, written_under in passages:
                                     if self.cancel:
                                         raise Exception(t('err_user_cancelation'))
-                                    on_segment(passage, written_under)
+                                    on_segment(TranscriptionSegment.from_mapping(passage), written_under)
                             except Exception:
                                 job.speaker_name_map = names_given
-                                first_segment = False  # there is a transcript: save it
                                 # Half a rewrite is worse than none: put back what was
                                 # there. Of the writer's state only first_segment is
                                 # still read (it decides whether the file is saved).
-                                for node in list(main_body.children)[header_nodes:]:
-                                    main_body.removeChild(node)
-                                for node in written:
-                                    main_body.appendChild(node)
+                                d.parseStr(written)
+                                main_body = d.getElementsByClassName('WordSection1')[0]
+                                first_segment = False  # there is a transcript: save it
                                 raise
                             if len(names_given) <= len(names) < len(job.speaker_name_map):
                                 # More voices than names, and news: the rewrite
@@ -3524,19 +3994,37 @@ class App(ctk.CTk):
                             else:
                                 self.logn(traceback.format_exc(), where='file')
                                 self.logn(t('voice_check_skipped'))
-
+                    
                     try:
-                        if is_voxtral:
-                            self._run_voxtral_subprocess_stream(
-                                tmp_audio_file, job, on_segment, diarization=diarization)
+                        transcription_audio = (
+                            tmp_remote_audio_file
+                            if model_uses_remote_backend(
+                                self.inference_backend,
+                                job.transcription_model,
+                            )
+                            else tmp_audio_file
+                        )
+                        if remote_workflow_pending:
+                            remote_workflow_result = self._run_remote_workflow(
+                                transcription_audio,
+                                job,
+                                on_segment=on_segment,
+                                diarization=diarization,
+                                transcript_start=transcript_start,
+                                on_reset=reset_transcript,
+                            )
+                            info = remote_workflow_result.transcription_info
+                            if info is None:
+                                raise InferenceWorkerError(
+                                    'Remote workflow returned no transcription metadata.'
+                                )
                         else:
-                            # pyannote's turns only: as Whisper's speech map, Nemotron's
-                            # many short turns cost words on the German hand references
-                            # (9.28 % -> 9.78 % WER against Silero; pyannote's 8.75 %).
-                            # Positional, as the stand-ins in the tests take it.
-                            self._run_whisper_subprocess_stream(
-                                tmp_audio_file, job, on_segment,
-                                diarization if diarization_engine == 'pyannote' else None)
+                            info = self._run_whisper_subprocess_stream(
+                                transcription_audio, job, on_segment,
+                                diarization=diarization_result,
+                                **({'on_reset': reset_transcript} if model_uses_remote_backend(
+                                    self.inference_backend, job.transcription_model) else {}),
+                            )
                         if first_segment:
                             raise ValueError(t('err_empty_transcript'))
                         run_voice_check()
@@ -3549,12 +4037,9 @@ class App(ctk.CTk):
                         self.logn()
                         self.logn(t('transcription_finished'), 'highlight')
                     except Exception as err:
-                        # The CUDA-on-CPU fallback only applies to the Whisper
-                        # (faster-whisper / CTranslate2) backend; Voxtral runs on
-                        # MLX and has no CUDA path, so a Voxtral error must
-                        # propagate rather than trigger a misleading "retry
-                        # Whisper on CPU" prompt and a pointless identical retry.
-                        if engine == "whisper" and self._handle_cuda_fallback('whisper', err):
+                        if self._handle_cuda_fallback(
+                            'whisper', err, job
+                        ):
                             retry_cuda = True
                         else:
                             raise
@@ -3583,7 +4068,6 @@ class App(ctk.CTk):
                                     link=f'file://{job.transcript_file}'
                                 )
                     if retry_cuda:
-                        self.logn(t('whisper_cuda_retry'), 'highlight')
                         continue
                     else:
                         break
@@ -3625,7 +4109,7 @@ class App(ctk.CTk):
             # Confirm override if output file conflicts with jobs in queue
             for job in new_queue.jobs:
                 if self.queue.has_output_conflict(job.transcript_file):
-                    if not self.queue.confirm_output_override(job.transcript_file):
+                    if not confirm_output_override(self.queue, job.transcript_file):
                         return
                     else:
                         break
@@ -3659,411 +4143,351 @@ class App(ctk.CTk):
             self.logn(f'Error starting transcription: {str(e)}', 'error')
             tk.messagebox.showerror(title='noScribe', message=f'Error starting transcription: {str(e)}')
 
-    def _handle_cuda_fallback(self, component: str, error: Exception) -> bool:
-        global force_pyannote_cpu
-        global force_nemotron_cpu
-        global force_whisper_cpu
-        message = str(error).strip()
-        if not _is_cuda_error_message(message):
-            return False
-
-        if component == 'pyannote':
-            if force_pyannote_cpu:
-                return False
-            prompt = t('pyannote_cuda_error_prompt', error=message)
-            if tk.messagebox.askyesno(title='noScribe', message=prompt):
-                force_pyannote_cpu = True
-                config['force_pyannote_cpu'] = 'true'
-                save_config()
-                return True
-            return False
-
-        if component == 'nemotron':
-            if force_nemotron_cpu:
-                return False
-            prompt = t('nemotron_cuda_error_prompt', error=message)
-            if tk.messagebox.askyesno(title='noScribe', message=prompt):
-                force_nemotron_cpu = True
-                config['force_nemotron_cpu'] = 'true'
-                save_config()
-                return True
-            return False
-
-        if component == 'whisper':
-            if force_whisper_cpu:
-                return False
-            prompt = t('whisper_cuda_error_prompt', error=message)
-            if tk.messagebox.askyesno(title='noScribe', message=prompt):
-                force_whisper_cpu = True
-                config['force_whisper_cpu'] = 'true'
-                save_config()
-                return True
-            return False
-
-        return False
-
-    def _run_engine_subprocess_stream(self, entrypoint, args, job, on_segment):
-        """Spawn a transcription worker subprocess and pump its message queue.
-
-        Shared by the Whisper and Voxtral engines: streams log/progress/segment
-        messages back to the GUI, honors cancel, and tears the child down
-        reliably.
-        """
-        ctx = mp.get_context("spawn")
-        q = ctx.Queue()
-        proc = ctx.Process(target=entrypoint, args=(args, q))
-        proc.start()
-        # Expose to allow cancel to terminate the child
-        self._mp_proc = proc
-        self._mp_queue = q
-
+    def _model_engine(self, model: ModelRef, default: str) -> str:
+        """The engine a model runs on ('whisper', 'voxtral', 'pyannote', 'nemotron')."""
         try:
-            while True:
-                try:
-                    msg = q.get(timeout=0.1)
-                except pyqueue.Empty:
-                    if self.cancel:
-                        # User requested cancel; terminate child
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                        raise Exception(t('err_user_cancelation'))
-                    if not proc.is_alive():
-                        # Process died without sending result
-                        exitcode = proc.exitcode
-                        self.end_open_line()
-                        self.logn(f"Transcription worker exited unexpectedly (code {exitcode}).", 'error')
-                        raise Exception('Subprocess terminated unexpectedly')
-                    continue
+            return self.inference_backend.get_model(model).engine or default
+        except Exception:
+            return default
 
-                mtype = msg.get("type") if isinstance(msg, dict) else None
-                if mtype == "log":
-                    level = msg.get("level", "info")
-                    txt = msg.get("msg", "")
-                    # Transcript text streams in without trailing newlines.
-                    self.end_open_line()
-                    if level == 'error':
-                        self.logn(txt, 'error')
-                    else:
-                        self.logn(txt)
-                elif mtype == "progress":
-                    pct = msg.get("pct")
-                    try:
-                        if pct is not None:
-                            self.set_progress(3, float(pct), job.speaker_detection)
-                    except Exception:
-                        pass
-                elif mtype == "segment":
-                    seg = msg.get("segment") or {}
-                    try:
-                        on_segment(seg)
-                    except Exception:
-                        # If on_segment fails, stop child and raise
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                        raise
-                elif mtype == "result":
-                    if not msg.get("ok"):
-                        err = msg.get('error', 'Transcription failed')
-                        trc = msg.get('trace')
-                        self.end_open_line()
-                        self.logn(f"Transcription failed: {err}", 'error')
-                        if trc:
-                            self.logn(trc, where='file')
-                        raise Exception(err)
-                    break
-                # keep looping until we get a result
-        finally:
-            try:
-                proc.join(timeout=0.2)
-            except Exception:
-                pass
-            if proc.is_alive():
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            try:
-                proc.close()
-            except Exception:
-                pass
-            try:
-                q.close()
-                q.join_thread()
-            except Exception:
-                pass
-            # Clear exposed handles
-            self._mp_proc = None
-            self._mp_queue = None
-
-    @staticmethod
-    def _job_language_code(job):
-        """The ISO code for a job's language, or None for Auto/Multilingual or an
-        unmapped name. Shared by both engine paths so they never diverge on the
-        sentinel set or the lookup fallback."""
-        if job.language_name in ('Auto', 'Multilingual'):
-            return None
+    def _model_display_name(self, model: ModelRef) -> str | None:
         try:
-            return languages[job.language_name]
+            return self.inference_backend.get_model(model).display_name
         except Exception:
             return None
 
-    def _run_voxtral_subprocess_stream(self, tmp_audio_file: str, job, on_segment,
-                                       diarization=None):
-        """Spawn a subprocess to run the Voxtral engine and stream segments.
-
-        Word/segment timestamps are only computed (via forced alignment, the
-        slower "long path") when the output can carry timing: .html/.vtt files
-        embed audio-sync anchors, so only a plain .txt transcript without
-        timestamps, speaker detection or pause marking may take the fast
-        text-only "short path" (whose segment times are approximations).
-        """
-        language_code = self._job_language_code(job)
-
-        need_timestamps = bool(
-            job.file_ext != 'txt'
-            or job.timestamps
-            or (job.speaker_detection and job.speaker_detection != 'none')
-            or (job.pause and job.pause > 0)
-        )
-        self.logn(t('voxtral_path_long') if need_timestamps else t('voxtral_path_short'),
-                  where='file')
-        if job.disfluencies:
-            # Voxtral has no prompt/hotword hook, so the disfluencies option
-            # cannot steer it; say so instead of silently ignoring the setting.
-            self.logn(t('voxtral_no_disfluencies'), where='file')
-
-        from noScribe import transcript_corrections
-        corrections_path = transcript_corrections.ensure_default_file(config_dir)
-
-        # 0 (default) -> engine sizes each pass from available RAM; set a
-        # positive value in config.yml to pin the per-pass length in seconds.
-        # Config values may come back as strings, so coerce defensively.
-        try:
-            chunk_sec = float(get_config('voxtral_chunk_sec', 0) or 0)
-        except (TypeError, ValueError):
-            chunk_sec = 0
-        # Same defensive coercion as chunk_sec: a value written as a YAML string
-        # ("0", "high") would otherwise either slip a truthy "0" through (losing
-        # the whole safety reserve -> swap) or raise ValueError deep in the
-        # engine and abort the job.
-        try:
-            ram_reserve_gb = float(get_config('voxtral_ram_reserve_gb', 0) or 0)
-        except (TypeError, ValueError):
-            ram_reserve_gb = 0
-
-        args = {
-            "audio_path": tmp_audio_file,
-            "language_code": language_code,
-            "need_timestamps": need_timestamps,
-            "voxtral_repo": getattr(job.whisper_model, "repo", None),
-            "chunk_sec": chunk_sec or None,
-            "corrections_path": corrections_path,
-            # None unless the job carries speaker names; the engine then
-            # normalises mis-heard names to those spellings (see
-            # transcript_corrections.apply_name_corrections).
-            "speaker_names": getattr(job, "speaker_names", None),
-            # 0 -> engine default; set voxtral_ram_reserve_gb in config.yml to
-            # allow longer passes when nothing else runs on the machine.
-            "ram_reserve_gb": ram_reserve_gb or None,
-            # Speaker turns from the diarization (same converted-WAV timeline
-            # the engine reads), in seconds. The engine prefers cutting a
-            # looping chunk at a turn boundary -- the cleanest split there is --
-            # and logs a diarization profile when a loop resists repair.
-            # Optional: without speaker detection the engine falls back to
-            # silence-based cuts, exactly as before.
-            "speaker_turns": (
-                [[seg["start"] / 1000.0, seg["end"] / 1000.0, str(seg["label"])]
-                 for seg in diarization] if diarization else None),
-        }
-
-        from .voxtral_mp_worker import voxtral_proc_entrypoint
-        self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)
-
-    def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment, diarization=None):
-        """Spawn a subprocess to run Faster-Whisper and stream segments.
-        Calls on_segment(dict) for each segment streamed by the child. With a
-        diarization, its turns are the speech map in place of Silero's
-        (the measurement is above whisper_mp_worker._speech_map_from).
-        """
-        global force_whisper_cpu
-        # Language code for non-auto/multilingual
-        language_code = self._job_language_code(job)
-
-        # VAD threshold from config
-        try:
-            vad_threshold = float(config.get('voice_activity_detection_threshold', '0.5'))
-        except Exception:
-            vad_threshold = 0.5
-
-        args = {
-            "whisper_model": job.whisper_model,
-            "device": 'cpu' if force_whisper_cpu else 'auto',
-            "compute_type": job.whisper_compute_type,
-            "cpu_threads": number_threads,
-            "local_files_only": True,
-            "audio_path": tmp_audio_file,
-            "language_name": job.language_name,
-            "language_code": language_code,
-            "disfluencies": job.disfluencies,
-            "beam_size": 5,
-            "word_timestamps": True,
-            "vad_filter": True,
-            "vad_threshold": vad_threshold,
-            "locale": config.get("locale", "en"),
-            # Same converted-WAV timeline the worker reads, in seconds.
-            "speech_turns": ([[seg["start"] / 1000.0, seg["end"] / 1000.0] for seg in diarization]
-                             if diarization else None),
-        }
-
-        from .whisper_mp_worker import whisper_proc_entrypoint
-        self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)
-
-    def _run_diarize_subprocess(self, tmp_audio_file: str, job, engine: str):
-        """Spawn a subprocess to run diarization and return list of segments.
-        Streams child logs/progress back to GUI and honors cancel.
-        """
-        result = self._run_diarization_worker(tmp_audio_file, job, {
-            "num_speakers": (int(job.speaker_detection) if str(job.speaker_detection).isdigit() else None),
-        }, engine)
-        # Whichever second opinion the worker brought: pyannote its centroids,
-        # a model with its own speaker probabilities those.
-        job.speaker_centroids = result.get("centroids") or {}
-        job.speaker_probabilities = result.get("probabilities") or {}
-        return result.get("segments") or []
-
-    def _diarization_engine(self, job) -> str:
-        """'nemotron' or 'pyannote', from `diarization_engine` in config.yml.
-
-        `auto` (the default) takes Nemotron when the installed transformers knows the
-        model, librosa is installed for its processor, and its weights are on disk,
-        shipped in models/ or in the Hugging Face cache, so it never starts a download;
-        `nemotron` downloads them on first use, `pyannote` keeps the old engine.
-        Nemotron finds the number of speakers itself and cannot be held to one, so a
-        job with a fixed number stays with pyannote."""
-        from .nemotron_mp_worker import available
-        engine = str(get_config('diarization_engine', 'auto')).lower()
-        if str(job.speaker_detection).isdigit():
-            return 'pyannote'
-        return 'nemotron' if engine == 'nemotron' or (engine == 'auto' and available()) else 'pyannote'
+    def _voice_evidence(self, diarization_result, job, tmp_audio_file, turns, short_label):
+        """The voice check's second opinion, from what the diarization brought: a
+        model's own speaker probabilities (Nemotron), else pyannote's centroids,
+        against which the voice of every passage is then embedded. None without
+        either."""
+        extensions = getattr(diarization_result, 'extensions', None) or {}
+        probabilities = (extensions.get(LOCAL_NEMOTRON_BACKEND) or {}).get('probabilities')
+        if probabilities:
+            from .nemotron_mp_worker import decode_probabilities
+            named = {turn['label'] for turn in turns}
+            return voice_check.Probabilities(
+                decode_probabilities(probabilities),
+                {short_label(label): column for column, label in enumerate(probabilities['columns'])
+                 if short_label(label) in named},
+                probabilities['frame_s'])
+        # The embeddings come from the local pipeline, so only its own centroids compare.
+        if job.diarization_model.backend_id != LOCAL_DIARIZATION_BACKEND:
+            return None
+        centroids = (extensions.get(LOCAL_DIARIZATION_BACKEND) or {}).get('centroids') or {}
+        return voice_check.Voice(
+            {short_label(k): v for k, v in centroids.items()},
+            lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans))
 
     def _run_voice_embeddings(self, tmp_audio_file: str, job, spans):
         """One speaker embedding per [start_s, end_s] span, for noScribe.voice_check.
 
         A second, short call to the diarization worker: the embedding model lives
-        there, and the spans only exist once the transcript does.
-        """
-        result = self._run_diarization_worker(tmp_audio_file, job, {"embed_spans": spans}, 'pyannote', errors_to='file')
-        return result.get("embeddings") or []
+        there, and the spans only exist once the transcript does. A failure stays
+        in the log file; the job does without the check."""
+        request = DiarizationRequest(
+            audio_path=tmp_audio_file,
+            model=job.diarization_model,
+            extensions={LOCAL_DIARIZATION_BACKEND: {'embed_spans': spans}},
+        )
 
-    def _run_diarization_worker(self, tmp_audio_file: str, job, extra_args: dict, engine: str,
-                                errors_to='both') -> dict:
-        """Run a diarization worker once and return its result message: pyannote_mp_worker,
-        or nemotron_mp_worker, which speaks the same messages. errors_to='file' keeps a
-        failure off the screen, for a call the job can do without."""
-        global force_pyannote_cpu
-        ctx = mp.get_context("spawn")
-        q = ctx.Queue()
-        if engine == 'nemotron':
-            from .nemotron_mp_worker import nemotron_proc_entrypoint as entry
-        else:
-            from .pyannote_mp_worker import pyannote_proc_entrypoint as entry
-        name = DIARIZATION_ENGINES[engine]
-        args = {
-            "device": 'cpu' if (force_nemotron_cpu if engine == 'nemotron' else force_pyannote_cpu) else '',
-            "audio_path": tmp_audio_file,
-            **extra_args,
-        }
-        proc = ctx.Process(target=entry, args=(args, q))
-        proc.start()
-        # Keep handles for cancel
-        self._mp_proc = proc
-        self._mp_queue = q
-
-        result = None
         progress_open = False  # logr leaves its progress line without a line end
 
-        def close_progress():
+        def close_progress() -> None:
             nonlocal progress_open
             if progress_open:
                 self.logn()
                 progress_open = False
 
+        def log_message(level: str, message: str) -> None:
+            close_progress()
+            self.logn('PyAnnote: ' + message, where='file')
+
+        def update_progress(step: str, percent: int) -> None:
+            nonlocal progress_open
+            self.logr(f'{step}: {percent}%')
+            progress_open = True
+
         try:
-            while True:
-                try:
-                    msg = q.get(timeout=0.1)
-                except pyqueue.Empty:
-                    if self.cancel:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                        close_progress()
-                        raise Exception(t('err_user_cancelation'))
-                    if not proc.is_alive():
-                        exitcode = proc.exitcode
-                        close_progress()
-                        self.logn(f"Diarization worker exited unexpectedly (code {exitcode}). UI remains responsive.", 'error', where=errors_to)
-                        raise Exception('Subprocess terminated unexpectedly')
-                    continue
-
-                mtype = msg.get("type") if isinstance(msg, dict) else None
-                if mtype == "log":
-                    txt = msg.get("msg", "")
-                    close_progress()
-                    self.logn(f'{name} ' + txt, where='file')
-                elif mtype == "progress":
-                    step_name = str(msg.get("step", name))
-                    progress_percent = int(msg.get("pct", 0))
-                    self.logr(f'{step_name}: {progress_percent}%')
-                    progress_open = True
-                    if step_name == 'segmentation':
-                        self.set_progress(2, progress_percent * 0.3, job.speaker_detection)
-                    elif step_name == 'embeddings':
-                        self.set_progress(2, 30 + (progress_percent * 0.7), job.speaker_detection)
-                    elif step_name == name:  # a worker without steps reports the whole
-                        self.set_progress(2, progress_percent, job.speaker_detection)
-                elif mtype == "result":
-                    close_progress()
-                    if msg.get("ok"):
-                        result = msg
-                    else:
-                        err = msg.get('error', 'Diarization failed')
-                        trc = msg.get('trace')
-                        self.logn(f"{name} error: {err}", 'error', where=errors_to)
-                        if trc:
-                            self.logn(trc, where='file')
-                        raise Exception(err)
-                    break
-
+            result = self.inference_backend.diarize(
+                request,
+                on_log=log_message,
+                on_progress=update_progress,
+                is_cancelled=lambda: self.cancel,
+                **({'device_override': 'cpu'} if job.pyannote_cpu_fallback else {}),
+            )
         finally:
-            try:
-                proc.join(timeout=0.2)
-            except Exception:
-                pass
-            if proc.is_alive():
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            try:
-                proc.close()
-            except Exception:
-                pass
-            try:
-                q.close()
-                q.join_thread()
-            except Exception:
-                pass
-            self._mp_proc = None
-            self._mp_queue = None
+            close_progress()
+        return (result.extensions.get(LOCAL_DIARIZATION_BACKEND) or {}).get('embeddings') or []
 
-        return result or {}
-    
+    def _handle_cuda_fallback(self, component: str, error: Exception, job: TranscriptionJob) -> bool:
+        """Automatically retry the affected component once on CPU for this job."""
+        # Cancellation is never a failed retry, even if an earlier GPU attempt
+        # failed. Parent-side errors (e.g. saving segments) are not GPU errors.
+        if getattr(self, 'cancel', False) or str(error) == t('err_user_cancelation'):
+            return False
+        if component in job.gpu_errors:
+            raise WorkerRetryError(job.gpu_errors[component], error) from error
+        if not isinstance(error, WorkerError) or not error.allows_cpu_retry:
+            return False
+
+        registry = getattr(self, 'inference_backend', None)
+        engine = component
+        if registry is not None:
+            model = job.diarization_model if component == 'pyannote' else job.transcription_model
+            expected_backends = LOCAL_DIARIZATION_BACKENDS if component == 'pyannote' else {LOCAL_WHISPER_BACKEND: 'whisper'}
+            if model.backend_id not in expected_backends:
+                return False
+            if registry.get(model.backend_id).settings.device != 'auto':
+                return False
+            engine = expected_backends[model.backend_id]
+
+        if component == 'pyannote':
+            if (registry is None and force_pyannote_cpu) or job.pyannote_cpu_fallback:
+                return False
+            job.pyannote_cpu_fallback = True
+        elif component == 'whisper':
+            if (registry is None and force_whisper_cpu) or job.whisper_cpu_fallback:
+                return False
+            job.whisper_cpu_fallback = True
+        else:
+            return False
+
+        job.gpu_errors[component] = error
+        if error.classification == 'worker_crash':
+            message = t('gpu_worker_crash_retry',
+                        component={'pyannote': 'PyAnnote', 'nemotron': 'Nemotron'}.get(engine, 'Whisper'),
+                        exitcode=error.exitcode, stage=error.stage,
+                        option=f'force_{engine}_cpu')
+        else:
+            message = t(f'{engine}_cuda_retry')
+        self.logn(message, 'highlight')
+        return True
+
+    def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment, diarization=None, on_reset=None):
+        """Run the transcription plugin (Faster-Whisper, Voxtral, a server)
+        through the UI-independent backend."""
+        request = TranscriptionRequest(
+            audio_path=tmp_audio_file,
+            model=job.transcription_model,
+            language=job.language,
+            multilingual=job.multilingual,
+            include_disfluencies=job.disfluencies,
+            diarization=diarization,
+            # Local plugins only: a server without queued workflows refuses any
+            # request with extensions (RemoteHttpPlugin.transcribe).
+            extensions=({} if model_uses_remote_backend(self.inference_backend, job.transcription_model)
+                        else _job_extension(job)),
+        )
+        # Whether the engine reports its own progress (on_segment then leaves the bar alone)
+        self._engine_progress = False
+
+        def mark_transcription_started() -> None:
+            if job.status == JobStatus.WAITING_FOR_SERVER:
+                job.status = JobStatus.TRANSCRIPTION
+                self.update_queue_table()
+
+        def log_message(level: str, message: str) -> None:
+            mark_transcription_started()
+            if level == 'debug':
+                self.logn(message, where='file')
+                return
+            # Transcript text streams in without trailing newlines.
+            self.end_open_line()
+            self.logn(message, 'error' if level == 'error' else None)
+
+        def update_progress(percent: float, detail: str | None) -> None:
+            mark_transcription_started()
+            self._engine_progress = True
+            self.set_progress(3, percent, _job_speaker_setting(job))
+
+        def show_status(message_id: str, params: dict, level: str) -> None:
+            if message_id == 'server_queue_wait':
+                if job.status != JobStatus.WAITING_FOR_SERVER:
+                    job.status = JobStatus.WAITING_FOR_SERVER
+                    self.update_queue_table()
+            else:
+                mark_transcription_started()
+            message = t(message_id, **params)
+            if level == 'debug':
+                self.logn(message, where='file')
+                return
+            self.end_open_line()
+            self.logn(message, 'error' if level == 'error' else None)
+
+        def stream_segment(segment: TranscriptionSegment) -> None:
+            mark_transcription_started()
+            on_segment(segment)
+
+        try:
+            return self.inference_backend.transcribe(
+                request,
+                on_segment=stream_segment,
+                on_log=log_message,
+                on_status=show_status,
+                on_progress=update_progress,
+                is_cancelled=lambda: self.cancel,
+                **({'device_override': 'cpu'} if job.whisper_cpu_fallback else {}),
+                **({'on_reset': on_reset} if on_reset is not None else {}),
+            )
+        except (InferenceWorkerError, WorkerError) as error:
+            self.end_open_line()
+            if getattr(error, 'user_message_id', None):
+                self.logn(_gui_error_message(error), 'error')
+                self.logn(f'Transcription failed: {error}', where='file')
+                print(f'Transcription failed: {error}', file=sys.stderr)
+            else:
+                self.logn(f'Transcription failed: {error}', 'error')
+            if error.trace:
+                self.logn(error.trace, where='file')
+            raise
+
+    def _run_remote_workflow(
+        self,
+        tmp_audio_file: str,
+        job,
+        *,
+        on_segment,
+        diarization: list[DiarizationSegment],
+        transcript_start: int | None = None,
+        on_reset=lambda: None,
+    ):
+        """Run diarization and transcription with one queued remote upload."""
+        request = InferenceWorkflowRequest(
+            audio_path=tmp_audio_file,
+            diarization=DiarizationRequest(
+                audio_path=tmp_audio_file,
+                model=job.diarization_model,
+                num_speakers=job.num_speakers,
+            ),
+            transcription=TranscriptionRequest(
+                audio_path=tmp_audio_file,
+                model=job.transcription_model,
+                language=job.language,
+                multilingual=job.multilingual,
+                include_disfluencies=job.disfluencies,
+            ),
+        )
+
+        def handle_event(event: dict) -> None:
+            event_type = event.get('type')
+            operation = event.get('operation')
+            if event_type == 'task_started':
+                if operation == 'diarization':
+                    job.status = JobStatus.SPEAKER_IDENTIFICATION
+                    self.update_queue_table()
+                elif operation == 'transcription':
+                    if event.get('retry'):
+                        on_reset()
+                    job.status = JobStatus.TRANSCRIPTION
+                    self.update_queue_table()
+                    self.logn()
+                    self.logn(t('start_transcription'), 'highlight')
+                    self.logn(t('loading_whisper'))
+            elif event_type == 'status':
+                message_id = str(event.get('message_id') or '')
+                params = event.get('params') or {}
+                if message_id == 'server_queue_wait':
+                    if job.status != JobStatus.WAITING_FOR_SERVER:
+                        job.status = JobStatus.WAITING_FOR_SERVER
+                        self.update_queue_table()
+                    self.logr(t(message_id, **params))
+                elif message_id == 'streaming_audio' \
+                        and job.status == JobStatus.WAITING_FOR_SERVER:
+                    # Replace the live queue-position line once uploading starts.
+                    self.logr(t(message_id, **params))
+                    self.logn()
+                elif message_id:
+                    self.logn(
+                        t(message_id, **params),
+                        'error' if event.get('level') == 'error' else None,
+                    )
+            elif event_type == 'log':
+                message = str(event.get('msg') or '')
+                if operation == 'diarization':
+                    self.logn('PyAnnote ' + message, where='file')
+                else:
+                    self.logn(
+                        message,
+                        'error' if event.get('level') == 'error' else None,
+                    )
+            elif event_type == 'progress' and event.get('pct') is not None:
+                percent = float(event['pct'])
+                if operation == 'diarization':
+                    step = str(event.get('step') or '')
+                    self.logr(f'{step}: {int(percent)}%')
+                    if step == 'segmentation':
+                        self.set_progress(
+                            2,
+                            percent * 0.3,
+                            _job_speaker_setting(job),
+                        )
+                    elif step == 'embeddings':
+                        self.set_progress(
+                            2,
+                            30 + (percent * 0.7),
+                            _job_speaker_setting(job),
+                        )
+                elif operation == 'transcription':
+                    self.set_progress(3, percent, _job_speaker_setting(job))
+
+        def receive_diarization(segments) -> None:
+            offset = job.start if transcript_start is None else transcript_start
+            diarization[:] = segments
+            for segment in diarization:
+                line = f'{utils.ms_to_str(offset + segment.start_ms, include_ms=True)} - {utils.ms_to_str(offset + segment.end_ms, include_ms=True)} {segment.label}'
+                self.logn(line, where='file')
+            self.logn()
+
+        return self.inference_backend.run_workflow(
+            request,
+            on_event=handle_event,
+            on_transcription_segment=on_segment,
+            on_diarization_result=receive_diarization,
+            is_cancelled=lambda: self.cancel,
+        )
+
+    def _run_diarize_subprocess(self, tmp_audio_file: str, job):
+        """Run the diarization plugin (Pyannote, Nemotron, a server) through the
+        UI-independent backend."""
+        request = DiarizationRequest(
+            audio_path=tmp_audio_file,
+            model=job.diarization_model,
+            num_speakers=job.num_speakers,
+        )
+        name = {'nemotron': 'Nemotron'}.get(self._model_engine(job.diarization_model, 'pyannote'), 'PyAnnote')
+
+        def log_message(level: str, message: str) -> None:
+            self.logn(f'{name}: ' + message, where='both' if level == 'info' else 'file')
+
+        def update_progress(step: str, percent: int) -> None:
+            self.logr(f'{step}: {percent}%')
+            if step == 'segmentation':
+                self.set_progress(2, percent * 0.3, _job_speaker_setting(job))
+            elif step == 'embeddings':
+                self.set_progress(2, 30 + (percent * 0.7), _job_speaker_setting(job))
+            elif step == 'diarization':  # a worker without steps reports the whole
+                self.set_progress(2, percent, _job_speaker_setting(job))
+
+        try:
+            return self.inference_backend.diarize(
+                request,
+                on_log=log_message,
+                on_progress=update_progress,
+                is_cancelled=lambda: self.cancel,
+                **({'device_override': 'cpu'} if job.pyannote_cpu_fallback else {}),
+            )
+        except (InferenceWorkerError, WorkerError) as error:
+            if getattr(error, 'user_message_id', None):
+                self.logn(_gui_error_message(error), 'error')
+                self.logn(f'{name} error: {error}', where='file')
+                print(f'{name} error: {error}', file=sys.stderr)
+            else:
+                self.logn(f'{name} error: {error}', 'error')
+            if error.trace:
+                self.logn(error.trace, where='file')
+            raise
+
     def on_closing(self):
         # (see: https://stackoverflow.com/questions/111155/how-do-i-handle-the-window-close-event-in-tkinter)
         global force_pyannote_cpu
@@ -4081,31 +4505,11 @@ class App(ctk.CTk):
         self._shutting_down = True
         self.cancel = True
         try:
-            # Terminate active multiprocessing child (diarization/whisper) if present
+            # Stop the backend-owned inference child, if present.
             try:
-                if getattr(self, "_mp_proc", None) is not None and self._mp_proc.is_alive():
-                    try:
-                        self._mp_proc.terminate()
-                    except Exception:
-                        pass
-                    try:
-                        self._mp_proc.join(timeout=1.0)
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    if getattr(self, "_mp_queue", None) is not None:
-                        try:
-                            self._mp_queue.close()
-                        except Exception:
-                            pass
-                        try:
-                            self._mp_queue.join_thread()
-                        except Exception:
-                            pass
-                finally:
-                    self._mp_proc = None
-                    self._mp_queue = None
+                self.inference_backend.close()
+            except Exception:
+                pass
 
             # Terminate ffmpeg if currently converting
             try:
@@ -4144,6 +4548,8 @@ class HeadlessApp(App):
         # Do not initialize Tk/CTk to avoid DISPLAY requirements
         _init_app_state(self)
         self._headless = True
+        for error in self.remote_backend_registration_errors:
+            print(_remote_backend_error_details(error), file=sys.stderr)
 
     def __getattr__(self, name):
         # Avoid Tk attribute delegation recursion when CTk isn't initialized
@@ -4157,26 +4563,11 @@ def _cleanup_app(app):
         app._shutting_down = True
         app.cancel = True
 
-        # Terminate active multiprocessing child (diarization/whisper) if present
-        if getattr(app, "_mp_proc", None) is not None:
-            try:
-                if app._mp_proc.is_alive():
-                    app._mp_proc.terminate()
-                    app._mp_proc.join(timeout=1.0)
-            except Exception:
-                pass
-            finally:
-                app._mp_proc = None
-
-        # Close multiprocessing queue
-        if getattr(app, "_mp_queue", None) is not None:
-            try:
-                app._mp_queue.close()
-                app._mp_queue.join_thread()
-            except Exception:
-                pass
-            finally:
-                app._mp_queue = None
+        # Stop the backend-owned inference child, if present.
+        try:
+            app.inference_backend.close()
+        except Exception:
+            pass
 
         # Terminate ffmpeg if currently converting
         if getattr(app, "_ffmpeg_proc", None) is not None:
@@ -4220,26 +4611,32 @@ def run_cli_mode(args):
         
         # Validate and set the whisper model
         if args.model:
-            args.model = RENAMED_MODELS.get(args.model, args.model)
-            if args.model not in app.whisper_models:
-                print(f"Error: Model '{args.model}' not found.")
-                print(f"Available models: {', '.join(app.whisper_models.keys())}")
+            try:
+                model_ref = _model_ref(args.model, app.inference_backend)
+                model = app.inference_backend.get_model(model_ref)
+            except ValueError as error:
+                print(f"Error: {error}")
                 return 1
+            if "transcription" not in model.capabilities:
+                print(f"Error: Model '{model_ref}' cannot transcribe.")
+                return 1
+            args.model = str(model_ref)
         else:
             # Use default model
-            if 'precise' in app.whisper_models:
-                args.model = 'precise'
-            elif app.whisper_models:
-                args.model = next(iter(app.whisper_models))
+            default_model = str(ModelRef(LOCAL_WHISPER_BACKEND, 'precise'))
+            if default_model in app.transcription_models:
+                args.model = default_model
+            elif app.transcription_models:
+                args.model = next(iter(app.transcription_models))
             else:
                 print("Error: No Whisper models found.")
                 return 1
         
         # Create job from CLI arguments
         job = create_job_from_cli_args(args)
-        
-        # Set the whisper model path
-        job.whisper_model = app.whisper_models[args.model]
+        job.diarization_model = select_diarization_model(
+            app.inference_backend, job.transcription_model, job.num_speakers
+        )
         
         # Validate files
         if not os.path.exists(job.audio_file):
@@ -4260,9 +4657,9 @@ def run_cli_mode(args):
         
         print(f"Starting transcription of '{job.audio_file}'...")
         print(f"Output will be saved to '{job.transcript_file}'")
-        print(f"Language: {job.language_name}")
+        print(f"Language: {_job_language_name(job)}")
         print(f"Model: {args.model}")
-        print(f"Speaker detection: {job.speaker_detection}")
+        print(f"Speaker detection: {_job_speaker_setting(job)}")
         print()
         
         # Start transcription worker with the queue
@@ -4297,11 +4694,11 @@ def show_available_models():
     try:
         # Create headless app instance to get models
         app = HeadlessApp()
-        models = app.whisper_models.keys()
+        models = app.inference_backend.list_models("transcription")
         
         print("Available Whisper models:")
         for model in models:
-            print(f"  - {model}")
+            print(f"  - {model.ref} ({model.display_name})")
         
         if not models:
             print("  No models found. Please check your installation.")
@@ -4361,30 +4758,28 @@ def noScribeMain():
     #
     # Using memoization (keeps all translations in memory instead of loading
     # each translation from file). This should make things faster and increased
-    # memory usage should be negligible (in the case of a ML app). This way, it
-    # is possible to use `importlib.ressources` to provide the translation file
-    # once and i18n does not need to access it later. However, it is necessary
-    # to translate one string to have it available throughout the app lifetime.
+    # memory usage should be negligible (in the case of a ML app). i18n still
+    # reads the load path again for keys it has not memoized yet (a missing
+    # key, or the fallback to "en"), so the path must stay valid for the whole
+    # run; see `utils.translations_dir()`.
     i18n.set("filename_format", "{locale}.{format}")
     i18n.set("enable_memoization", True)
     i18n.set("fallback", "en")
     i18n.set("locale", app_locale)
 
-    with impres.as_file(impres.files("trans")) as mypath:
-        i18n.load_path.append(mypath)
-
-        try:
-            print("\nnoScribe")
-            print(t("app_header"), "\n")
-        except Exception as e:
-            logger.error(
-                "Failed to load localization files. "
-                "noScribe cannot start without them and needs to close."
-            )
-            _show_startup_error(
-                "noScribe could not load localization files and needs to close."
-            )
-            raise exception.LocalizationLoadingError from e
+    try:
+        i18n.load_path.append(utils.translations_dir())
+        print("\nnoScribe")
+        print(t("app_header"), "\n")
+    except Exception as e:
+        logger.error(
+            "Failed to load localization files. "
+            "noScribe cannot start without them and needs to close."
+        )
+        _show_startup_error(
+            "noScribe could not load localization files and needs to close."
+        )
+        raise exception.LocalizationLoadingError from e
 
     # Parse command line arguments
     args = parse_cli_args()
@@ -4412,9 +4807,12 @@ def noScribeMain():
         # Prefill selected model if provided
         desired_model_name = None
         if getattr(args, 'model', None):
-            args.model = RENAMED_MODELS.get(args.model, args.model)
-            if args.model in app.whisper_models:
-                desired_model_name = args.model
+            try:
+                model_ref = str(_model_ref(args.model, app.inference_backend))
+            except ValueError:
+                model_ref = None
+            if model_ref in app.transcription_models:
+                desired_model_name = app.transcription_model_labels[model_ref]
             else:
                 app.logn(f"Warning: Model '{args.model}' not found. Using default GUI selection.")
 

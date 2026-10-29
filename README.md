@@ -1,4 +1,4 @@
-﻿# noScribe
+# noScribe
 ### Cutting Edge AI Technology for Automated Audio Transcription
 </br>
 
@@ -15,13 +15,11 @@
 >
 > It also finds the speakers with NVIDIA's **Nemotron 3 Diarization** instead of
 > pyannote: fewer passages given to the wrong speaker in English and German, and
-> about seven times faster on the CPU. Nemotron is not in a transformers release
-> yet, so it needs transformers installed from its git main
-> (`pip install git+https://github.com/huggingface/transformers`), and its weights
-> are fetched only once `diarization_engine: nemotron` is set in noScribe's
-> `config.yml`. Without either, the default `auto` quietly stays with pyannote;
-> the transcript header says which one ran — "auto (Nemotron)" or
-> "auto (PyAnnote)".
+> about seven times faster on the CPU. It needs transformers 5.18 or newer and
+> librosa (both in the requirements), and its weights are fetched only once
+> `diarization_engine: nemotron` is set in noScribe's `config.yml`. Without them,
+> the default `auto` quietly stays with pyannote; the transcript header says
+> which one ran — "auto (Nemotron)" or "auto (Pyannote)".
 >
 > Requires a Mac with Apple Silicon (M1–M4) for Voxtral. There is **no packaged
 > download for this fork yet** — you install it from source: the `main` branch
@@ -67,6 +65,14 @@
 ## Download, Installation, and Usage
 
 See the corresponding sections on my website: https://noscribe.de 
+
+To run noScribe without its window in a Docker container (CPU or CUDA, for servers and batch jobs), see [docker/README.md](docker/README.md).
+
+## Experimental Local Inference Server
+
+The development branch can run Whisper and Pyannote as a queued, local-only
+inference service for small teams. Deployment, security, reverse-proxy, and
+zero-retention details are documented in [noScribe/server/README.md](noScribe/server/README.md).
 
 ## About Me
 **Kai Dröge**, PhD in sociology (with a background in computer science), qualitative researcher and teacher, [Lucerne University for Applied Science (Switzerland)](https://www.hslu.ch/de-ch/hochschule-luzern/ueber-uns/personensuche/profile/?pid=823) and [Institute for Social Research, Frankfurt/M. (Germany)](https://www.ifs.uni-frankfurt.de/personendetails/kai-droege.html).
