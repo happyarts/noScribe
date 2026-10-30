@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import requests
+from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError, SSLError
 
 from ...inference import (
     DiarizationSegment,
@@ -694,14 +695,25 @@ def _iter_lines(response):
     a 200 kB event took 27 s, and a diarization result that carries speaker
     probabilities (several MB per hour of audio) never arrived. read1 returns
     whatever has arrived, up to 64 kB, so lines still come as soon as they are
-    sent, and each byte is looked at once."""
+    sent, and each byte is looked at once. urllib3's errors are raised as
+    requests' own, as iter_lines raises them, so a dropped connection or a
+    cancel still reaches the handlers that catch requests.RequestException."""
     read1 = getattr(response.raw, "read1", None)
     if read1 is None:  # urllib3 before 2.x
         yield from response.iter_lines(chunk_size=1)
         return
     buffer = bytearray()
     while True:
-        data = read1(65536, decode_content=True)
+        try:
+            data = read1(65536, decode_content=True)
+        except ProtocolError as error:
+            raise requests.exceptions.ChunkedEncodingError(error) from error
+        except DecodeError as error:
+            raise requests.exceptions.ContentDecodingError(error) from error
+        except ReadTimeoutError as error:
+            raise requests.exceptions.ConnectionError(error) from error
+        except SSLError as error:
+            raise requests.exceptions.SSLError(error) from error
         if not data:
             break
         scan, start = len(buffer), 0

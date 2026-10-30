@@ -547,6 +547,24 @@ def test_lines_arrive_as_soon_as_they_are_complete():
     assert list(lines) == [b'{"b": 2}', b"", b'{"c": 3}']
 
 
+def test_a_broken_stream_raises_what_requests_raises():
+    """The plugin's handlers catch requests' errors, as iter_lines raised them:
+    a connection dropped mid-stream must not escape as urllib3's own."""
+    import pytest
+    import requests
+    from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError
+
+    for raised, expected in ((ProtocolError("dropped"), requests.exceptions.ChunkedEncodingError),
+                             (ReadTimeoutError(None, "/", "timed out"), requests.exceptions.ConnectionError),
+                             (DecodeError("gzip"), requests.exceptions.ContentDecodingError)):
+        class Raw:
+            def read1(self, amount, decode_content=True):
+                raise raised
+
+        with pytest.raises(expected):
+            list(_iter_lines(type("Response", (), {"raw": Raw()})()))
+
+
 def test_a_large_diarization_result_arrives_whole_and_in_time(tmp_path):
     """Speaker probabilities make a diarization result several MB long (Nemotron:
     about 7.7 MB per hour of audio). Read byte by byte, a line of 200 kB took
