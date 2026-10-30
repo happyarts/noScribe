@@ -83,7 +83,8 @@ def test_the_registry_reads_nemotrons_settings_file(tmp_path):
 
 class Registry:
     def __init__(self, *refs, ready=True):
-        self.models = [ModelDescriptor(ref=ModelRef.parse(ref), display_name=ref, engine='x',
+        self.models = [ModelDescriptor(ref=ModelRef.parse(ref), display_name=ref,
+                                       engine='nemotron' if 'nemotron' in ref else 'pyannote',
                                        capabilities=frozenset({'diarization'})) for ref in refs]
         self.nemotron = SimpleNamespace(ready=lambda: ready)
 
@@ -119,6 +120,29 @@ def test_a_server_diarizes_with_its_own_engine(monkeypatch):
         'server:local-pyannote/default'
 
 
+@pytest.mark.parametrize('setting, speakers, chosen', [
+    ('auto', None, 'server:local-nemotron/default'),    # what a server offers, its operator installed
+    ('nemotron', None, 'server:local-nemotron/default'),
+    ('pyannote', None, 'server:local-pyannote/default'),
+    ('auto', 2, 'server:local-pyannote/default'),       # a fixed number stays with Pyannote there too
+])
+def test_on_a_server_the_setting_chooses_among_its_engines(monkeypatch, setting, speakers, chosen):
+    m = pytest.importorskip('noScribe.main')
+    monkeypatch.setattr(m, 'config', {'diarization_engine': setting})
+    registry = Registry('local-pyannote:default', 'server:local-pyannote/default', 'server:local-nemotron/default',
+                        ready=False)
+    assert str(m.select_diarization_model(
+        registry, ModelRef('server', 'local-whisper/precise'), speakers)) == chosen
+
+
+def test_a_fixed_number_on_a_server_with_only_nemotron_diarizes_here(monkeypatch):
+    m = pytest.importorskip('noScribe.main')
+    monkeypatch.setattr(m, 'config', {})
+    registry = Registry('local-pyannote:default', 'server:local-nemotron/default')
+    assert str(m.select_diarization_model(
+        registry, ModelRef('server', 'local-whisper/precise'), 2)) == 'local-pyannote:default'
+
+
 def test_without_nemotron_installed_auto_stays_with_pyannote(monkeypatch):
     m = pytest.importorskip('noScribe.main')
     monkeypatch.setattr(m, 'config', {'diarization_engine': 'nemotron'})
@@ -140,3 +164,32 @@ def test_nemotron_retries_on_the_cpu_and_says_so(monkeypatch):
     error = WorkerError(error_result(RuntimeError('CUDA out of memory'), 'cuda', 'diarization'))
     assert m.App._handle_cuda_fallback(app, 'pyannote', error, job) is True
     assert job.pyannote_cpu_fallback and logged == ['nemotron_cuda_retry']
+
+
+def test_a_server_retries_nemotron_on_its_cpu():
+    """A CUDA failure on the server retries the task once on the CPU, as it does
+    for Whisper and Pyannote, and the plugin's settings stay as they were."""
+    from pathlib import Path
+    from noScribe.server.jobs import JobTask
+    from noScribe.server.processor import RegistryWorkflowProcessor
+    settings = SimpleNamespace(device='auto')
+    devices = []
+
+    class ServerRegistry:
+        def list_models(self, capability=None):
+            return [ModelDescriptor(ModelRef('local-nemotron', 'default'), 'Nemotron', 'nemotron',
+                                    frozenset({'diarization'}))]
+
+        def get(self, backend_id):
+            return SimpleNamespace(settings=settings)
+
+        def diarize(self, request, **callbacks):
+            devices.append(callbacks.get('device_override'))
+            if callbacks.get('device_override') != 'cpu':
+                raise WorkerError(error_result(RuntimeError('CUDA out of memory'), 'cuda', 'diarization'))
+            return DiarizationResult()
+
+    processor = RegistryWorkflowProcessor(ServerRegistry())
+    processor._diarize(0, JobTask('diarization', 'local-nemotron/default'), Path('audio.wav'),
+                       lambda event: None, lambda: False)
+    assert devices == [None, 'cpu'] and settings.device == 'auto'
