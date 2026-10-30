@@ -150,6 +150,81 @@ def test_without_nemotron_installed_auto_stays_with_pyannote(monkeypatch):
                                           ModelRef('local-whisper', 'precise'))) == 'local-pyannote:default'
 
 
+# --- what the job says about the engine ------------------------------------
+
+def test_the_header_names_the_engine_behind_the_speakers():
+    m = pytest.importorskip('noScribe.main')
+    job = m.create_transcription_job(transcript_file='x.html', speaker_detection='auto')
+    assert '(Nemotron)' in m.format_transcript_options(job, 'precise', 'Nemotron')
+    job = m.create_transcription_job(transcript_file='x.html', speaker_detection='none')
+    assert '(Nemotron)' not in m.format_transcript_options(job, 'precise', 'Nemotron')
+
+
+@pytest.mark.parametrize('engine, speakers, said', [
+    ('nemotron', 8, True), ('nemotron', 7, False), ('pyannote', 9, False)])
+def test_all_eight_channels_in_use_are_said(monkeypatch, engine, speakers, said):
+    """Nemotron folds a ninth voice into the others without knowing it."""
+    m = pytest.importorskip('noScribe.main')
+    from noScribe.inference import DiarizationSegment
+    monkeypatch.setattr(m, 't', lambda key, **kwargs: key)
+    logged = []
+    app = SimpleNamespace(logn=lambda text='', *args, **kwargs: logged.append(text),
+                          _model_engine=lambda model, default: engine)
+    job = SimpleNamespace(diarization_model=ModelRef('local-' + engine, 'default'))
+    segments = [DiarizationSegment(k * 1000, k * 1000 + 500, f'SPEAKER_{k:02d}') for k in range(speakers)]
+    m.App._say_if_all_channels_used(app, job, segments)
+    assert (logged == ['nemotron_all_speakers']) is said
+
+
+def test_a_servers_probabilities_reach_the_voice_check(tmp_path, monkeypatch):
+    """Through the queued remote workflow, where the server diarizes and
+    transcribes in one upload: the voice check reads the probabilities its
+    Nemotron sent along, as it does those of a local run."""
+    m = pytest.importorskip('noScribe.main')
+    soundfile = pytest.importorskip('soundfile')
+    from noScribe import voice_check
+    from noScribe.inference import (DiarizationSegment, InferenceWorkflowResult, TranscriptionInfo,
+                                    TranscriptionSegment)
+    monkeypatch.setattr(m, 'config_dir', str(tmp_path))
+    monkeypatch.setattr(m, 'config', {})
+    monkeypatch.setattr(m, 'get_speech_timestamps', lambda *args: [])
+    app = m.HeadlessApp()
+    for name in ('log', 'logn', 'logr', 'set_progress', 'update_queue_table', 'update_queue_controls'):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: None)
+    rows = np.zeros((300, 2), dtype=np.float16)
+    rows[:150, 0] = rows[150:, 1] = 0.9
+    turns = (DiarizationSegment(0, 1500, 'SPEAKER_00'), DiarizationSegment(1500, 3000, 'SPEAKER_01'))
+    result = DiarizationResult(turns, {nw.EXTENSION_KEY: {'probabilities': nw.encode_probabilities(
+        rows, ['SPEAKER_00', 'SPEAKER_01'])}})
+
+    def run_workflow(request, **callbacks):
+        callbacks['on_diarization_result'](result)
+        callbacks['on_transcription_segment'](TranscriptionSegment(0.2, 2.8, ' Hallo'))
+        return InferenceWorkflowResult(transcription_info=TranscriptionInfo(), diarization=result)
+
+    seen = []
+
+    def relabel(segments, diarization, evidence):
+        seen.append(evidence)
+        return [], []
+
+    monkeypatch.setattr(app.inference_backend, 'supports_workflow', lambda *args: True)
+    monkeypatch.setattr(app.inference_backend, 'run_workflow', run_workflow)
+    monkeypatch.setattr(m, 'model_uses_remote_backend', lambda *args: True)
+    monkeypatch.setattr(voice_check, 'relabel', relabel)
+    audio = tmp_path / 'a.wav'
+    soundfile.write(audio, np.zeros(16000 * 3, dtype=np.int16), 16000)
+    job = m.create_transcription_job(audio_file=str(audio), transcript_file=str(tmp_path / 'a.html'),
+                                     speaker_detection='auto', cli_mode=True)
+    job.transcription_model = ModelRef('lab', 'local-whisper/precise')
+    job.diarization_model = ModelRef('lab', 'local-nemotron/default')
+    app.queue.add_job(job)
+    app.transcription_worker()
+    assert job.status == m.JobStatus.FINISHED, job.error_message
+    assert [type(evidence).__name__ for evidence in seen] == ['Probabilities']
+    assert seen[0].labels == {'S00', 'S01'}
+
+
 # --- the CPU fallback covers Nemotron -------------------------------------
 
 def test_nemotron_retries_on_the_cpu_and_says_so(monkeypatch):

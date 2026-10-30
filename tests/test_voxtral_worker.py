@@ -1,10 +1,12 @@
-"""The Voxtral worker's queue contract, as `main.py` consumes it.
+"""The Voxtral worker's queue contract, as LocalInferenceBackend.run_transcription_worker
+consumes it.
 
-`voxtral_proc_entrypoint` is the spawn target the GUI talks to through one
-queue. The contract it must keep (see the worker's docstring): a finished run
-ends in `{"type": "result", "ok": True, "info": ...}`; any exception ends in
-`ok: False` with the exception's type and message in `error` and the traceback
-in `trace`, so the GUI can show one and log the other; `log` and `progress`
+`voxtral_proc_entrypoint` is the spawn target the local plugin runs, talking to
+it through one queue. The contract it must keep (see the worker's docstring): a
+finished run ends in `{"type": "result", "ok": True, "info": ...}`; any
+exception ends in `ok: False` with the fields of worker_errors.error_result --
+the message in `error`, the exception's type, the stage it failed in and the
+traceback in `trace` -- so the GUI can show one and log the other; `log` and `progress`
 puts that fail are swallowed, because losing a log line must not fail a job;
 but a `segment` put that fails is deliberately NOT swallowed -- a transcript
 silently truncated while the job reports success is worse than a failed job.
@@ -27,6 +29,11 @@ class _Queue:
         self.items.append(msg)
 
 
+def _events(q):
+    """What the worker sent, without its state messages (the stage it is in)."""
+    return [m for m in q.items if m.get("type") != "state"]
+
+
 def _fake_transcribe(segments=({"start": 0.0, "end": 1.0, "text": "hi", "words": None},)):
     def transcribe(**kw):
         kw["log_cb"]("info", "hello")
@@ -41,12 +48,14 @@ def test_ok_run_forwards_log_progress_segments_and_info(monkeypatch):
     monkeypatch.setattr(voxtral_engine, "transcribe", _fake_transcribe())
     q = _Queue()
     voxtral_mp_worker.voxtral_proc_entrypoint({"audio_path": "x.wav"}, q)
-    assert [m["type"] for m in q.items] == ["log", "progress", "segment", "result"]
-    assert q.items[0] == {"type": "log", "level": "info", "msg": "hello"}
-    assert q.items[1] == {"type": "progress", "pct": 42}
-    assert q.items[2]["segment"]["text"] == "hi"
-    assert q.items[3] == {"type": "result", "ok": True,
-                          "info": {"duration": 1.0, "language": "de"}}
+    items = _events(q)
+    assert [m["type"] for m in items] == ["log", "progress", "segment", "result"]
+    assert items[0] == {"type": "log", "level": "info", "msg": "hello"}
+    assert items[1] == {"type": "progress", "pct": 42}
+    assert items[2]["segment"]["text"] == "hi"
+    assert items[3] == {"type": "result", "ok": True,
+                        "info": {"duration": 1.0, "language": "de"}}
+    assert [m["stage"] for m in q.items if m["type"] == "state"] == ["imports", "transcription"]
 
 
 def test_exception_becomes_a_failed_result_with_type_and_trace(monkeypatch):
@@ -55,10 +64,12 @@ def test_exception_becomes_a_failed_result_with_type_and_trace(monkeypatch):
     monkeypatch.setattr(voxtral_engine, "transcribe", boom)
     q = _Queue()
     voxtral_mp_worker.voxtral_proc_entrypoint({"audio_path": "x.wav"}, q)
-    assert len(q.items) == 1
-    res = q.items[0]
+    items = _events(q)
+    assert len(items) == 1
+    res = items[0]
     assert res["type"] == "result" and res["ok"] is False
-    assert res["error"] == "ValueError: no such model"
+    assert res["error"] == "no such model" and res["exception_type"] == "builtins.ValueError"
+    assert res["stage"] == "transcription"
     assert "ValueError: no such model" in res["trace"]
 
 
@@ -66,7 +77,7 @@ def test_broken_log_and_progress_puts_do_not_fail_the_job(monkeypatch):
     monkeypatch.setattr(voxtral_engine, "transcribe", _fake_transcribe())
     q = _Queue(broken={"log", "progress"})
     voxtral_mp_worker.voxtral_proc_entrypoint({"audio_path": "x.wav"}, q)
-    assert [m["type"] for m in q.items] == ["segment", "result"]
+    assert [m["type"] for m in _events(q)] == ["segment", "result"]
     assert q.items[-1]["ok"] is True
 
 
@@ -75,7 +86,7 @@ def test_broken_segment_put_fails_the_job_instead_of_truncating(monkeypatch):
     q = _Queue(broken={"segment"})
     voxtral_mp_worker.voxtral_proc_entrypoint({"audio_path": "x.wav"}, q)
     assert q.items[-1]["type"] == "result" and q.items[-1]["ok"] is False
-    assert q.items[-1]["error"].startswith("OSError")
+    assert q.items[-1]["exception_type"] == "builtins.OSError"
 
 
 def test_args_are_passed_through_by_name(monkeypatch):
@@ -127,7 +138,11 @@ def test_hub_telemetry_is_off_before_the_engine_is_imported(inherited):
         from noScribe.voxtral_mp_worker import voxtral_proc_entrypoint
         q = queue.Queue()
         voxtral_proc_entrypoint({}, q)
-        print(q.get_nowait()["error"])
+        while True:
+            message = q.get_nowait()
+            if message["type"] == "result":
+                print(message["error"])
+                break
     """)
     env = dict(os.environ)
     env.pop("HF_HUB_DISABLE_TELEMETRY", None)

@@ -35,6 +35,7 @@ the entrypoint.
 """
 import os
 import sys
+import threading
 
 from .worker_errors import WorkerState
 
@@ -57,6 +58,50 @@ EXTENSION_KEY = "local-nemotron"
 
 # A worker without steps of its own reports its whole run under this name.
 PROGRESS_STEP = "diarization"
+
+# The model takes the whole recording in one call that reports nothing, 90 s
+# for 36 minutes of audio on a CPU and longer for longer recordings. A server
+# streams the worker's events to its client, and a reverse proxy cuts a stream
+# that stays silent past its idle timeout (nginx: 60 s), so the last progress
+# is sent again at this interval while the worker runs.
+KEEPALIVE_S = 15
+# The share of the progress bar the features take; the model has the rest.
+FEATURES_PCT = 20
+
+
+class Progress:
+    """Progress messages under PROGRESS_STEP: sent when they change and, as a
+    keep-alive, repeated every KEEPALIVE_S while the block runs."""
+
+    def __init__(self, q):
+        self.q, self.pct, self.stop = q, 0, threading.Event()
+        self.thread = threading.Thread(target=self._repeat, daemon=True)
+
+    def __call__(self, pct):
+        pct = int(pct)
+        if pct != self.pct:
+            self.pct = pct
+            self._send()
+
+    def _send(self):
+        try:
+            self.q.put({"type": "progress", "step": PROGRESS_STEP, "pct": self.pct})
+        except Exception:
+            pass
+
+    def _repeat(self):
+        while not self.stop.wait(KEEPALIVE_S):
+            self._send()
+
+    def __enter__(self):
+        self._send()
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        self.thread.join()
+        return False
 
 # A speaker counts as talking where the model's probability exceeds this: the
 # model card's and transformers' default, and what the measurement used.
@@ -131,7 +176,7 @@ def label(column):
     return f"SPEAKER_{int(column):02d}"
 
 
-def features(processor, audio, sample_rate, chunk_frames=60000, device="cpu"):
+def features(processor, audio, sample_rate, chunk_frames=60000, device="cpu", on_progress=None):
     """The model's input for a whole recording, as processor(audio) gives it, but
     computed ten minutes at a time: in one pass transformers' spectrogram took
     12.3 GB for a 4.8 h recording whose features are 0.9 GB. transformers keeps the
@@ -164,6 +209,8 @@ def features(processor, audio, sample_rate, chunk_frames=60000, device="cpu"):
             feats = torch.empty((1, valid + 1, part.shape[2]), dtype=part.dtype, device=device)
         feats[:, done:done + part.shape[1]] = part
         done += part.shape[1]
+        if on_progress:
+            on_progress(done / valid)
         start = processor.audio_chunk_start(done)
         end, first = start + processor.num_samples_per_audio_chunk, False
     tail = max(0, done - 16) * hop  # on the frame grid, and far enough back for the window and pre-emphasis
@@ -198,10 +245,7 @@ def nemotron_proc_entrypoint(args: dict, q):
         # environment enables telemetry for other apps.
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         # First: pyannote_mp_worker sets the OpenMP variables torch has to find at import.
-        from .pyannote_mp_worker import load_waveform, select_device
-        import numpy as np
-        import torch
-        from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+        from .pyannote_mp_worker import select_device
         try:
             from transformers.models import nemotron3_diarization  # noqa: F401
         except ImportError:
@@ -221,32 +265,9 @@ def nemotron_proc_entrypoint(args: dict, q):
         # and a new upload of the model cannot change results unannounced.
         offline = weights_on_disk()
         plog("debug", f"Loading Nemotron diarization from {source} on {device}")
-        q.put({"type": "progress", "step": PROGRESS_STEP, "pct": 0})
-        processor = AutoProcessor.from_pretrained(source, local_files_only=offline)
-
-        state.update('audio_loading')
-        waveform, sample_rate = load_waveform(audio_file)
-        audio = waveform[0].numpy()  # ToWav writes mono; a view, not a copy
-        del waveform
-        if sample_rate != processor.feature_extractor.sampling_rate:
-            raise RuntimeError(f"audio at {sample_rate} Hz, the model needs "
-                               f"{processor.feature_extractor.sampling_rate} Hz")
-        inputs = features(processor, audio, sample_rate, device=device)
-        del audio
-        # Loaded after the features, so it is not held through their peak.
-        model = AutoModelForAudioFrameClassification.from_pretrained(
-            source, local_files_only=offline).to(device).eval()
-        inputs = inputs.to(device, dtype=model.dtype)
-        # Offline mode: the whole recording in one call, cut into chunks with a
-        # speaker cache inside the model, so there is no length limit.
-        state.update('diarization')
-        with torch.inference_mode():
-            logits = model(**inputs).logits
-        mask = inputs.attention_mask
-        del inputs  # the whole recording's features, on the device
-        speaker_dicts = processor.extract_speaker_dict(logits, mask, threshold=THRESHOLD)[0]
-        probabilities = torch.sigmoid(logits[0].float()).cpu().numpy().astype(np.float16)
-        q.put({"type": "progress", "step": PROGRESS_STEP, "pct": 100})
+        with Progress(q) as progress:
+            speaker_dicts, probabilities = _diarize(source, offline, audio_file, device, state, progress)
+            progress(100)
         q.put({"type": "result", "ok": True, "segments": turns(speaker_dicts),
                "extensions": {EXTENSION_KEY: {"probabilities": encode_probabilities(
                    probabilities, [label(k) for k in range(probabilities.shape[1])])}}})
@@ -255,3 +276,39 @@ def nemotron_proc_entrypoint(args: dict, q):
             q.put(state.failure(e))
         except Exception:
             pass
+
+
+def _diarize(source, offline, audio_file, device, state, progress):
+    """The turns and the per-frame speaker probabilities of a recording, the
+    features reported as the first FEATURES_PCT of the progress."""
+    import numpy as np
+    import torch
+    from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+    from .pyannote_mp_worker import load_waveform
+
+    processor = AutoProcessor.from_pretrained(source, local_files_only=offline)
+    state.update('audio_loading')
+    waveform, sample_rate = load_waveform(audio_file)
+    audio = waveform[0].numpy()  # ToWav writes mono; a view, not a copy
+    del waveform
+    if sample_rate != processor.feature_extractor.sampling_rate:
+        raise RuntimeError(f"audio at {sample_rate} Hz, the model needs "
+                           f"{processor.feature_extractor.sampling_rate} Hz")
+    inputs = features(processor, audio, sample_rate, device=device,
+                      on_progress=lambda done: progress(done * FEATURES_PCT))
+    del audio
+    progress(FEATURES_PCT)
+    # Loaded after the features, so it is not held through their peak.
+    model = AutoModelForAudioFrameClassification.from_pretrained(
+        source, local_files_only=offline).to(device).eval()
+    inputs = inputs.to(device, dtype=model.dtype)
+    # Offline mode: the whole recording in one call, cut into chunks with a
+    # speaker cache inside the model, so there is no length limit.
+    state.update('diarization')
+    with torch.inference_mode():
+        logits = model(**inputs).logits
+    mask = inputs.attention_mask
+    del inputs  # the whole recording's features, on the device
+    speaker_dicts = processor.extract_speaker_dict(logits, mask, threshold=THRESHOLD)[0]
+    probabilities = torch.sigmoid(logits[0].float()).cpu().numpy().astype(np.float16)
+    return speaker_dicts, probabilities

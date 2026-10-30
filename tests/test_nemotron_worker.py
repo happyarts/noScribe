@@ -105,3 +105,51 @@ def test_hub_telemetry_is_off_before_transformers_is_imported(tmp_path, inherite
     proc = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert "telemetry='1'" in proc.stdout, proc.stdout
+
+
+def test_progress_is_repeated_while_the_model_runs(monkeypatch):
+    """The model's one call reports nothing for minutes on a long recording; a
+    server's stream that stays silent that long is cut by a proxy's idle timeout."""
+    import threading
+    monkeypatch.setattr(nw, "KEEPALIVE_S", 0.02)
+    sent, enough = [], threading.Event()
+
+    class Q:
+        def put(self, message):
+            sent.append(message["pct"])
+            if len(sent) >= 6:
+                enough.set()
+
+    with nw.Progress(Q()) as progress:
+        progress(5.7)
+        assert enough.wait(5)
+    assert sent[0] == 0 and sent[1] == 5 and set(sent[2:]) == {5}
+    count = len(sent)
+    import time
+    time.sleep(0.1)
+    assert len(sent) == count  # it stops with the block
+
+
+def test_the_worker_runs_through_the_plugin(tmp_path):
+    """The real worker and model, spawned by the shared local backend, on six
+    seconds of tone: the result passes the protocol, its probabilities decode at
+    the model's frame rate, and the progress ends at 100."""
+    if not nw.available():
+        pytest.skip("Nemotron's weights are not on this machine")
+    import soundfile as sf
+    from noScribe.inference import DiarizationRequest, LocalInferenceBackend
+    from noScribe.models import ModelRef
+    from noScribe.plugins.local_nemotron import LocalNemotronPlugin
+
+    rate = 16000
+    t = np.arange(rate * 6) / rate
+    tone = np.where(t < 3, np.sin(2 * np.pi * 180 * t), np.sin(2 * np.pi * 260 * t)) * 0.3
+    sf.write(tmp_path / "a.wav", (tone * 32767).astype(np.int16), rate)
+    progress = []
+    plugin = LocalNemotronPlugin(LocalInferenceBackend())
+    result = plugin.diarize(DiarizationRequest(str(tmp_path / "a.wav"), ModelRef("local-nemotron", "default")),
+                            on_progress=lambda step, pct: progress.append((step, pct)))
+    rows = nw.decode_probabilities(result.extensions[nw.EXTENSION_KEY]["probabilities"])
+    assert rows.shape[1] == 8 and abs(rows.shape[0] - 600) <= 2
+    assert progress[-1] == (nw.PROGRESS_STEP, 100)
+    assert all(segment.end_ms > segment.start_ms for segment in result)

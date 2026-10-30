@@ -187,7 +187,10 @@ def test_registry_routes_supported_atomic_workflow():
     assert result == "remote:same-name"
 
 
-def test_builtin_plugins_load_manifests_and_advertise_models():
+def test_builtin_plugins_load_manifests_and_advertise_models(monkeypatch):
+    # Voxtral offers its builds only on Apple Silicon with the MLX stack
+    # (tests/test_voxtral_plugin.py); here it offers none, whatever the machine.
+    monkeypatch.setattr("noScribe.plugins.local_voxtral.plugin._apple_silicon", lambda: False)
     registry = create_builtin_registry(
         {"precise": "models/precise", "custom": "models/custom"},
         LocalWorkerSettings(),
@@ -196,23 +199,18 @@ def test_builtin_plugins_load_manifests_and_advertise_models():
     manifests = {manifest.id: manifest for manifest in registry.list_plugins()}
     assert manifests["local-whisper"].execution.type is ExecutionType.BUILTIN
     assert manifests["local-pyannote"].execution.type is ExecutionType.BUILTIN
-    # The fork's own plugins: Voxtral offers models on Apple Silicon only, and
-    # Nemotron where transformers and librosa can run it, so the machine decides
-    # what they list.
     assert manifests["local-voxtral"].execution.type is ExecutionType.BUILTIN
     assert manifests["local-nemotron"].execution.type is ExecutionType.BUILTIN
-    upstream = ("local-whisper", "local-pyannote")
-    assert {str(model.ref) for model in registry.list_models("transcription")
-            if model.ref.backend_id in upstream} == {
+    assert {str(model.ref) for model in registry.list_models("transcription")} == {
         "local-whisper:precise",
         "local-whisper:custom",
     }
+    # Nemotron is offered where transformers and librosa can run it, so the
+    # machine decides whether it is listed.
     assert [
         str(model.ref) for model in registry.list_models("diarization")
-        if model.ref.backend_id in upstream
+        if model.ref.backend_id != "local-nemotron"
     ] == ["local-pyannote:default"]
-    assert {model.ref.backend_id for model in registry.list_models()} <= {
-        "local-whisper", "local-pyannote", "local-voxtral", "local-nemotron"}
 
 
 def test_external_worker_protocol_has_versioned_request_and_shared_events():

@@ -187,8 +187,27 @@ def _embed_spans(pipeline, waveform, sample_rate, spans, q):
 
 
 # The key this worker's own data travels under in DiarizationRequest and
-# DiarizationResult extensions: the plugin's backend ID.
+# DiarizationResult extensions: the plugin's backend ID (as
+# inference.LOCAL_DIARIZATION_BACKEND, spelled out so the worker stays
+# stdlib-only at import).
 EXTENSION_KEY = "local-pyannote"
+
+
+def _embed_device(requested, device):
+    """The device for the embed call: the CPU in place of an automatically
+    chosen MPS on a machine below EMBED_MPS_MIN_RAM_GB; a device the plugin's
+    settings name explicitly is used as named."""
+    if requested in (None, '', 'auto') and device == 'mps' and _ram_gb() < EMBED_MPS_MIN_RAM_GB:
+        return 'cpu'
+    return device
+
+
+def _valid_spans(spans):
+    """embed_spans as the worker accepts them: a list of [start_s, end_s]."""
+    return isinstance(spans, list) and all(
+        isinstance(span, (list, tuple)) and len(span) == 2
+        and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in span)
+        for span in spans)
 
 
 def select_device(requested):
@@ -287,6 +306,8 @@ def pyannote_proc_entrypoint(args: dict, q):
         audio_file = args.get("audio_path")
         num_speakers = args.get("num_speakers")
         embed_spans = ((args.get("extensions") or {}).get(EXTENSION_KEY) or {}).get("embed_spans")
+        if embed_spans is not None and not _valid_spans(embed_spans):
+            raise ValueError("embed_spans must be a list of [start_s, end_s] pairs")
         if not os.path.exists(audio_file):
             raise FileNotFoundError(audio_file)
 
@@ -303,8 +324,8 @@ def pyannote_proc_entrypoint(args: dict, q):
         # where 3 GB are to spare and not worth swapping for where they are not.
         # (torch.mps.empty_cache() holds the memory down but makes every call slower
         # than the CPU; the embeddings are the same either way.)
-        if embed_spans is not None and device == 'mps' and _ram_gb() < EMBED_MPS_MIN_RAM_GB:
-            device = 'cpu'
+        if embed_spans is not None:
+            device = _embed_device(args.get("device"), device)
 
         state.update('model_loading', device=device)
         with impres.as_file(impres.files("pyannote")) as mypath, hide_speechbrain():

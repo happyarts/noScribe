@@ -276,8 +276,6 @@ force_whisper_cpu = get_config_flag('force_whisper_cpu', False)
 
 PAUSE_OPTIONS = ['none', '1sec+', '2sec+', '3sec+']
 
-# The bundled transcription plugin beside Whisper.
-LOCAL_VOXTRAL_BACKEND = 'local-voxtral'
 # Diarization plugins that run on this machine and may retry on its CPU.
 LOCAL_DIARIZATION_BACKENDS = {LOCAL_DIARIZATION_BACKEND: 'pyannote', LOCAL_NEMOTRON_BACKEND: 'nemotron'}
 
@@ -502,17 +500,21 @@ def _job_speaker_setting(job: TranscriptionJob) -> str:
 
 
 def _model_ref(value: str, inference_backend=None) -> ModelRef:
-    """Accept a qualified ref or migrate a legacy bare local model ID: a renamed
-    model to its new name, and a Voxtral model, saved before the plugins, to the
-    plugin that offers it now (when the registry is given to ask)."""
+    """Accept a qualified ref or migrate a legacy bare local model ID. A bare ID
+    stays Whisper's wherever Whisper does not lack it; otherwise it names the
+    local plugin that offers it (when the registry is given to ask), so
+    `--model voxtral-mini-8bit` works as `--model precise` does."""
     if ':' in value:
         return ModelRef.parse(value)
-    value = RENAMED_MODELS.get(value, value)
+    value = RENAMED_MODELS.get(value, value)  # fork-only: builds renamed before the plugins
+    whisper = ModelRef(LOCAL_WHISPER_BACKEND, value)
     if inference_backend is not None:
-        for model in inference_backend.list_models('transcription'):
-            if model.ref.backend_id == LOCAL_VOXTRAL_BACKEND and model.ref.model_id == value:
-                return model.ref
-    return ModelRef(LOCAL_WHISPER_BACKEND, value)
+        offered = [model.ref for model in inference_backend.list_models('transcription')
+                   if model.ref.model_id == value
+                   and not model_uses_remote_backend(inference_backend, model.ref)]
+        if offered and whisper not in offered:
+            return offered[0]
+    return whisper
 
 
 def confirm_output_override(
@@ -606,7 +608,7 @@ def create_transcription_job(audio_file=None, transcript_file=None, start_time=N
     # Processing options with defaults
     speaker_setting = speaker_detection if speaker_detection is not None else 'auto'
     job.diarization_enabled = speaker_setting != 'none'
-    job.num_speakers = int(speaker_setting) if str(speaker_setting).isdigit() else None
+    job.num_speakers = _num_speakers(speaker_setting)
     # Hidden GUI names must not appear in job metadata when detection is off.
     job.speaker_names = parse_speaker_names(speaker_names) if job.diarization_enabled else []
     job.overlapping = bool(overlapping) if overlapping is not None else True
@@ -3525,9 +3527,7 @@ class App(ctk.CTk):
                                     continue
                                 raise
 
-                        # Nemotron has eight speaker channels and folds any further voice into them
-                        if diarization_engine == 'nemotron' and len({s.label for s in diarization}) >= 8:
-                            self.logn(t('nemotron_all_speakers'), 'highlight')
+                        self._say_if_all_channels_used(job, diarization)
 
                         if not remote_workflow_pending:
                             # write segments to log file
@@ -3678,7 +3678,9 @@ class App(ctk.CTk):
                     def detect_speech():
                         return get_speech_timestamps(
                             decode_audio(tmp_audio_file, sampling_rate=sampling_rate), vad_parameters)
-                    vad_future = ThreadPoolExecutor(max_workers=1).submit(detect_speech)
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    vad_future = executor.submit(detect_speech)
+                    executor.shutdown(wait=False)  # its thread ends with this one task
 
                     def adjust_for_pause(segment):
                         """Adjusts start and end of segment if it falls into a pause
@@ -3730,6 +3732,9 @@ class App(ctk.CTk):
                         first_segment = True
                         job.speaker_name_map = {}
                         job.has_partial_transcript = False
+                        # A server that retries the transcription streams it again
+                        # from the start; the first attempt must not be checked.
+                        voice_segments.clear()
 
                     # For noScribe.voice_check: every segment as streamed, with the
                     # speaker it was written under and whether it only inherited
@@ -4010,6 +4015,9 @@ class App(ctk.CTk):
                             )
                             else tmp_audio_file
                         )
+                        # Until the engine reports progress of its own, on_segment
+                        # moves the bar (here and on a server, for every job anew).
+                        self._engine_progress = False
                         if remote_workflow_pending:
                             remote_workflow_result = self._run_remote_workflow(
                                 transcription_audio,
@@ -4167,9 +4175,12 @@ class App(ctk.CTk):
 
     def _voice_evidence(self, diarization_result, job, tmp_audio_file, turns, short_label):
         """The voice check's second opinion, from what the diarization brought: a
-        model's own speaker probabilities (Nemotron), else pyannote's centroids,
-        against which the voice of every passage is then embedded. None without
-        either."""
+        model's own speaker probabilities (local-nemotron's, here or on a
+        server), else the speaker centroids a local diarization plugin returns
+        under its own backend ID (local-pyannote does), against which the voice
+        of every passage is then embedded by a second call to the same plugin.
+        None for centroids from a server, which that call would send the audio
+        to again, and for a diarization with neither."""
         extensions = getattr(diarization_result, 'extensions', None) or {}
         probabilities = (extensions.get(LOCAL_NEMOTRON_BACKEND) or {}).get('probabilities')
         if probabilities:
@@ -4180,10 +4191,10 @@ class App(ctk.CTk):
                 {short_label(label): column for column, label in enumerate(probabilities['columns'])
                  if short_label(label) in named},
                 probabilities['frame_s'])
-        # The embeddings come from the local pipeline, so only its own centroids compare.
-        if job.diarization_model.backend_id != LOCAL_DIARIZATION_BACKEND:
+        model = job.diarization_model
+        if model_uses_remote_backend(self.inference_backend, model):
             return None
-        centroids = (extensions.get(LOCAL_DIARIZATION_BACKEND) or {}).get('centroids') or {}
+        centroids = (extensions.get(model.backend_id) or {}).get('centroids') or {}
         return voice_check.Voice(
             {short_label(k): v for k, v in centroids.items()},
             lambda spans: self._run_voice_embeddings(tmp_audio_file, job, spans))
@@ -4191,13 +4202,15 @@ class App(ctk.CTk):
     def _run_voice_embeddings(self, tmp_audio_file: str, job, spans):
         """One speaker embedding per [start_s, end_s] span, for noScribe.voice_check.
 
-        A second, short call to the diarization worker: the embedding model lives
-        there, and the spans only exist once the transcript does. A failure stays
-        in the log file; the job does without the check."""
+        A second, short call to the diarization plugin, with `embed_spans` under
+        its backend ID: the embedding model lives in its worker, and the spans
+        only exist once the transcript does. A failure raises, and
+        run_voice_check() keeps it from costing the job."""
+        backend_id = job.diarization_model.backend_id
         request = DiarizationRequest(
             audio_path=tmp_audio_file,
             model=job.diarization_model,
-            extensions={LOCAL_DIARIZATION_BACKEND: {'embed_spans': spans}},
+            extensions={backend_id: {'embed_spans': spans}},
         )
 
         progress_open = False  # logr leaves its progress line without a line end
@@ -4227,7 +4240,7 @@ class App(ctk.CTk):
             )
         finally:
             close_progress()
-        return (result.extensions.get(LOCAL_DIARIZATION_BACKEND) or {}).get('embeddings') or []
+        return (result.extensions.get(backend_id) or {}).get('embeddings') or []
 
     def _handle_cuda_fallback(self, component: str, error: Exception, job: TranscriptionJob) -> bool:
         """Automatically retry the affected component once on CPU for this job."""
@@ -4288,8 +4301,6 @@ class App(ctk.CTk):
             extensions=({} if model_uses_remote_backend(self.inference_backend, job.transcription_model)
                         else _job_extension(job)),
         )
-        # Whether the engine reports its own progress (on_segment then leaves the bar alone)
-        self._engine_progress = False
 
         def mark_transcription_started() -> None:
             if job.status == JobStatus.WAITING_FOR_SERVER:
@@ -4362,7 +4373,7 @@ class App(ctk.CTk):
         on_reset=lambda: None,
     ):
         """Run diarization and transcription with one queued remote upload."""
-        name = {'nemotron': 'Nemotron'}.get(self._model_engine(job.diarization_model, 'pyannote'), 'PyAnnote')
+        name = self._diarization_name(job)
         request = InferenceWorkflowRequest(
             audio_path=tmp_audio_file,
             diarization=DiarizationRequest(
@@ -4393,7 +4404,9 @@ class App(ctk.CTk):
                     self.update_queue_table()
                     self.logn()
                     self.logn(t('start_transcription'), 'highlight')
-                    self.logn(t('loading_whisper'))
+                    self.logn(t('loading_voxtral'
+                                if self._model_engine(job.transcription_model, 'whisper') == 'voxtral'
+                                else 'loading_whisper'))
             elif event_type == 'status':
                 message_id = str(event.get('message_id') or '')
                 params = event.get('params') or {}
@@ -4441,11 +4454,13 @@ class App(ctk.CTk):
                     elif step == 'diarization':  # a worker without steps reports the whole
                         self.set_progress(2, percent, _job_speaker_setting(job))
                 elif operation == 'transcription':
+                    self._engine_progress = True
                     self.set_progress(3, percent, _job_speaker_setting(job))
 
         def receive_diarization(segments) -> None:
             offset = job.start if transcript_start is None else transcript_start
             diarization[:] = segments
+            self._say_if_all_channels_used(job, diarization)
             for segment in diarization:
                 line = f'{utils.ms_to_str(offset + segment.start_ms, include_ms=True)} - {utils.ms_to_str(offset + segment.end_ms, include_ms=True)} {segment.label}'
                 self.logn(line, where='file')
@@ -4459,6 +4474,17 @@ class App(ctk.CTk):
             is_cancelled=lambda: self.cancel,
         )
 
+    def _diarization_name(self, job) -> str:
+        """The diarization engine as the log names it."""
+        return {'nemotron': 'Nemotron'}.get(self._model_engine(job.diarization_model, 'pyannote'), 'PyAnnote')
+
+    def _say_if_all_channels_used(self, job, diarization) -> None:
+        """Nemotron has eight speaker channels and folds any further voice into
+        them, without knowing it; with all eight in use, say so."""
+        if (self._model_engine(job.diarization_model, 'pyannote') == 'nemotron'
+                and len({segment.label for segment in diarization}) >= 8):
+            self.logn(t('nemotron_all_speakers'), 'highlight')
+
     def _run_diarize_subprocess(self, tmp_audio_file: str, job):
         """Run the diarization plugin (Pyannote, Nemotron, a server) through the
         UI-independent backend."""
@@ -4467,7 +4493,7 @@ class App(ctk.CTk):
             model=job.diarization_model,
             num_speakers=job.num_speakers,
         )
-        name = {'nemotron': 'Nemotron'}.get(self._model_engine(job.diarization_model, 'pyannote'), 'PyAnnote')
+        name = self._diarization_name(job)
 
         def log_message(level: str, message: str) -> None:
             self.logn(f'{name}: ' + message, where='both' if level == 'info' else 'file')

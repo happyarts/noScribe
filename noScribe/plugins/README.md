@@ -19,9 +19,19 @@ plugins/
 │   ├── __init__.py
 │   ├── plugin.py
 │   └── backend.json
-└── local_pyannote/
+├── local_pyannote/
+│   ├── __init__.py
+│   ├── plugin.py
+│   └── backend.json
+├── local_voxtral/
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── settings.py
+│   └── backend.json
+└── local_nemotron/
     ├── __init__.py
     ├── plugin.py
+    ├── settings.py
     └── backend.json
 ```
 
@@ -208,7 +218,9 @@ selected recording range to lossless 16 kHz mono FLAC. The driver refuses other
 file extensions, preventing the existing WAV working file or an original
 video from being uploaded accidentally. When a selected remote profile also
 offers diarization, noScribe automatically uses that profile's diarization
-model; otherwise it falls back to local Pyannote.
+model, choosing among several by `diarization_engine` in `config.yml` (`auto`
+prefers Nemotron, except for a fixed number of speakers); otherwise it falls
+back to a local diarization plugin.
 
 ### Development dummy server
 
@@ -288,13 +300,42 @@ iteration and indexing for segment-only consumers. `None` means no diarization
 was performed; an empty result means it ran and found no segments. Desktop and
 server workflows pass the complete result as `TranscriptionRequest.diarization`
 to subsequent transcription. Workers may ignore this context. The built-in
-Whisper adapter sends it to the worker without changing Whisper inference.
+Whisper worker takes the turns of a `local-pyannote` diarization as its speech
+map, in place of Silero's voice activity (`whisper_mp_worker.speech_turns_from`).
 
 All timestamps refer to the supplied audio excerpt, without the desktop's
 transcript offset. Diarization uses milliseconds internally and in local worker
 messages, seconds on HTTP. Extension contents are never converted implicitly:
 plugins must document their units and speaker-label correspondence. Transport
 data, not server-local paths or Python/NumPy objects; use JSON-compatible values.
+
+The bundled plugins document their extensions here:
+
+- `local-pyannote`, result: `centroids`, `{label: [float, ...]}`, the
+  pipeline's own speaker centroid for each label of the result's segments
+  (labels as in the segments; a label without a usable centroid is left out).
+  Request: `embed_spans`, a list of `[start_s, end_s]` in seconds of the
+  supplied audio. With it, `diarize()` does not diarize: it returns no segments
+  and `embeddings`, one vector (or `None` where the span could not be
+  embedded) per span, in the same order, from the same embedding model as the
+  centroids. The desktop's voice check uses both.
+- `local-nemotron`, result: `probabilities`, the model's per-frame speaker
+  probabilities as `{"float16_base64", "shape": [rows, columns], "columns":
+  [label, ...], "frame_s"}`: rows of float16, one per `frame_s` seconds of the
+  supplied audio, one column per speaker channel, `columns` naming each
+  channel with the label the segments use. About 7.7 MB per hour of audio.
+  The desktop's voice check reads them instead of embedding voices.
+
+The desktop adds `extensions["noscribe"]` to every local transcription
+request: `needs_timing` (false when the transcript carries no times, no
+speakers and no pause marks) and `speaker_names` (the names the user entered,
+in order). A plugin may use them; `local-voxtral` skips its forced alignment
+without times and corrects the spelling of the names. They are not sent to a
+server, since one without queued workflows refuses extensions.
+
+A plugin may also offer `menu_hint(model) -> str`, text the model menu shows
+after the model's name and nowhere else; `local-voxtral` shows the RAM a build
+needs, with a warning sign where the machine has less.
 
 Queued HTTP tasks carry request extensions and optional externally computed
 diarization under `options`. A preceding server diarization takes precedence

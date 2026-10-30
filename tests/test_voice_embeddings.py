@@ -121,3 +121,82 @@ def test_memory_that_cannot_be_asked_about_counts_as_none(monkeypatch):
     the diarization ran."""
     monkeypatch.delattr(worker.os, "sysconf", raising=False)
     assert worker._ram_gb() == 0
+
+
+@pytest.mark.parametrize("requested, chosen, ram, expected", [
+    ("auto", "mps", 8, "cpu"),     # an automatic MPS below 16 GB embeds on the CPU
+    ("", "mps", 8, "cpu"),
+    (None, "mps", 8, "cpu"),
+    ("auto", "mps", 32, "mps"),
+    ("mps", "mps", 8, "mps"),      # a device the settings name is used as named
+    ("auto", "cuda", 8, "cuda"),
+])
+def test_the_embed_call_runs_on_the_cpu_only_in_place_of_an_automatic_mps(
+        monkeypatch, requested, chosen, ram, expected):
+    monkeypatch.setattr(worker, "_ram_gb", lambda: ram)
+    assert worker._embed_device(requested, chosen) == expected
+
+
+@pytest.mark.parametrize("spans, valid", [
+    ([[0.0, 1.0], [2, 3.5]], True),
+    ([], True),
+    ("0-1", False),
+    ([[0.0]], False),
+    ([[0.0, "1"]], False),
+    ([[True, 1.0]], False),
+])
+def test_embed_spans_are_checked_before_anything_is_loaded(spans, valid):
+    assert worker._valid_spans(spans) is valid
+
+
+def test_the_embeddings_come_back_through_the_plugin(monkeypatch):
+    """The real local backend runs the worker's reply through its loop:
+    DiarizationResult and the extension check keep the embeddings, None included."""
+    import queue
+    import threading
+    from noScribe import inference
+    from noScribe.inference import DiarizationRequest, LocalInferenceBackend
+    from noScribe.models import ModelRef
+
+    class Process:
+        def __init__(self, target, args):
+            self.thread = threading.Thread(target=target, args=args, daemon=True)
+            self.exitcode = 0
+
+        def start(self):
+            self.thread.start()
+
+        def is_alive(self):
+            return self.thread.is_alive()
+
+        def join(self, timeout=None):
+            self.thread.join(timeout)
+
+        def terminate(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Q(queue.Queue):
+        def close(self):
+            pass
+
+        def join_thread(self):
+            pass
+
+    seen = []
+
+    def fake_worker(args, q):
+        seen.append(args)
+        q.put({"type": "result", "ok": True, "segments": [],
+               "extensions": {worker.EXTENSION_KEY: {"embeddings": [[0.5, 0.25], None]}}})
+
+    monkeypatch.setattr(inference.mp, "get_context", lambda method: types.SimpleNamespace(Queue=Q, Process=Process))
+    monkeypatch.setattr(worker, "pyannote_proc_entrypoint", fake_worker)
+    request = DiarizationRequest("a.wav", ModelRef("local-pyannote", "default"),
+                                 extensions={worker.EXTENSION_KEY: {"embed_spans": [[0.0, 1.0], [1.0, 2.0]]}})
+    result = LocalInferenceBackend().diarize(request)
+    assert seen[0]["extensions"] == {worker.EXTENSION_KEY: {"embed_spans": [[0.0, 1.0], [1.0, 2.0]]}}
+    assert result.extensions[worker.EXTENSION_KEY]["embeddings"] == [[0.5, 0.25], None]
+    assert list(result) == []

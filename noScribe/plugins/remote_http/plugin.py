@@ -697,9 +697,11 @@ def _iter_lines(response):
     whatever has arrived, up to 64 kB, so lines still come as soon as they are
     sent, and each byte is looked at once. urllib3's errors are raised as
     requests' own, as iter_lines raises them, so a dropped connection or a
-    cancel still reaches the handlers that catch requests.RequestException."""
+    cancel still reaches the handlers that catch requests.RequestException;
+    so is the AttributeError a read raises once cancel() has closed the
+    response under it."""
     read1 = getattr(response.raw, "read1", None)
-    if read1 is None:  # urllib3 before 2.x
+    if read1 is None:  # a urllib3 without read1
         yield from response.iter_lines(chunk_size=1)
         return
     buffer = bytearray()
@@ -714,6 +716,10 @@ def _iter_lines(response):
             raise requests.exceptions.ConnectionError(error) from error
         except SSLError as error:
             raise requests.exceptions.SSLError(error) from error
+        except AttributeError as error:
+            if not getattr(response.raw, "closed", False):
+                raise
+            raise requests.exceptions.ConnectionError("the response was closed") from error
         if not data:
             break
         scan, start = len(buffer), 0

@@ -3,7 +3,7 @@
 Voxtral runs on MLX, so it is offered on Apple Silicon only, and has no device
 setting and no CUDA fallback. Besides the request's own fields it reads:
 
-- ``extensions["noscribe"]``, the job data main.py adds to every request:
+- ``extensions["noscribe"]``, the job data main.py adds to local requests:
   ``needs_timing`` (False when the output carries no times, which lets the
   engine skip the forced alignment) and ``speaker_names`` (whose spellings the
   engine corrects mis-heard names to).
@@ -86,7 +86,7 @@ class LocalVoxtralPlugin:
         try:
             from ... import voxtral_engine
             need = voxtral_engine.min_ram_gb(self._repo(model.ref.model_id))
-            mark = '' if need <= voxtral_engine._total_ram_gb() else '  ⚠'
+            mark = '' if need <= voxtral_engine.total_ram_gb() else '  ⚠'
             return f'{MENU_HINT_SEP}{need:.0f} GB RAM{mark}'
         except Exception as error:
             # The hint is a memory-safety cue, so its silent absence would be
@@ -96,6 +96,8 @@ class LocalVoxtralPlugin:
 
     def _repo(self, name: str) -> str:
         from ... import voxtral_engine
+        if name not in voxtral_engine.VOXTRAL_MODELS:
+            raise ValueError(f"Unknown Voxtral model: {name!r}")
         return voxtral_engine.resolve_model(name, voxtral_engine.VOXTRAL_MODELS[name])
 
     def transcribe(self, request, on_segment, *, on_log=None, on_status=None,
@@ -117,7 +119,7 @@ class LocalVoxtralPlugin:
         if request.include_disfluencies:
             # Voxtral has no prompt/hotword hook, so the disfluencies option
             # cannot steer it; say so instead of silently ignoring the setting.
-            status('voxtral_no_disfluencies', {}, 'debug')
+            status('voxtral_no_disfluencies', {}, 'info')  # the user chose an option it cannot honour
 
         args = {
             "audio_path": request.audio_path,

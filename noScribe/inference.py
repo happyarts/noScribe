@@ -334,7 +334,6 @@ class LocalInferenceBackend:
     ) -> TranscriptionInfo:
         from .whisper_mp_worker import whisper_proc_entrypoint
 
-        self._cancel_event.clear()
         if request.model.backend_id != LOCAL_WHISPER_BACKEND:
             raise ValueError(
                 f"Backend {request.model.backend_id!r} cannot be handled locally."

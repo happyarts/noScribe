@@ -248,6 +248,7 @@ def _workflow_server(retry=False, api_version=NOSCRIBE_HTTP_API_PROTOCOL_VERSION
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True  # a handler still writing to a stuck reader must not hold up the teardown
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -552,12 +553,18 @@ def test_a_broken_stream_raises_what_requests_raises():
     a connection dropped mid-stream must not escape as urllib3's own."""
     import pytest
     import requests
-    from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError
+    from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError, SSLError
 
     for raised, expected in ((ProtocolError("dropped"), requests.exceptions.ChunkedEncodingError),
                              (ReadTimeoutError(None, "/", "timed out"), requests.exceptions.ConnectionError),
-                             (DecodeError("gzip"), requests.exceptions.ContentDecodingError)):
+                             (DecodeError("gzip"), requests.exceptions.ContentDecodingError),
+                             (SSLError("handshake"), requests.exceptions.SSLError),
+                             # what a read raises once cancel() has closed the response
+                             (AttributeError("'NoneType' object has no attribute 'read1'"),
+                              requests.exceptions.ConnectionError)):
         class Raw:
+            closed = True
+
             def read1(self, amount, decode_content=True):
                 raise raised
 
@@ -569,19 +576,20 @@ def test_a_large_diarization_result_arrives_whole_and_in_time(tmp_path):
     """Speaker probabilities make a diarization result several MB long (Nemotron:
     about 7.7 MB per hour of audio). Read byte by byte, a line of 200 kB took
     27 s and this one did not arrive at all."""
-    import time
     audio_path = tmp_path / "audio.flac"
     audio_path.write_bytes(b"fLaC-workflow-audio")
     evidence = "A" * 8_000_000
     with _workflow_server(evidence=evidence) as (url, _received):
         plugin = RemoteHttpPlugin(_profile(url))
-        started = time.monotonic()
-        result = plugin.run_workflow(InferenceWorkflowRequest(
+        results = []
+        reader = threading.Thread(target=lambda: results.append(plugin.run_workflow(InferenceWorkflowRequest(
             str(audio_path),
             transcription=TranscriptionRequest(str(audio_path), ModelRef("ifs-server", "local-whisper/precise")),
             diarization=DiarizationRequest(str(audio_path), ModelRef("ifs-server", "local-pyannote/default")),
-        ))
-        took = time.monotonic() - started
+        ))), daemon=True)
+        reader.start()
+        reader.join(timeout=20)  # fails rather than hangs on a reader that is quadratic again
+        assert results, "the 8 MB event did not arrive within 20 s"
+        plugin.cancel()
         plugin.close()
-    assert result.diarization.extensions == {"test-backend": {"evidence": evidence}}
-    assert took < 20, f"{took:.1f} s"
+    assert results[0].diarization.extensions == {"test-backend": {"evidence": evidence}}

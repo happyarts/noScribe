@@ -1,22 +1,27 @@
 """
 Subprocess entry point for the Voxtral transcription backend.
 
-Mirrors the message protocol of `whisper_mp_worker` so the main app can consume
-segments the same way regardless of the chosen engine:
+Speaks the local worker protocol that LocalInferenceBackend.run_transcription_worker
+runs for every bundled transcription plugin, as `whisper_mp_worker` does:
 
     {"type": "log", "level": "info|warn|error|debug", "msg": str}
+    {"type": "state", "device": "mps", "stage": str}
     {"type": "progress", "pct": int}
     {"type": "segment", "segment": {"start","end","text","words"}}
     {"type": "result", "ok": True, "info": {...}}
-    {"type": "result", "ok": False, "error": str, "trace": str}
+    Failed results carry the structured fields of worker_errors.error_result.
 """
 
 import os
-import traceback
+
+from .worker_errors import WorkerState
 
 
 def voxtral_proc_entrypoint(args: dict, q):
+    # MLX runs on the Metal GPU, which torch calls mps.
+    state = WorkerState(q, None)
     try:
+        state.update('imports', device='mps')
         # huggingface_hub sends usage telemetry (library, versions) with its
         # requests unless told not to, and reads this switch once, when it is
         # imported. Keep noScribe processing local, even if the parent
@@ -42,6 +47,7 @@ def voxtral_proc_entrypoint(args: dict, q):
             # silently truncate the transcript and still report success.
             q.put({"type": "segment", "segment": seg})
 
+        state.update('transcription')
         # segment_cb streams each pass's segments as soon as it finishes, so
         # the GUI can display and autosave a partial transcript during long
         # files (and a cancel/crash loses at most the current pass).
@@ -74,11 +80,6 @@ def voxtral_proc_entrypoint(args: dict, q):
 
     except Exception as e:
         try:
-            q.put({
-                "type": "result",
-                "ok": False,
-                "error": f"{type(e).__name__}: {e}",
-                "trace": traceback.format_exc(),
-            })
+            q.put(state.failure(e))
         except Exception:
             pass

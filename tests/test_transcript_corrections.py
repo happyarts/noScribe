@@ -449,51 +449,6 @@ def test_split_point_lands_in_the_pause():
     assert 99.9 <= cut <= 100.6
 
 
-def _registry_with_voxtral():
-    """The real registry, with a Voxtral plugin that offers its models whatever
-    the machine (the real one offers them on Apple Silicon only)."""
-    from noScribe.inference import LocalWorkerSettings
-    from noScribe.models import ModelDescriptor, ModelRef
-    from noScribe.plugins.factory import create_builtin_registry
-
-    registry = create_builtin_registry({"precise": "models/precise"}, LocalWorkerSettings())
-    plugin = registry.get("local-voxtral")
-    plugin.list_models = lambda: [ModelDescriptor(
-        ref=ModelRef("local-voxtral", name), display_name=name, engine="voxtral",
-        capabilities=plugin.manifest.capabilities) for name in ("voxtral-mini-8bit", "voxtral-small-4bit")]
-    return registry
-
-
-def test_model_ram_hint_shows_in_the_menu_but_not_in_the_header():
-    """The menu shows the RAM a Voxtral model needs; the selection still finds
-    the model behind the decorated entry, and the transcript header and the
-    queue name it without the hint."""
-    from types import SimpleNamespace
-    import noScribe.main as m
-
-    app = SimpleNamespace(inference_backend=_registry_with_voxtral())
-    m._update_transcription_model_catalog(app)
-    label = app.transcription_model_labels["local-voxtral:voxtral-mini-8bit"]
-    assert label.startswith("voxtral-mini-8bit") and "GB RAM" in label
-    assert str(app.transcription_model_options[label].ref) == "local-voxtral:voxtral-mini-8bit"
-    assert app.transcription_model_names["local-voxtral:voxtral-mini-8bit"] == "voxtral-mini-8bit"
-    # Whisper models are shown unchanged.
-    assert app.transcription_model_labels["local-whisper:precise"] == "precise"
-
-
-def test_a_model_remembered_before_the_plugins_finds_its_plugin():
-    """config.yml and scripts named Voxtral models bare, as Whisper's are named;
-    such a name must find the Voxtral plugin, and a renamed model its new name,
-    instead of becoming a Whisper model that does not exist."""
-    import noScribe.main as m
-
-    registry = _registry_with_voxtral()
-    assert str(m._model_ref("voxtral-mini-8bit", registry)) == "local-voxtral:voxtral-mini-8bit"
-    assert str(m._model_ref("voxtral-small-8bit", registry)) == "local-voxtral:voxtral-small-4bit"
-    assert str(m._model_ref("precise", registry)) == "local-whisper:precise"
-    assert str(m._model_ref("local-voxtral:voxtral-mini-8bit")) == "local-voxtral:voxtral-mini-8bit"
-
-
 def test_model_too_large_for_the_machine_is_refused():
     """Starting a run that cannot fit does not fail loudly -- it swaps until
     nothing progresses. Refuse up front instead."""
@@ -546,7 +501,7 @@ def test_refusal_happens_before_the_model_is_loaded(monkeypatch, tmp_path):
 
 
 def test_pinned_chunk_sec_cannot_bypass_the_memory_ceiling(monkeypatch, tmp_path):
-    """A voxtral_chunk_sec pinned while experimenting with mini must not let a
+    """A chunk_sec pinned while experimenting with mini must not let a
     hungrier model run passes whose working set cannot fit (that run would swap
     forever, not fail) -- nor exceed the model-context cap on a huge machine."""
     import pytest
@@ -565,7 +520,7 @@ def test_pinned_chunk_sec_cannot_bypass_the_memory_ceiling(monkeypatch, tmp_path
                      chunk_sec=1500, need_timestamps=False,
                      log_cb=lambda lvl, msg: warnings.append((lvl, msg)))
     # 6-bit small on 32 GB: hard ceiling (32-6-20.9)/0.0135 = 377s
-    assert any(lvl == "warn" and "voxtral_chunk_sec" in msg and "377" in msg
+    assert any(lvl == "warn" and "chunk_sec=" in msg and "377" in msg
                for lvl, msg in warnings)
     # a model that cannot fit at all is refused even with a pinned length
     monkeypatch.setattr(v, "_total_ram_gb", lambda: 16.0)
@@ -584,7 +539,7 @@ def test_pinned_chunk_sec_cannot_bypass_the_memory_ceiling(monkeypatch, tmp_path
                          chunk_sec=seconds, need_timestamps=False,
                          log_cb=lambda lvl, msg: warnings.append((lvl, msg)))
         return [msg for lvl, msg in warnings
-                if lvl == "warn" and "voxtral_chunk_sec" in msg]
+                if lvl == "warn" and "chunk_sec=" in msg]
 
     msgs = pin(2400)
     assert any(str(v.TRUSTED_CHUNK_SEC) in m and "measured" in m for m in msgs), msgs

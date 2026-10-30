@@ -111,8 +111,8 @@ TRUSTED_CHUNK_SEC = 600
 #
 # Measured on a 32 GB M1 Max: a 21.8 GB pass ran with 2.7 GB still free, and a
 # 26.4 GB pass completed as well, so 7 GB is defensible while leaving room for
-# the aligner. Users who free up the machine can go further via the config key
-# `voxtral_ram_reserve_gb`, which buys noticeably longer passes for the memory
+# the aligner. Users who free up the machine can go further via `ram_reserve_gb`
+# in plugin-settings/local-voxtral.yml, which buys noticeably longer passes for the memory
 # hungry builds (6-bit small: 229 s at 8 GB, 304 s at 7, 378 s at 6).
 RAM_RESERVE_GB = 7
 # Below this much free memory a run does not just get slow, it stops progressing:
@@ -483,6 +483,12 @@ def _total_ram_gb():
             return psutil.virtual_memory().total / 1024**3
         except Exception:
             return 16.0  # conservative default
+
+
+def total_ram_gb():
+    """Installed RAM in GB, the figure the engine sizes its passes by; for the
+    local-voxtral plugin's menu hint."""
+    return _total_ram_gb()
 
 
 def _auto_chunk_sec(repo, log_cb=None, ram_reserve_gb=None):
@@ -3312,7 +3318,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
     if not chunk_sec or chunk_sec <= 0:
         chunk_sec = _auto_chunk_sec(repo, log_cb, ram_reserve_gb)
     else:
-        # A pinned voxtral_chunk_sec must not bypass the safety nets (it may
+        # A pinned chunk_sec must not bypass the safety nets (it may
         # well predate a switch to a hungrier model). It may exceed the *auto*
         # length -- that one holds back the configurable reserve, and pinning
         # is the documented way to trade that reserve for context -- but
@@ -3331,7 +3337,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
             # never finishes). The automatic path floors at HARD_MIN_CHUNK_SEC;
             # a pinned value must not be able to duck under it either.
             _log(log_cb, "warn",
-                 f"voxtral_chunk_sec={pinned:g}s is below the "
+                 f"chunk_sec={pinned:g}s is below the "
                  f"{HARD_MIN_CHUNK_SEC}s minimum; using {HARD_MIN_CHUNK_SEC}s.")
             chunk_sec = HARD_MIN_CHUNK_SEC
         elif chunk_sec < pinned:
@@ -3348,7 +3354,7 @@ def transcribe(audio_path, language="de", need_timestamps=True,
                 what = ("a longer window than Voxtral has been measured on "
                         f"({TRUSTED_CHUNK_SEC}s)")
             _log(log_cb, "warn",
-                 f"voxtral_chunk_sec={pinned:.0f}s would need {what}; "
+                 f"chunk_sec={pinned:.0f}s would need {what}; "
                  f"using {chunk_sec}s.")
 
     quant = _quant_summary(repo)

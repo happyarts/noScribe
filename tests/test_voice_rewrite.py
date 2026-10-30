@@ -61,7 +61,7 @@ def build(self, job, d, main_body, diarization, diarization_result, tmp_audio_fi
         return on_segment(TranscriptionSegment.from_mapping(segment), *args)
 
     return (write, check_voices, run_voice_check, voice_segments, (lambda: first_segment),
-            (lambda: d))
+            (lambda: d), reset_transcript)
 '''
 
 
@@ -79,16 +79,25 @@ def _lift():
     return HARNESS.format(lifted='\n\n'.join(bodies))
 
 
+class Registry:
+    """Says which backends are a server: any whose ID does not start with local-."""
+
+    def get(self, backend_id):
+        from noScribe.plugins.manifest import ExecutionType
+        kind = ExecutionType.BUILTIN if backend_id.startswith('local-') else ExecutionType.REMOTE
+        return types.SimpleNamespace(manifest=types.SimpleNamespace(execution=types.SimpleNamespace(type=kind)))
+
+
 class FakeApp:
     """What the closures ask of `self`."""
     cancel = False
-
     _engine_progress = False  # Whisper: the segments are the progress
 
     def __init__(self, voice_at):
         from noScribe.main import App
         self._apply_speaker_name = types.MethodType(App._apply_speaker_name, self)
         self._voice_evidence = types.MethodType(App._voice_evidence, self)
+        self.inference_backend = Registry()
         self.voice_at, self.logged, self.saved = voice_at, [], []
         self.in_file = []  # what reaches the log file
 
@@ -150,12 +159,12 @@ def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True, 
              'TranscriptionSegment': TranscriptionSegment, 'DiarizationSegment': DiarizationSegment,
              '_segment_dict': _segment_dict}
     exec(compile(_lift(), str(MAIN), 'exec'), scope)
-    on_segment, check_voices, run_voice_check, voice_segments, first_segment, document = scope['build'](
+    on_segment, check_voices, run_voice_check, voice_segments, first_segment, document, reset = scope['build'](
         app, job, d, main_body, list(segments), diarization_result, 'audio.wav')
     return types.SimpleNamespace(app=app, job=job, scope=scope, on_segment=on_segment,
                                  check_voices=check_voices, run_voice_check=run_voice_check,
                                  voice_segments=voice_segments, document=document,
-                                 first_segment=first_segment)
+                                 first_segment=first_segment, reset_transcript=reset)
 
 
 def conversation(rnd):
@@ -436,17 +445,20 @@ def test_stop_during_the_check_ends_the_check_and_not_the_job():
     assert 'voice_check_canceled\n' in h.app.logged and 'voice_check_skipped\n' not in h.app.logged
 
 
-def _embed(replay):
+def _embed(replay, cpu_fallback=False):
     """Run the real App._run_voice_embeddings against a registry whose diarize
     calls back as `replay(callbacks)` does; returns what was logged, as (text,
     where) pairs, and the error raised, if any."""
     import noScribe.main as m
+    from noScribe.inference import DiarizationResult
 
     class Registry:
         def diarize(self, request, **callbacks):
             assert request.extensions == {m.LOCAL_DIARIZATION_BACKEND: {'embed_spans': [[0.0, 1.0]]}}
+            # a job that fell back to the CPU embeds there too
+            assert callbacks.pop('device_override', None) == ('cpu' if cpu_fallback else None)
             replay(callbacks)
-            return m.DiarizationResult((), {m.LOCAL_DIARIZATION_BACKEND: {'embeddings': [[1.0]]}})
+            return DiarizationResult((), {m.LOCAL_DIARIZATION_BACKEND: {'embeddings': [[1.0]]}})
 
     logged = []
     app = types.SimpleNamespace(cancel=False, inference_backend=Registry())
@@ -454,12 +466,34 @@ def _embed(replay):
     app.logn = lambda txt='', *a, where='both', **k: logged.append((f'{txt}\n', where))
     app.logr = lambda txt='', *a, where='both', **k: logged.append((txt, where))
     job = types.SimpleNamespace(diarization_model=m.ModelRef(m.LOCAL_DIARIZATION_BACKEND, 'default'),
-                                pyannote_cpu_fallback=False)
+                                pyannote_cpu_fallback=cpu_fallback)
     try:
         assert m.App._run_voice_embeddings(app, 'audio.wav', job, [[0.0, 1.0]]) == [[1.0]]
         return logged, None
     except Exception as err:
         return logged, err
+
+
+def test_a_job_that_fell_back_to_the_cpu_embeds_there_too():
+    for fallback in (False, True):
+        logged, error = _embed(lambda callbacks: None, cpu_fallback=fallback)
+        assert error is None, error
+
+
+def test_a_retried_transcription_is_checked_once():
+    """A server that retries the transcription streams it again from the start,
+    and the job resets the transcript (reset_transcript). The first attempt's
+    segments went on into the check, and a rewrite wrote their text twice."""
+    turns, segments = two_people()
+    h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
+    h.on_segment(segments[0])         # attempt 1, cut short
+    h.reset_transcript()              # the server's retry
+    for segment in segments:          # attempt 2
+        h.on_segment(segment)
+    assert len(h.voice_segments) == 2
+    h.check_voices()
+    assert [text.split(':')[0] for text in paragraphs(h)] == ['S00', 'S01']
+    assert ' '.join(paragraphs(h)).count('Does it help?') == 1
 
 
 def test_a_message_after_a_progress_line_starts_a_line_of_its_own():
@@ -478,7 +512,8 @@ def test_a_message_after_a_progress_line_starts_a_line_of_its_own():
         raise RuntimeError('no span could be embedded')
 
     for replay in (progress, then_log, then_fail):
-        logged, _ = _embed(replay)
+        logged, error = _embed(replay)
+        assert (error is None) == (replay is not then_fail), error
         at = [text for text, _ in logged].index('voice_check: 100%')
         assert logged[at + 1] == ('\n', 'both'), logged
 

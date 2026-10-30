@@ -180,3 +180,127 @@ def test_the_shared_worker_loop_runs_voxtrals_arguments(tmp_path, monkeypatch):
     assert "device" not in seen[0]
     assert [segment.text for segment in segments] == [" Hallo"] and progress == [50.0]
     assert info.language == "de" and info.duration == 1.0
+
+
+# --- the model menu and saved choices -----------------------------------------
+
+def _registry_with_voxtral(names=("voxtral-mini-8bit", "voxtral-small-4bit")):
+    """The real registry, with a Voxtral plugin that offers `names` whatever
+    the machine (the real one offers its builds on Apple Silicon only)."""
+    from noScribe.inference import LocalWorkerSettings
+    from noScribe.models import ModelDescriptor
+    from noScribe.plugins.factory import create_builtin_registry
+
+    registry = create_builtin_registry({"precise": "models/precise"}, LocalWorkerSettings())
+    plugin = registry.get("local-voxtral")
+    plugin.list_models = lambda: [ModelDescriptor(
+        ref=ModelRef("local-voxtral", name), display_name=name, engine="voxtral",
+        capabilities=plugin.manifest.capabilities) for name in names]
+    return registry
+
+
+def test_model_ram_hint_shows_in_the_menu_but_not_in_the_header():
+    """The menu shows the RAM a Voxtral model needs; the selection still finds
+    the model behind the decorated entry, and the transcript header and the
+    queue name it without the hint."""
+    m = pytest.importorskip("noScribe.main")
+    app = SimpleNamespace(inference_backend=_registry_with_voxtral())
+    m._update_transcription_model_catalog(app)
+    label = app.transcription_model_labels["local-voxtral:voxtral-mini-8bit"]
+    assert label.startswith("voxtral-mini-8bit") and "GB RAM" in label
+    assert str(app.transcription_model_options[label].ref) == "local-voxtral:voxtral-mini-8bit"
+    assert app.transcription_model_names["local-voxtral:voxtral-mini-8bit"] == "voxtral-mini-8bit"
+    # Whisper models are shown unchanged.
+    assert app.transcription_model_labels["local-whisper:precise"] == "precise"
+
+
+def test_a_bare_model_name_finds_the_local_plugin_that_offers_it():
+    """`--model voxtral-mini-8bit` works as `--model precise` does; a name
+    Whisper offers stays Whisper's, even where another plugin offers it too."""
+    m = pytest.importorskip("noScribe.main")
+    registry = _registry_with_voxtral(("voxtral-mini-8bit", "precise"))
+    assert str(m._model_ref("voxtral-mini-8bit", registry)) == "local-voxtral:voxtral-mini-8bit"
+    assert str(m._model_ref("precise", registry)) == "local-whisper:precise"
+    assert str(m._model_ref("unknown", registry)) == "local-whisper:unknown"
+    assert str(m._model_ref("local-voxtral:voxtral-mini-8bit")) == "local-voxtral:voxtral-mini-8bit"
+
+
+def test_voxtral_offers_its_builds_where_it_can_run_them(tmp_path, monkeypatch):
+    from noScribe import voxtral_engine
+    from noScribe.plugins.local_voxtral import plugin as module
+    plugin, _ = voxtral(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "_apple_silicon", lambda: True)
+    monkeypatch.setattr(voxtral_engine, "is_available", lambda: True)
+    models = plugin.list_models()
+    assert {model.ref.model_id for model in models} == set(voxtral_engine.VOXTRAL_MODELS)
+    assert all(model.ref.backend_id == "local-voxtral" and model.engine == "voxtral"
+               and "transcription" in model.capabilities for model in models)
+    monkeypatch.setattr(voxtral_engine, "is_available", lambda: False)
+    assert plugin.list_models() == []
+
+
+def test_an_unknown_model_is_refused_as_a_value_error(tmp_path, monkeypatch):
+    plugin, host = voxtral(tmp_path, monkeypatch)
+    plugin._repo = LocalVoxtralPlugin._repo.__get__(plugin)
+    with pytest.raises(ValueError):
+        plugin._repo("voxtral-unknown")
+
+
+# --- the worker's failures and the progress bar -------------------------------
+
+def test_a_failing_worker_reports_where_it_failed(monkeypatch):
+    """Through worker_errors.error_result, as every local worker does: the user
+    sees the stage and the device, not "stage=unknown, device=unknown"."""
+    from noScribe import voxtral_engine, voxtral_mp_worker
+    from noScribe.plugins.protocol import validate_worker_event
+
+    def fail(**kwargs):
+        raise MemoryError("the pass did not fit")
+
+    monkeypatch.setattr(voxtral_engine, "transcribe", fail)
+    sent = []
+    voxtral_mp_worker.voxtral_proc_entrypoint({"audio_path": "a.wav"}, SimpleNamespace(put=sent.append))
+    result = sent[-1]
+    validate_worker_event(result)
+    assert result["ok"] is False and result["stage"] == "transcription" and result["device"] == "mps"
+    assert result["exception_type"] == "builtins.MemoryError"
+    error = WorkerError(result)
+    assert "stage=transcription" in str(error) and not error.allows_cpu_retry
+
+
+def test_the_bar_follows_the_segments_again_after_a_voxtral_job(tmp_path, monkeypatch):
+    """Voxtral reports progress of its own, and on_segment then leaves the bar
+    alone. A Whisper job on a server after it, which reports none, must move the
+    bar by its segments again."""
+    m = pytest.importorskip("noScribe.main")
+    soundfile = pytest.importorskip("soundfile")
+    import numpy as np
+    from noScribe.inference import InferenceWorkflowResult, TranscriptionInfo, TranscriptionSegment
+    monkeypatch.setattr(m, "config_dir", str(tmp_path))
+    monkeypatch.setattr(m, "config", {})
+    monkeypatch.setattr(m, "get_speech_timestamps", lambda *args: [])
+    app = m.HeadlessApp()
+    for name in ("log", "logn", "logr", "update_queue_table", "update_queue_controls"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: None)
+    bar = []
+    monkeypatch.setattr(app, "set_progress", lambda step, value, *args: bar.append((step, value)))
+
+    def run_workflow(request, **callbacks):
+        callbacks["on_diarization_result"](DiarizationResult((DiarizationSegment(0, 3000, "SPEAKER_00"),)))
+        callbacks["on_transcription_segment"](TranscriptionSegment(0.2, 1.5, " Hallo"))
+        return InferenceWorkflowResult(transcription_info=TranscriptionInfo())
+
+    monkeypatch.setattr(app.inference_backend, "supports_workflow", lambda *args: True)
+    monkeypatch.setattr(app.inference_backend, "run_workflow", run_workflow)
+    monkeypatch.setattr(m, "model_uses_remote_backend", lambda *args: True)
+    app._engine_progress = True  # as a Voxtral job before it leaves it
+    audio = tmp_path / "a.wav"
+    soundfile.write(audio, np.zeros(16000 * 3, dtype=np.int16), 16000)
+    job = m.create_transcription_job(audio_file=str(audio), transcript_file=str(tmp_path / "a.html"),
+                                     speaker_detection="auto", cli_mode=True)
+    job.transcription_model = ModelRef("lab", "local-whisper/precise")
+    job.diarization_model = ModelRef("lab", "local-pyannote/default")
+    app.queue.add_job(job)
+    app.transcription_worker()
+    assert job.status == m.JobStatus.FINISHED, job.error_message
+    assert (3, 50) in bar  # 1.5 s of 3 s

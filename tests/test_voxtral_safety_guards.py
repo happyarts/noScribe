@@ -106,7 +106,7 @@ def test_a_sane_pinned_chunk_sec_is_left_alone(monkeypatch, tmp_path):
     """Counter-check: a usable value must not trigger a warning."""
     logs = _sized(monkeypatch, tmp_path, chunk_sec=600,
                   voxtral_repo="models/voxtral-mini-8bit")
-    assert not any(lvl == "warn" and "voxtral_chunk_sec" in msg
+    assert not any(lvl == "warn" and "chunk_sec=" in msg
                    for lvl, msg in logs), logs
 
 

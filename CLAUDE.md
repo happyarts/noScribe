@@ -206,11 +206,12 @@ changing a number, and check whether a test in `tests/` pins it.
 ## The Voxtral pull request
 
 **State on 2026-10-30:** `main` carries upstream's plugin architecture (#377) with Voxtral and
-Nemotron as bundled plugins. #351, Voxtral and Nemotron were rebuilt on it as local branches
-`rebuild/voice-verified-speakers`, `rebuild/nemotron-diarization` and `rebuild/voxtral-engine`
-(the old tips are tagged `backup/*-pre-plugins`) and merged into `main`; they replace the
-`feature/*` branches once pushed. #361 and #362 are still built for the pre-plugin `main.py`,
-so `tools/check_local_current.py` reports their lines as missing until they are rebuilt too.
+Nemotron as bundled plugins. All five PR branches were rebuilt on it as local branches
+`rebuild/voice-verified-speakers`, `rebuild/nemotron-diarization`, `rebuild/voxtral-engine`,
+`rebuild/whisper-speech-map` and `rebuild/silero-beside-worker` (the old tips are tagged
+`backup/*-pre-plugins`), reviewed, and merged into `main`; they replace the `feature/*` and
+`fix/*` branches once pushed. Fork-only migrations (the renamed `voxtral-small-8bit`, the
+`voxtral_*` keys in config.yml) live on `main` alone, with `tests/test_fork_migrations.py`.
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
 `feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review; rebased with the other open branches onto upstream 0.8 on 2026-10-05, each now carrying its own adaptations of upstream's tests, and again on 2026-10-06 onto upstream's `av<19` pin) from `upstream/main` plus `main`'s

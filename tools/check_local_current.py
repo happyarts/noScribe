@@ -34,41 +34,22 @@ NOISE = re.compile(r"^[\s)\](}#*=/-]*$")
 # gibt, deshalb kann eine Branch-Zeile hier zu Recht anders lauten. Jede
 # Ausnahme braucht eine Begründung, sonst verdeckt sie echte Drift.
 INTENTIONAL = {
-    # fix/whisper-speech-map-from-diarization reicht die Diarisierung an Whisper;
-    # lokal nur pyannotes (Nemotrons kurze Turns kosten auf Deutsch Woerter), und
-    # lokal ohne `info =`, weil main das _Info-Objekt nicht zurueckgibt.
-    "info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment, diarization)":
-        "lokal mit Nemotron-Sperre und ohne info-Rueckgabe",
-    "Returns a simple info object (duration at least). With a diarization,":
-        "lokal ohne info-Rueckgabe (Docstring beginnt die Zeile anders)",
-    # feature/voxtral-engine kennt den Diarisierungs-Parameter noch nicht; lokal
-    # nimmt Whisper sie als Sprachkarte (fix/whisper-speech-map-from-diarization).
-    "def _run_whisper_subprocess_stream(self, tmp_audio_file: str, job, on_segment):":
-        "lokal mit diarization=None (Sprachkarte aus der Diarisierung)",
     # feature/voice-verified-speakers fuegt voice_check an; lokal steht ctc_align
-    # mit in derselben Zeile.
+    # (Voxtral) mit in derselben Zeile, und der Voxtral-Branch ohne voice_check.
     '_SUBMODULES = ("main", "audio", "exception", "transcription", "utils", "voice_check")':
         "lokal um ctc_align erweitert",
-    # feature/nemotron-diarization fuegt seinen Worker als vierten an; lokal
-    # stehen alle vier in der Liste, die der Voxtral- und der Nemotron-Branch je
-    # nur um ihren eigenen Worker erweitern.
-    '# All three are ctx.Process targets, so all are re-imported in a spawn child.':
-        "lokal vier Worker (Nemotron dazu), Kommentar wie im Nemotron-Branch",
-    '"noScribe.voxtral_mp_worker"]':
-        "lokal folgt nemotron_mp_worker in derselben Zeile",
-    'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker", "noScribe.nemotron_mp_worker"]':
-        "lokal um voxtral_mp_worker erweitert, auf zwei Zeilen",
-    # Der Branch traegt weder voice_check noch die lokalen .gitignore-Eintraege.
     '_SUBMODULES = ("main", "audio", "ctc_align", "exception", "transcription", "utils")':
         "lokal zusaetzlich mit voice_check",
+    # Jeder Branch traegt seinen Worker in WORKER_MODULES ein; lokal stehen alle.
+    '"noScribe.voxtral_mp_worker"]':
+        "lokal folgt nemotron_mp_worker in derselben Zeile",
+    # Der Voxtral-Branch traegt die lokalen .gitignore-Eintraege nicht.
     '# with tools/quantize_voxtral.py).':
         "lokal geht der Kommentar mit Audiotest/ und venv/ weiter",
-    # Das Test-Harness der Stimmpruefung: lokal liegen zwischen den Zeilen des
-    # Branches vad_future (fix/silero-beside-worker) und is_voxtral (Voxtral-Satz).
+    # Das Test-Harness der Stimmpruefung: lokal laeuft Silero neben dem Worker
+    # (fix/silero-beside-worker), das Harness reicht deshalb vad_future.
     "'speech_chunks': [], 'traceback': traceback, 'get_config': lambda key, default=None: default,":
-        "lokal mit vad_future statt speech_chunks (fix/silero-beside-worker)",
-    "'transcript_start': 0}  # where the converted audio starts in the media":
-        "lokal folgt is_voxtral, die Zeile endet mit einem Komma",
+        "lokal mit vad_future statt speech_chunks",
     # Seit dem Umbau auf die Plugins (2026-10-30): was der Voxtral- und der
     # Nemotron-Branch je fuer ihr eigenes Plugin sagen, sagt main fuer beide.
     '# The engine behind the speakers, for the header and the log':
@@ -87,20 +68,14 @@ INTENTIONAL = {
         "lokal ein Docstring fuer beide *_defaults",
     "the desktop's older config.yml entries do for Whisper and Pyannote above.\"\"\"":
         "lokal geht der Docstring mit dem Korrekturen-Verzeichnis weiter",
-    # tests/test_plugins.py: jeder Branch nimmt nur sein Plugin aus dem
-    # Vergleich mit upstreams Modellen, main beide.
-    '# Nemotron is offered where transformers and librosa can run it, so the':
-        "lokal ein Kommentar fuer beide Plugins",
-    '# Voxtral offers its builds on Apple Silicon with the MLX stack only, so the':
-        "lokal ein Kommentar fuer beide Plugins",
-    '# machine decides whether it is listed.':
-        "lokal ein Kommentar fuer beide Plugins",
-    '# machine decides whether they are listed.':
-        "lokal ein Kommentar fuer beide Plugins",
-    'if model.ref.backend_id != "local-nemotron"':
-        "lokal: in upstream (whisper, pyannote)",
-    'if model.ref.backend_id != "local-voxtral"} == {':
-        "lokal: in upstream (whisper, pyannote)",
+    '└── local_voxtral/':
+        "lokal folgt local_nemotron im Verzeichnisbaum der Plugin-README",
+    # Lokal gelten die aelteren voxtral_*-Schluessel in config.yml weiter
+    # (fork-only, tests/test_fork_migrations.py); VOXTRAL.md sagt es.
+    'instead — that is the knob the automatic length is computed against. Raising':
+        "lokal mit dem Satz zu den aelteren config.yml-Schluesseln",
+    'it past 10 minutes is refused — see the cap above.':
+        "lokal mit dem Satz zu den aelteren config.yml-Schluesseln",
 }
 
 
