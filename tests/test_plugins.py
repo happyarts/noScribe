@@ -196,7 +196,11 @@ def test_builtin_plugins_load_manifests_and_advertise_models():
     manifests = {manifest.id: manifest for manifest in registry.list_plugins()}
     assert manifests["local-whisper"].execution.type is ExecutionType.BUILTIN
     assert manifests["local-pyannote"].execution.type is ExecutionType.BUILTIN
-    assert {str(model.ref) for model in registry.list_models("transcription")} == {
+    assert manifests["local-voxtral"].execution.type is ExecutionType.BUILTIN
+    # Voxtral offers its builds on Apple Silicon with the MLX stack only, so the
+    # machine decides whether they are listed.
+    assert {str(model.ref) for model in registry.list_models("transcription")
+            if model.ref.backend_id != "local-voxtral"} == {
         "local-whisper:precise",
         "local-whisper:custom",
     }
