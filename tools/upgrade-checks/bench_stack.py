@@ -19,8 +19,11 @@ Determinism digests catch silent numeric changes; timings catch perf
 regressions. Results land in bench_<label>.json beside this script.
 Functional gate on top: run the full pytest suite before and after.
 
-The audio (speech_60s.wav, bench_4min.wav) is a real recording and stays out of
-git, in benchmarks-local/ or the directory NOSCRIBE_BENCH_AUDIO names; so does
+The audio stays out of git: speech_60s.wav is a minute of a real recording,
+bench_4min.wav a real 26-second clip looped nine times (good for comparing
+versions, which see the same input; no measure of transcript quality -- Voxtral
+answers it with a sentence about the repetition instead of a transcript). Both
+live in benchmarks-local/ or the directory NOSCRIBE_BENCH_AUDIO names; so does
 voxtral_60s_text.txt, the transcript written there for eyeball diffs.
 """
 import hashlib

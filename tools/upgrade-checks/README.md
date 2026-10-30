@@ -15,8 +15,10 @@ JSON is `bench_<label>.json` here.
    `<venvX>/bin/python3 tools/upgrade-checks/bench_stack.py <label>` (Voxtral, aligner,
    forced_align, pyannote, raw GEMM), then `bench_nemotron.py <label>` for the Nemotron
    worker on cpu and mps (`--compare` on either afterwards). Both write their JSON here.
-   Their audio (`speech_60s.wav`, `bench_4min.wav`) is a real recording and stays out of
-   git, in `benchmarks-local/` or wherever `NOSCRIBE_BENCH_AUDIO` points; so do the
+   Their audio stays out of git: `speech_60s.wav` is a minute of a real recording,
+   `bench_4min.wav` a real 26-second clip looped nine times, fine for comparing versions
+   but no measure of transcript quality (Voxtral answers the loop instead of transcribing
+   it). Both live in `benchmarks-local/` or wherever `NOSCRIBE_BENCH_AUDIO` points; so do the
    Voxtral transcript and Nemotron's per-frame probabilities they write next to it.
 3. `<venvX>/bin/python3 -m pytest tests/ -q -p no:cacheprovider`.
 4. Read the release notes for what the stack touches: MPS, CPU attention/matmul,

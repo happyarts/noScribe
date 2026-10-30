@@ -164,8 +164,8 @@ changing a number, and check whether a test in `tests/` pins it.
   first transformers with Nemotron's model, so `>=5.18` stays the floor. Every library upgrade check
   (versions tried, digests, decision, how to run one) is logged in
   `tools/upgrade-checks/README.md`, with each run's `bench_*.json` beside it; start a new
-  check from there, with the scripts beside it (`bench_stack.py`, `bench_nemotron.py`); only
-  their audio, a real recording, stays in `benchmarks-local/`. `~/Documents/transformers-src`
+  check from there, with the scripts beside it (`bench_stack.py`, `bench_nemotron.py`); only their audio stays in `benchmarks-local/` (`bench_4min.wav` is a real clip looped, fine
+  for comparing versions, no measure of transcript quality). `~/Documents/transformers-src`
   is a clone of transformers for upstream work there; `~/Documents/transformers-src-analysis/README.md`
   says how to work in it (dev venv, checks, scripts, PR texts).
 - **UI strings**: `trans/noScribe.<lang>.yml`, one file per language. UI-text changes touch these,
