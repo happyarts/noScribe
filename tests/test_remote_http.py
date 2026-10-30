@@ -16,7 +16,7 @@ from noScribe.models import ModelRef
 from noScribe.plugins.factory import register_remote_profiles
 from noScribe.plugins.registry import BackendRegistry
 from noScribe.plugins.remote_http import RemoteHttpPlugin
-from noScribe.plugins.remote_http.plugin import _CancelableUpload
+from noScribe.plugins.remote_http.plugin import _CancelableUpload, _iter_lines
 from noScribe.plugins.remote_profiles import RemoteBackendProfile
 
 
@@ -135,7 +135,8 @@ def _profile(url, **overrides):
 
 
 @contextmanager
-def _workflow_server(retry=False, api_version=NOSCRIBE_HTTP_API_PROTOCOL_VERSION):
+def _workflow_server(retry=False, api_version=NOSCRIBE_HTTP_API_PROTOCOL_VERSION,
+                     evidence=((0.9,),)):
     received = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -193,7 +194,7 @@ def _workflow_server(retry=False, api_version=NOSCRIBE_HTTP_API_PROTOCOL_VERSION
                     "task_index": 0,
                     "operation": "diarization",
                     "ok": True,
-                    "extensions": {"test-backend": {"evidence": [[0.9]]}},
+                    "extensions": {"test-backend": {"evidence": evidence}},
                     "segments": [
                         {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}
                     ],
@@ -528,3 +529,59 @@ def test_remote_rejects_servers_without_retry_reset_protocol():
         with pytest.raises(InferenceWorkerError, match='protocol 1'):
             RemoteHttpPlugin(_profile(url))
     assert not any(item[0] == 'POST' for item in received)
+
+
+def test_lines_arrive_as_soon_as_they_are_complete():
+    """Each line is handed on before more is read, a line split over two reads
+    is joined, and CRLF and a last line without a line end are taken too."""
+    reads = [b'{"a": 1}\n{"b"', b': 2}\r\n\n{"c": 3}', b""]
+    handed = []
+
+    class Raw:
+        def read1(self, amount, decode_content=True):
+            handed.append("read")
+            return reads.pop(0)
+
+    lines = _iter_lines(type("Response", (), {"raw": Raw()})())
+    assert next(lines) == b'{"a": 1}' and handed == ["read"]
+    assert list(lines) == [b'{"b": 2}', b"", b'{"c": 3}']
+
+
+def test_a_broken_stream_raises_what_requests_raises():
+    """The plugin's handlers catch requests' errors, as iter_lines raised them:
+    a connection dropped mid-stream must not escape as urllib3's own."""
+    import pytest
+    import requests
+    from urllib3.exceptions import DecodeError, ProtocolError, ReadTimeoutError
+
+    for raised, expected in ((ProtocolError("dropped"), requests.exceptions.ChunkedEncodingError),
+                             (ReadTimeoutError(None, "/", "timed out"), requests.exceptions.ConnectionError),
+                             (DecodeError("gzip"), requests.exceptions.ContentDecodingError)):
+        class Raw:
+            def read1(self, amount, decode_content=True):
+                raise raised
+
+        with pytest.raises(expected):
+            list(_iter_lines(type("Response", (), {"raw": Raw()})()))
+
+
+def test_a_large_diarization_result_arrives_whole_and_in_time(tmp_path):
+    """Speaker probabilities make a diarization result several MB long (Nemotron:
+    about 7.7 MB per hour of audio). Read byte by byte, a line of 200 kB took
+    27 s and this one did not arrive at all."""
+    import time
+    audio_path = tmp_path / "audio.flac"
+    audio_path.write_bytes(b"fLaC-workflow-audio")
+    evidence = "A" * 8_000_000
+    with _workflow_server(evidence=evidence) as (url, _received):
+        plugin = RemoteHttpPlugin(_profile(url))
+        started = time.monotonic()
+        result = plugin.run_workflow(InferenceWorkflowRequest(
+            str(audio_path),
+            transcription=TranscriptionRequest(str(audio_path), ModelRef("ifs-server", "local-whisper/precise")),
+            diarization=DiarizationRequest(str(audio_path), ModelRef("ifs-server", "local-pyannote/default")),
+        ))
+        took = time.monotonic() - started
+        plugin.close()
+    assert result.diarization.extensions == {"test-backend": {"evidence": evidence}}
+    assert took < 20, f"{took:.1f} s"
