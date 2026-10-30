@@ -63,6 +63,7 @@ from .inference import (
     InferenceWorkflowRequest,
     InferenceWorkerError,
     LOCAL_DIARIZATION_BACKEND,
+    LOCAL_NEMOTRON_BACKEND,
     LOCAL_WHISPER_BACKEND,
     LocalWorkerSettings,
     TranscriptionRequest,
@@ -244,8 +245,6 @@ force_whisper_cpu = get_config_flag('force_whisper_cpu', False)
 
 PAUSE_OPTIONS = ['none', '1sec+', '2sec+', '3sec+']
 
-# The bundled diarization plugin beside Pyannote.
-LOCAL_NEMOTRON_BACKEND = 'local-nemotron'
 # Diarization plugins that run on this machine and may retry on its CPU.
 LOCAL_DIARIZATION_BACKENDS = {LOCAL_DIARIZATION_BACKEND: 'pyannote', LOCAL_NEMOTRON_BACKEND: 'nemotron'}
 
@@ -588,15 +587,22 @@ def select_diarization_model(inference_backend, transcription_model: ModelRef,
     `auto` (the default) takes Nemotron when its weights are on disk, shipped in
     models/ or in the Hugging Face cache, so it never starts a download;
     `nemotron` downloads them on first use, `pyannote` keeps the old engine.
+    On a server the setting chooses among the engines it offers, and `auto` takes
+    its Nemotron wherever it has one: what a server offers, its operator installed.
     Nemotron finds the number of speakers itself and cannot be held to one, so a
-    job with a fixed number stays with Pyannote."""
+    job with a fixed number stays with Pyannote, here or on the server."""
     models = inference_backend.list_models("diarization")
-    for model in models:
-        if model.ref.backend_id == transcription_model.backend_id:
-            return model.ref
+    engine = str(get_config('diarization_engine', 'auto')).lower()
+    on_server = [model for model in models
+                 if model.ref.backend_id == transcription_model.backend_id]
+    if num_speakers is not None:
+        on_server = [model for model in on_server if model.engine != 'nemotron']
+    if on_server:
+        wanted = 'pyannote' if engine == 'pyannote' else 'nemotron'
+        chosen = next((model for model in on_server if model.engine == wanted), on_server[0])
+        return chosen.ref
     nemotron = ModelRef(LOCAL_NEMOTRON_BACKEND, "default")
     if num_speakers is None and any(model.ref == nemotron for model in models):
-        engine = str(get_config('diarization_engine', 'auto')).lower()
         if engine == 'nemotron' or (
                 engine == 'auto' and inference_backend.get(LOCAL_NEMOTRON_BACKEND).ready()):
             return nemotron
@@ -3897,6 +3903,9 @@ class App(ctk.CTk):
                                 transcript_start=transcript_start,
                                 on_reset=reset_transcript,
                             )
+                            # What the server's diarization brought besides its
+                            # turns (Nemotron's probabilities), for the voice check.
+                            diarization_result = remote_workflow_result.diarization
                             info = remote_workflow_result.transcription_info
                             if info is None:
                                 raise InferenceWorkerError(
@@ -4219,6 +4228,7 @@ class App(ctk.CTk):
         on_reset=lambda: None,
     ):
         """Run diarization and transcription with one queued remote upload."""
+        name = {'nemotron': 'Nemotron'}.get(self._model_engine(job.diarization_model, 'pyannote'), 'PyAnnote')
         request = InferenceWorkflowRequest(
             audio_path=tmp_audio_file,
             diarization=DiarizationRequest(
@@ -4271,7 +4281,7 @@ class App(ctk.CTk):
             elif event_type == 'log':
                 message = str(event.get('msg') or '')
                 if operation == 'diarization':
-                    self.logn('PyAnnote ' + message, where='file')
+                    self.logn(f'{name} ' + message, where='file')
                 else:
                     self.logn(
                         message,
@@ -4294,6 +4304,8 @@ class App(ctk.CTk):
                             30 + (percent * 0.7),
                             _job_speaker_setting(job),
                         )
+                    elif step == 'diarization':  # a worker without steps reports the whole
+                        self.set_progress(2, percent, _job_speaker_setting(job))
                 elif operation == 'transcription':
                     self.set_progress(3, percent, _job_speaker_setting(job))
 
