@@ -333,11 +333,3 @@ def test_a_refusal_names_what_the_model_really_needs(monkeypatch):
     with pytest.raises(MemoryError) as err:
         v.max_safe_chunk_sec("voxtral-small-4bit")
     assert f"about {v.min_ram_gb('voxtral-small-4bit'):.0f} GB" in str(err.value)
-
-
-def test_a_renamed_model_points_at_one_that_is_offered():
-    """A model saved under its old name was silently replaced by the first
-    Whisper model; the rename table has to lead to a build that exists."""
-    m = pytest.importorskip("noScribe.main")
-    for old, new in m.RENAMED_MODELS.items():
-        assert new in v.VOXTRAL_MODELS and old not in v.VOXTRAL_MODELS

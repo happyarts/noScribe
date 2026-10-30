@@ -24,3 +24,11 @@ def test_a_renamed_build_finds_its_new_name():
 def test_voxtral_options_from_config_yml_are_read_as_numbers(monkeypatch, value, number):
     monkeypatch.setattr(m, "config", {"voxtral_chunk_sec": value})
     assert m._config_number("voxtral_chunk_sec") == number
+
+
+def test_a_renamed_model_points_at_one_that_is_offered():
+    """A model saved under its old name was silently replaced by the first
+    Whisper model; the rename table has to lead to a build that exists."""
+    from noScribe import voxtral_engine as v
+    for old, new in m.RENAMED_MODELS.items():
+        assert new in v.VOXTRAL_MODELS and old not in v.VOXTRAL_MODELS
