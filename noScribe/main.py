@@ -61,7 +61,6 @@ from . import audio, exception, transcription, utils, voice_check
 from .CTkToolTips import CTkToolTip
 from .inference import (
     DiarizationRequest,
-    DiarizationResult,
     DiarizationSegment,
     InferenceWorkflowRequest,
     InferenceWorkerError,

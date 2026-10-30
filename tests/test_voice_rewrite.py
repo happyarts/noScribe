@@ -117,8 +117,9 @@ def _no_switch_from_the_shell(monkeypatch):
 def harness(diarization, voice_at, file_ext='html', names=(), overlapping=True, extensions=None):
     """extensions: what the diarization brought besides its turns, by default
     pyannote's centroids for VOICES."""
-    from noScribe.main import (LOCAL_DIARIZATION_BACKEND, DiarizationResult, DiarizationSegment, ModelRef,
-                               TranscriptionSegment, _segment_dict)
+    from noScribe.inference import DiarizationResult
+    from noScribe.main import (LOCAL_DIARIZATION_BACKEND, DiarizationSegment, ModelRef, TranscriptionSegment,
+                               _segment_dict)
     job = types.SimpleNamespace(
         start=0, timestamps=True, pause=1, diarization_enabled=True, overlapping=overlapping,
         output_format=file_ext, speaker_names=list(names), speaker_name_map={},
@@ -266,6 +267,27 @@ def test_the_log_file_says_what_moved_but_not_what_was_said():
     written = ' '.join(segment['text'] for segment in segments)
     words = {w.strip('.,?!') for w in written.split() if len(w.strip('.,?!')) > 3}
     assert words and not any(w in line for line in h.app.in_file for w in words)
+
+
+def test_a_diarization_from_elsewhere_is_left_as_it_is():
+    """The voices are embedded by the local pipeline, and only its own centroids
+    compare with them: a diarization from a server, even one that sent pyannote
+    centroids along, is not checked against them."""
+    from noScribe.main import ModelRef
+    turns, segments = two_people()
+    h = harness(turns, voice_at=lambda t: VOICES['SPEAKER_00' if t < 1.7 else 'SPEAKER_01'])
+    h.job.diarization_model = ModelRef('remote-lab', 'default')
+    for segment in segments:
+        h.on_segment(segment)
+    before = h.document().asHTML()
+
+    def no_voices(*args):
+        raise AssertionError('no embedding call for a diarization from elsewhere')
+
+    h.app._run_voice_embeddings = no_voices
+    h.run_voice_check()
+    assert h.document().asHTML() == before
+    assert not any('voice_check' in line for line in h.app.logged)
 
 
 def test_a_diarization_with_its_own_probabilities_is_its_own_second_opinion():
