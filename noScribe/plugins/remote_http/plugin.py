@@ -414,7 +414,7 @@ class RemoteHttpPlugin:
             diarization = None
             final_result = None
             try:
-                for line in response.iter_lines(chunk_size=1):
+                for line in _iter_lines(response):
                     if self._cancel_event.is_set() or is_cancelled():
                         self.cancel()
                         raise InferenceCancelled("Inference canceled")
@@ -616,7 +616,7 @@ class RemoteHttpPlugin:
                 self._active_response = response
                 self._active_job_id = response.headers.get("X-noScribe-Job-ID")
             try:
-                for line in response.iter_lines(chunk_size=1):
+                for line in _iter_lines(response):
                     if self._cancel_event.is_set() or is_cancelled():
                         self.cancel()
                         raise InferenceCancelled("Inference canceled")
@@ -684,6 +684,34 @@ class RemoteHttpPlugin:
             user_message_id="err_remote_backend_connection",
             user_message_params={"name": self.profile.name},
         )
+
+
+def _iter_lines(response):
+    """The response body line by line, each line as soon as it has arrived.
+
+    requests' iter_lines(chunk_size=1) delivers promptly, but it joins its
+    buffer anew for every byte, so a line costs time quadratic in its length:
+    a 200 kB event took 27 s, and a diarization result that carries speaker
+    probabilities (several MB per hour of audio) never arrived. read1 returns
+    whatever has arrived, up to 64 kB, so lines still come as soon as they are
+    sent, and each byte is looked at once."""
+    read1 = getattr(response.raw, "read1", None)
+    if read1 is None:  # urllib3 before 2.x
+        yield from response.iter_lines(chunk_size=1)
+        return
+    buffer = bytearray()
+    while True:
+        data = read1(65536, decode_content=True)
+        if not data:
+            break
+        scan, start = len(buffer), 0
+        buffer += data
+        while (end := buffer.find(b"\n", scan)) >= 0:
+            yield bytes(buffer[start:end]).rstrip(b"\r")
+            start = scan = end + 1
+        del buffer[:start]
+    if buffer:
+        yield bytes(buffer)
 
 
 def _form_bool(value: bool) -> str:
