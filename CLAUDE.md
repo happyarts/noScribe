@@ -207,7 +207,7 @@ changing a number, and check whether a test in `tests/` pins it.
 
 **State on 2026-10-30:** `main` carries upstream's plugin architecture (#377) with Voxtral and
 Nemotron as bundled plugins. All five PR branches were rebuilt on it, reviewed, merged into
-`main` and force-pushed (the pre-plugin tips are tagged `backup/*-pre-plugins`); Nemotron is
+`main` and force-pushed (the pre-plugin tips survive in the PRs' history on GitHub); Nemotron is
 upstream PR #379, stacked on #351, with pyannote kept beside it for now. Fork-only migrations
 (the renamed `voxtral-small-8bit`, the `voxtral_*` keys in config.yml) live on `main` alone,
 with `tests/test_fork_migrations.py`. Upstream's own CI is red on
