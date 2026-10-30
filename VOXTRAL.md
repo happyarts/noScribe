@@ -143,6 +143,14 @@ Note: Voxtral has no prompt/hotword hook, so the "Disfluencies" option cannot
 steer it (a log line says so). Voxtral Mini naturally smooths most fillers;
 Voxtral Small stays closer to the exact wording.
 
+Audio that repeats itself verbatim is not transcribed. Voxtral is a chat
+model trained to transcribe, and on one clip played back to back it falls back
+to chatting: given a 26-second German clip looped to four minutes, Mini returned
+a single English sentence remarking that the phrase was being repeated, on both
+paths. Real recordings do not repeat themselves like that, and none has shown
+it, but a looped clip is no test file for Voxtral: compare versions or settings
+on real, non-repeating audio.
+
 ## Long audio & memory
 
 Voxtral transcribes each pass in a single `generate()` call whose peak memory
