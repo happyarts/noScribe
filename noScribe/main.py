@@ -75,6 +75,7 @@ from .plugins.factory import (
     register_remote_profiles,
     sync_remote_profiles,
 )
+from .plugins.local_voxtral.settings import VoxtralWorkerSettings
 from .plugins.manifest import ExecutionType
 from .plugins.remote_http import NOSCRIBE_HTTP_DRIVER, RemoteHttpPlugin
 from .plugins.remote_profiles import (
@@ -241,6 +242,18 @@ force_pyannote_cpu = get_config_flag('force_pyannote_cpu', False)
 force_whisper_cpu = get_config_flag('force_whisper_cpu', False)
 
 PAUSE_OPTIONS = ['none', '1sec+', '2sec+', '3sec+']
+
+# The bundled transcription plugin beside Whisper.
+LOCAL_VOXTRAL_BACKEND = 'local-voxtral'
+
+# Model names that were published under another name before: a choice saved
+# under the old one (config.yml, a script's --model) means the new one, and was
+# otherwise silently replaced by the first Whisper model.
+RENAMED_MODELS = {'voxtral-small-8bit': 'voxtral-small-4bit'}
+
+# The job data main.py adds to every transcription request for the plugins
+# (noScribe/plugins/local_voxtral reads it).
+JOB_EXTENSION = 'noscribe'
 
 
 def pause_label(pause) -> str:
@@ -417,19 +430,36 @@ def _job_language_name(job: TranscriptionJob) -> str:
     )
 
 
+def _job_extension(job: TranscriptionJob) -> dict:
+    """The job data every transcription request carries for the plugins
+    (JOB_EXTENSION): whether the output needs times -- .html and .vtt embed
+    audio-sync anchors, so only a plain .txt without timestamps, speakers or
+    pause marks does without -- and the speaker names the user entered."""
+    return {JOB_EXTENSION: {
+        'needs_timing': bool(job.output_format != 'txt' or job.timestamps
+                             or job.diarization_enabled or job.pause > 0),
+        'speaker_names': list(job.speaker_names or []),
+    }}
+
+
 def _job_speaker_setting(job: TranscriptionJob) -> str:
     if not job.diarization_enabled:
         return 'none'
     return str(job.num_speakers) if job.num_speakers is not None else 'auto'
 
 
-def _model_ref(value: str) -> ModelRef:
-    """Accept a qualified ref or migrate a legacy bare local model ID."""
-    return (
-        ModelRef.parse(value)
-        if ':' in value
-        else ModelRef(LOCAL_WHISPER_BACKEND, value)
-    )
+def _model_ref(value: str, inference_backend=None) -> ModelRef:
+    """Accept a qualified ref or migrate a legacy bare local model ID: a renamed
+    model to its new name, and a Voxtral model, saved before the plugins, to the
+    plugin that offers it now (when the registry is given to ask)."""
+    if ':' in value:
+        return ModelRef.parse(value)
+    value = RENAMED_MODELS.get(value, value)
+    if inference_backend is not None:
+        for model in inference_backend.list_models('transcription'):
+            if model.ref.backend_id == LOCAL_VOXTRAL_BACKEND and model.ref.model_id == value:
+                return model.ref
+    return ModelRef(LOCAL_WHISPER_BACKEND, value)
 
 
 def confirm_output_override(
@@ -875,6 +905,7 @@ def _init_app_state(app):
     app._remote_model_refresh_pending = False
     app._remote_models_refreshed_at = float('-inf')
     app._last_remote_refresh_errors = ()
+    app._engine_progress = False
 
     # Get a list of available Whisper models.
     tmp = transcription.WhisperModelManager(app.user_models_dir)
@@ -897,6 +928,11 @@ def _init_app_state(app):
         },
         settings=app.worker_settings,
         settings_dir=Path(config_dir) / "plugin-settings",
+        voxtral_defaults=VoxtralWorkerSettings(
+            chunk_sec=_config_number('voxtral_chunk_sec'),
+            ram_reserve_gb=_config_number('voxtral_ram_reserve_gb'),
+        ),
+        corrections_dir=Path(config_dir),
     )
     app.remote_backend_registration_errors = register_remote_profiles(
         app.inference_backend,
@@ -905,14 +941,39 @@ def _init_app_state(app):
     _update_transcription_model_catalog(app)
 
 
+def _config_number(key: str) -> float:
+    """A number from config.yml, 0 when absent or unreadable: a value written as a
+    YAML string ("0", "high") must neither slip through truthy nor abort a job."""
+    try:
+        return max(0.0, float(config.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _menu_hint(inference_backend, model) -> str:
+    """What a plugin adds after a model's name in the menu (Voxtral: its RAM)."""
+    try:
+        hint = getattr(inference_backend.get(model.ref.backend_id), 'menu_hint', None)
+        return hint(model) if hint else ''
+    except Exception:
+        return ''
+
+
 def _update_transcription_model_catalog(app) -> None:
     app.transcription_models = {
         str(model.ref): model
         for model in app.inference_backend.list_models("transcription")
     }
-    app.transcription_model_options = app.inference_backend.model_options(
-        "transcription"
-    )
+    options = app.inference_backend.model_options("transcription")
+    # The transcript header and the queue name a model as the menu does, but
+    # without the hint a plugin adds there.
+    app.transcription_model_names = {
+        str(model.ref): label for label, model in options.items()
+    }
+    app.transcription_model_options = {
+        label + _menu_hint(app.inference_backend, model): model
+        for label, model in options.items()
+    }
     app.transcription_model_labels = {
         str(model.ref): label
         for label, model in app.transcription_model_options.items()
@@ -1138,7 +1199,8 @@ class App(ctk.CTk):
                                                        values=list(self.transcription_model_options.keys()),
                                                        dynamic_resizing=False)
         self.option_menu_whisper_model.grid(column=1, row=3, sticky='e', pady=5)
-        last_whisper_model = str(_model_ref(get_config('last_whisper_model', 'precise')))
+        last_whisper_model = str(_model_ref(get_config('last_whisper_model', 'precise'),
+                                            self.inference_backend))
         selected_label = _model_selection_label(self, last_whisper_model)
         if selected_label is not None:
             self.option_menu_whisper_model.set(selected_label)
@@ -2015,7 +2077,7 @@ class App(ctk.CTk):
             # Append a real, concise summary of the job's options
             try:
                 model_name = transcription_model_name(
-                    self.transcription_model_labels, job.transcription_model
+                    self.transcription_model_names, job.transcription_model
                 )
                 job_tooltip += '\n\n' + format_job_summary(job, model_name)
             except Exception:
@@ -2536,6 +2598,11 @@ class App(ctk.CTk):
         
         # Handle screen logging if requested and textbox exists
         if where != 'file': 
+            # Whether the screen log now ends mid-line, so a message arriving
+            # while transcript text streams in (written without a trailing
+            # newline) can start on a fresh line (end_open_line).
+            if txt:
+                self._log_line_open = not txt.endswith('\n')
             if txt[:-1] != t('welcome_instructions'):
                 print(txt, end='')            
             if not getattr(self, '_headless', False):
@@ -2604,6 +2671,12 @@ class App(ctk.CTk):
     def logn(self, txt: str = '', tags: list = [], where: str = 'both', link:str = '', tb: str = '') -> None:
         """ Log with a newline appended """
         self.log(f'{txt}\n', tags, where, link, tb)
+
+    def end_open_line(self) -> None:
+        """Finish a line left open by streamed transcript text, so the next
+        message does not get glued onto it."""
+        if getattr(self, '_log_line_open', False):
+            self.logn(where='screen')
 
     def logr(self, txt: str = '', tags: list = [], where: str = 'both', link:str = '', tb: str = '') -> None:
         """ Replace the last line of the log """
@@ -3135,9 +3208,11 @@ class App(ctk.CTk):
 
         try:
             model_name = transcription_model_name(
-                self.transcription_model_labels, job.transcription_model
+                self.transcription_model_names, job.transcription_model
             )
             option_info = format_transcript_options(job, model_name)
+            # The engine behind the text, for the log ("loading_voxtral").
+            transcription_engine = self._model_engine(job.transcription_model, 'whisper')
 
             # Create log file
             if not os.path.exists(f'{config_dir}/log'):
@@ -3376,7 +3451,7 @@ class App(ctk.CTk):
                             raise Exception(job.error_message)
 
                 #-------------------------------------------------------
-                # 3) Transcribe with faster-whisper
+                # 3) Transcribe with faster-whisper or Voxtral
 
                 if not remote_workflow_pending:
                     job.status = JobStatus.TRANSCRIPTION
@@ -3384,7 +3459,7 @@ class App(ctk.CTk):
 
                     self.logn()
                     self.logn(t('start_transcription'), 'highlight')
-                    self.logn(t('loading_whisper'))
+                    self.logn(t('loading_voxtral' if transcription_engine == 'voxtral' else 'loading_whisper'))
 
                 info = None
                 transcription_success = False
@@ -3697,12 +3772,19 @@ class App(ctk.CTk):
                                 save_doc()
                                 job.has_partial_transcript = True
 
-                        # per-segment progress based on total duration
-                        try:
-                            progr = round((segment.end/duration) * 100)
-                            self.set_progress(3, progr, speaker_setting)
-                        except Exception:
-                            pass
+                        # Per-segment progress, derived from where this segment
+                        # ends in the file. Whisper sends no progress messages, so
+                        # this is its only source. Voxtral does send them, and its
+                        # own estimate runs ahead of the segments it has already
+                        # emitted -- feeding both to the same bar made it jump
+                        # back roughly 28 points per chunk. An engine's own stream
+                        # is authoritative wherever there is one.
+                        if not self._engine_progress:
+                            try:
+                                progr = round((segment.end/duration) * 100)
+                                self.set_progress(3, progr, speaker_setting)
+                            except Exception:
+                                pass
                     
                     try:
                         transcription_audio = (
@@ -3851,6 +3933,13 @@ class App(ctk.CTk):
             self.logn(f'Error starting transcription: {str(e)}', 'error')
             tk.messagebox.showerror(title='noScribe', message=f'Error starting transcription: {str(e)}')
 
+    def _model_engine(self, model: ModelRef, default: str) -> str:
+        """The engine a model runs on ('whisper', 'voxtral')."""
+        try:
+            return self.inference_backend.get_model(model).engine or default
+        except Exception:
+            return default
+
     def _handle_cuda_fallback(self, component: str, error: Exception, job: TranscriptionJob) -> bool:
         """Automatically retry the affected component once on CPU for this job."""
         # Cancellation is never a failed retry, even if an earlier GPU attempt
@@ -3902,7 +3991,13 @@ class App(ctk.CTk):
             multilingual=job.multilingual,
             include_disfluencies=job.disfluencies,
             diarization=diarization,
+            # Local plugins only: a server without queued workflows refuses any
+            # request with extensions (RemoteHttpPlugin.transcribe).
+            extensions=({} if model_uses_remote_backend(self.inference_backend, job.transcription_model)
+                        else _job_extension(job)),
         )
+        # Whether the engine reports its own progress (on_segment then leaves the bar alone)
+        self._engine_progress = False
 
         def mark_transcription_started() -> None:
             if job.status == JobStatus.WAITING_FOR_SERVER:
@@ -3911,10 +4006,16 @@ class App(ctk.CTk):
 
         def log_message(level: str, message: str) -> None:
             mark_transcription_started()
+            if level == 'debug':
+                self.logn(message, where='file')
+                return
+            # Transcript text streams in without trailing newlines.
+            self.end_open_line()
             self.logn(message, 'error' if level == 'error' else None)
 
         def update_progress(percent: float, detail: str | None) -> None:
             mark_transcription_started()
+            self._engine_progress = True
             self.set_progress(3, percent, _job_speaker_setting(job))
 
         def show_status(message_id: str, params: dict, level: str) -> None:
@@ -3925,6 +4026,10 @@ class App(ctk.CTk):
             else:
                 mark_transcription_started()
             message = t(message_id, **params)
+            if level == 'debug':
+                self.logn(message, where='file')
+                return
+            self.end_open_line()
             self.logn(message, 'error' if level == 'error' else None)
 
         def stream_segment(segment: TranscriptionSegment) -> None:
@@ -3943,6 +4048,7 @@ class App(ctk.CTk):
                 **({'on_reset': on_reset} if on_reset is not None else {}),
             )
         except (InferenceWorkerError, WorkerError) as error:
+            self.end_open_line()
             if getattr(error, 'user_message_id', None):
                 self.logn(_gui_error_message(error), 'error')
                 self.logn(f'Transcription failed: {error}', where='file')
@@ -4219,7 +4325,7 @@ def run_cli_mode(args):
         # Validate and set the whisper model
         if args.model:
             try:
-                model_ref = _model_ref(args.model)
+                model_ref = _model_ref(args.model, app.inference_backend)
                 model = app.inference_backend.get_model(model_ref)
             except ValueError as error:
                 print(f"Error: {error}")
@@ -4415,7 +4521,7 @@ def noScribeMain():
         desired_model_name = None
         if getattr(args, 'model', None):
             try:
-                model_ref = str(_model_ref(args.model))
+                model_ref = str(_model_ref(args.model, app.inference_backend))
             except ValueError:
                 model_ref = None
             if model_ref in app.transcription_models:
