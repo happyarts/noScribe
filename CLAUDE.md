@@ -205,11 +205,12 @@ changing a number, and check whether a test in `tests/` pins it.
 
 ## The Voxtral pull request
 
-**State on 2026-10-30:** `main` carries upstream's plugin architecture with Voxtral and
-Nemotron as plugins, but the open PR branches (#351, #352, #361, #362 and
-`feature/nemotron-diarization`) were still built for the pre-plugin `main.py`; until they
-are rebuilt on it, `tools/check_local_current.py` reports their lines as missing. What is
-said below about their contents describes those branches, not `main`.
+**State on 2026-10-30:** `main` carries upstream's plugin architecture (#377) with Voxtral and
+Nemotron as bundled plugins. #351, Voxtral and Nemotron were rebuilt on it as local branches
+`rebuild/voice-verified-speakers`, `rebuild/nemotron-diarization` and `rebuild/voxtral-engine`
+(the old tips are tagged `backup/*-pre-plugins`) and merged into `main`; they replace the
+`feature/*` branches once pushed. #361 and #362 are still built for the pre-plugin `main.py`,
+so `tools/check_local_current.py` reports their lines as missing until they are rebuilt too.
 
 Voxtral goes upstream as **one** feature PR, deliberately not split. Its branch is
 `feature/voxtral-engine`, rebuilt on 2026-09-20 (and again on 2026-09-23, after the Opus 5.5 review; rebased with the other open branches onto upstream 0.8 on 2026-10-05, each now carrying its own adaptations of upstream's tests, and again on 2026-10-06 onto upstream's `av<19` pin) from `upstream/main` plus `main`'s
@@ -221,9 +222,10 @@ that shape when rebuilding. `docs/scripts/` needs `git add -f` there -- upstream
 has a `scripts/` entry. The PR text lives in `benchmarks-local/voxtral-pr-description.md`.
 
 To refresh the branch after `main` moved: check the Voxtral-only files out of
-`main` wholesale, and carry `main.py` changes over by hand -- its Voxtral hunks sit
-between the other branches' hunks but share only two with them (`diarization = None`, which the
-voice check adds identically, and the `try:` block that dispatches on the engine).
+`main` wholesale, and carry `main.py` changes over by hand -- its Voxtral hunks (the job
+extension, `_model_ref`, the menu hint, `_engine_progress`, `end_open_line`) sit between the
+other branches' hunks. `tests/test_voxtral_plugin.py` and `tests/test_nemotron_plugin.py` are
+one file per branch on `main` too.
 `tools/check_local_current.py` must stay green for the branch; its `INTENTIONAL` table lists the
 lines the branch deliberately differs on. In the branch's copy of `docs/migration-mlx-audio.md`
 three references to files outside the PR (`docs/diarization.md`, `benchmarks-local/`) are removed.
@@ -243,7 +245,8 @@ This is its boundary:
                           quant_summary,quantize_group_guard,mel_floor,ctc_align,
                           align_language,cut_and_cue_quality,lost_head_recovery,
                           merged_embeddings,salvage_prefix_alignment,word_prob_format,
-                          voxtral_transcribe_guards,align_input_level}.py
+                          voxtral_transcribe_guards,align_input_level,voxtral_plugin}.py
+              noScribe/plugins/local_voxtral/
     modified  noScribe/main.py · noScribe/transcription.py · trans/*.yml (four keys:
               voxtral_path_long, voxtral_path_short, voxtral_no_disfluencies, loading_voxtral)
               noScribe/__init__.py (one word: ctc_align in _SUBMODULES)
@@ -252,6 +255,10 @@ This is its boundary:
                                                       comment above it)
               pyinstaller/noScribe_macOS.spec (the MLX stack in `excludes`)
               .gitignore (only the `models/voxtral-*` line)
+              noScribe/plugins/factory.py (registers local-voxtral)
+              noScribe/inference.py (run_transcription_worker split out of transcribe(),
+                                     and no device assumed)
+              tests/test_plugins.py (the local-voxtral manifest)
 
 Every branch Voxtral depended on is part of upstream: the three it touched only textually
 (speaker-names, header-labels, torch-2.13-stack) and the one hard dependency,
@@ -279,7 +286,7 @@ Voxtral PR:
 - **Nemotron 3 Diarization** (`noScribe/nemotron_mp_worker.py`, `voice_check.Probabilities`,
   `select_diarization_model` in `main.py`, `noScribe/plugins/local_nemotron/`,
   `loading_nemotron` in all nine languages,
-  `tests/test_nemotron_worker.py`) has its own branch, `feature/nemotron-diarization`, stacked on
+  `tests/test_nemotron_{worker,plugin}.py`) has its own branch, `feature/nemotron-diarization`, stacked on
   `feature/voice-verified-speakers` rather than cut from `upstream-main`, and merged into `main`.
   Proposed upstream in issue #360 (Kai agreed on transformers, no pyannote fallback, 8 speakers
   as the limit); measurements in `benchmarks-local/nemotron/README.md`: fewer wrong speakers
@@ -292,7 +299,8 @@ Voxtral PR:
   call for a last chunk raises on short ends in a mode without look-ahead, which the worker's
   `(step, 0)` is (numbers in the docstring of `features`). Our fix is
   huggingface/transformers#49213; once a release carries it, the offline call can go.
-  The branch is four commits (worker, integration, the transformers 5.18 requirement, librosa) ready for review; its PR text is in
+  The branch is five commits (plugin and worker, integration, requirements, the remote
+  plugin's line reader, the server variant) ready for review; its PR text is in
   `benchmarks-local/nemotron/pr-description.md`, and pyannote's removal comes as a separate PR.
   A throwaway frozen build ran it: the specs collect `transformers.models.nemotron3_diarization`
   and `nemotron_asr_streaming` plus torchcodec's metadata. PyInstaller, bisected on macOS: before
@@ -302,16 +310,20 @@ Voxtral PR:
   The requirements ask for `transformers>=5.18` since its release (2026-09-30). Not done until
   upstream agrees: removing pyannote (worker, models, `pyannote_fast_embeddings`, requirements,
   specs), dropping the speaker-count setting, and shipping bf16 weights with the OpenMDW licence.
+  On a server it runs as on the desktop (the server builds its registry from the same factory):
+  `select_diarization_model` lets `diarization_engine` choose among a server's engines, the
+  voice check reads the probabilities a server sends, and the server retries Nemotron on its
+  CPU. That needed the remote plugin to stop reading events with `iter_lines(chunk_size=1)`,
+  quadratic in the line length (200 kB: 27 s; Nemotron's ~7.7 MB per audio hour never
+  arrived); `_iter_lines` reads with `read1`. The Docker lock files still lack transformers
+  and librosa: no Docker here, so `docker/update-lock.sh` is Kai's to run.
 - `noScribe/pyannote_fast_embeddings.py` and its hook in `pyannote_mp_worker.py` (with
   `tests/test_pyannote_fast_embeddings.py`): the
   diarization speed-up that upstream pyannote-audio#2048 supersedes. Fork-only until then.
 - `Romy` → `Mona` in `tests/test_utils.py` and `tests/test_apostrophe_fix.py`: an edit to
   upstream's own test data. Stays local.
-- The removal of the `_Info` object that `_run_engine_subprocess_stream` used to return.
-  Upstream declined the same removal (PR #349, closed 2026-09-19): the maintainer means to
-  use `info_obj` from `_run_whisper_subprocess_stream` in a coming change. So the Voxtral PR
-  must not carry this removal — its shared pump returns the `_Info` again, as upstream's
-  does, and whatever upstream then reads from it has to work for Voxtral's result too.
+- (The `_Info` question is settled: since #377 every engine returns `TranscriptionInfo`
+  through the plugin, and Voxtral's carries duration and language like Whisper's.)
 
 **These are fork-only and must never appear in that pull request**, however convenient the diff
 makes it look:

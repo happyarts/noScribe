@@ -58,21 +58,6 @@ INTENTIONAL = {
         "lokal folgt nemotron_mp_worker in derselben Zeile",
     'WORKER_MODULES = ["noScribe.pyannote_mp_worker", "noScribe.whisper_mp_worker", "noScribe.nemotron_mp_worker"]':
         "lokal um voxtral_mp_worker erweitert, auf zwei Zeilen",
-    # feature/voxtral-engine gibt das _Info-Objekt wieder zurueck, wie upstream es
-    # tut (die Entfernung wurde dort abgelehnt und bleibt lokal); lokal geben die
-    # drei Funktionen nichts zurueck.
-    'info = self._run_voxtral_subprocess_stream(':
-        "lokal ohne Zuweisung (_Info lokal entfernt)",
-    'info = self._run_whisper_subprocess_stream(tmp_audio_file, job, on_segment)':
-        "lokal ohne Zuweisung (_Info lokal entfernt)",
-    'reliably. Returns a simple info object (duration at least).':
-        "lokal ohne Rueckgabe (_Info lokal entfernt)",
-    'Returns a simple info object (duration at least).':
-        "lokal ohne Rueckgabe (_Info lokal entfernt)",
-    'return self._run_engine_subprocess_stream(voxtral_proc_entrypoint, args, job, on_segment)':
-        "lokal ohne return (_Info lokal entfernt)",
-    'return self._run_engine_subprocess_stream(whisper_proc_entrypoint, args, job, on_segment)':
-        "lokal ohne return (_Info lokal entfernt)",
     # Der Branch traegt weder voice_check noch die lokalen .gitignore-Eintraege.
     '_SUBMODULES = ("main", "audio", "ctc_align", "exception", "transcription", "utils")':
         "lokal zusaetzlich mit voice_check",
@@ -84,6 +69,38 @@ INTENTIONAL = {
         "lokal mit vad_future statt speech_chunks (fix/silero-beside-worker)",
     "'transcript_start': 0}  # where the converted audio starts in the media":
         "lokal folgt is_voxtral, die Zeile endet mit einem Komma",
+    # Seit dem Umbau auf die Plugins (2026-10-30): was der Voxtral- und der
+    # Nemotron-Branch je fuer ihr eigenes Plugin sagen, sagt main fuer beide.
+    '# The engine behind the speakers, for the header and the log':
+        "lokal: die Engines hinter Sprecher:innen und Text",
+    '# ("loading_nemotron").':
+        "lokal mit loading_voxtral in derselben Zeile",
+    '# The engine behind the text, for the log ("loading_voxtral").':
+        "lokal: die Engines hinter Sprecher:innen und Text",
+    '"""The engine a model runs on (\'whisper\', \'pyannote\', \'nemotron\')."""':
+        "lokal mit allen vier Engines",
+    '"""The engine a model runs on (\'whisper\', \'voxtral\')."""':
+        "lokal mit allen vier Engines",
+    "nemotron_defaults stand in for absent fields of Nemotron's settings file, as":
+        "lokal ein Docstring fuer beide *_defaults",
+    "voxtral_defaults stand in for absent fields of Voxtral's settings file, as":
+        "lokal ein Docstring fuer beide *_defaults",
+    "the desktop's older config.yml entries do for Whisper and Pyannote above.\"\"\"":
+        "lokal geht der Docstring mit dem Korrekturen-Verzeichnis weiter",
+    # tests/test_plugins.py: jeder Branch nimmt nur sein Plugin aus dem
+    # Vergleich mit upstreams Modellen, main beide.
+    '# Nemotron is offered where transformers and librosa can run it, so the':
+        "lokal ein Kommentar fuer beide Plugins",
+    '# Voxtral offers its builds on Apple Silicon with the MLX stack only, so the':
+        "lokal ein Kommentar fuer beide Plugins",
+    '# machine decides whether it is listed.':
+        "lokal ein Kommentar fuer beide Plugins",
+    '# machine decides whether they are listed.':
+        "lokal ein Kommentar fuer beide Plugins",
+    'if model.ref.backend_id != "local-nemotron"':
+        "lokal: in upstream (whisper, pyannote)",
+    'if model.ref.backend_id != "local-voxtral"} == {':
+        "lokal: in upstream (whisper, pyannote)",
 }
 
 
