@@ -178,12 +178,11 @@ def bench_aligner(results, vox, audio):
 
 def bench_pyannote(results):
     # Through the real worker module so device pick etc. match production.
-    import importlib.util
+    # Imported as part of the package: since the plugin refactor the worker
+    # imports its siblings relatively, so loading the file alone fails.
+    import importlib
     import queue
-    spec = importlib.util.spec_from_file_location(
-        "pyw", ROOT / "noScribe" / "pyannote_mp_worker.py")
-    pyw = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(pyw)
+    pyw = importlib.import_module("noScribe.pyannote_mp_worker")
     q = queue.Queue()
     t0 = time.monotonic()
     pyw.pyannote_proc_entrypoint({"audio_path": str(AUDIO / "bench_4min.wav")}, q)

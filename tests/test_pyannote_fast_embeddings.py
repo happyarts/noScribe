@@ -12,6 +12,7 @@ against the real bundled pipeline: its failure mode is the silent kind (the
 stock path quietly returns, 2.2x slower), which no runtime error would ever
 surface.
 """
+import inspect
 import types
 from pathlib import Path
 
@@ -38,11 +39,18 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _pipeline_stub(embedding):
-    """Just the attributes get_embeddings actually touches."""
+    """Just the attributes get_embeddings actually touches. `_audio` is built
+    as the pipeline builds it: with mono="downmix" up to pyannote.audio 4.0,
+    without from 4.1, which removed the argument and takes the channel from
+    the file."""
+    if "mono" in inspect.signature(Audio).parameters:
+        audio = Audio(sample_rate=16000, mono="downmix")
+    else:
+        audio = Audio(sample_rate=16000)
     return types.SimpleNamespace(
         training=False,
         _embedding=embedding,
-        _audio=Audio(sample_rate=16000, mono="downmix"),
+        _audio=audio,
         embedding_batch_size=4,
     )
 
