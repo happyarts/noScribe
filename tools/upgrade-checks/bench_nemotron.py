@@ -21,7 +21,6 @@ import itertools
 import json
 import os
 import queue
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -46,22 +45,22 @@ def wav16k():
 def run(label):
     import numpy as np
     import torch
-    from noScribe.nemotron_mp_worker import nemotron_proc_entrypoint
+    from noScribe.nemotron_mp_worker import (EXTENSION_KEY, decode_probabilities,
+                                             nemotron_proc_entrypoint)
     OUT.mkdir(exist_ok=True)
     src = wav16k()
     for dev in ("cpu", "mps"):
-        wav = OUT / f"{label}_{dev}.wav"  # the worker writes <wav>.speakers.npy next to it
-        shutil.copy(src, wav)
         q = queue.Queue()
         t0 = time.monotonic()
-        nemotron_proc_entrypoint({"audio_path": str(wav), "device": dev}, q)
+        nemotron_proc_entrypoint({"audio_path": str(src), "device": dev}, q)
         sec = time.monotonic() - t0
         res = [m for m in (q.get() for _ in range(q.qsize())) if m["type"] == "result"][0]
         assert res["ok"], res
-        probs = Path(res["probabilities"]["path"])
-        probs.rename(OUT / f"{label}_{dev}.npy")
-        wav.unlink()
-        p = np.load(OUT / f"{label}_{dev}.npy")
+        # Since the plugin refactor the probabilities travel in the result, as the
+        # float16 rows the worker used to save next to the audio; same bytes, so the
+        # digests stay comparable with the older runs.
+        p = decode_probabilities(res["extensions"][EXTENSION_KEY]["probabilities"])
+        np.save(OUT / f"{label}_{dev}.npy", p)
         info = {"label": label, "device": dev, "torch": torch.__version__,
                 "transformers": __import__("transformers").__version__, "sec": round(sec, 1),
                 "n_turns": len(res["segments"]),
