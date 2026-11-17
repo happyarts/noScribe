@@ -154,10 +154,11 @@ changing a number, and check whether a test in `tests/` pins it.
 - **Models**: `models/` holds `fast`, `precise` and `voxtral-mini-8bit`; Voxtral repos are
   downloaded on first use, and so is `nvidia/Nemotron-3-Diarization` (HF cache) unless a copy
   sits in `models/nemotron-diarization`.
-- **The venv follows the requirements, not a frozen set**: on 2026-10-20 it was upgraded to what a
-  fresh install gets (transformers 5.20.2, huggingface_hub 2.2, librosa 1.0) plus the bumped
-  Voxtral pins (mlx 0.32.4, mlx-lm 0.32.2), with torch still 2.13; every result stayed
-  bit-identical. A machine on an older venv fails `tests/test_voxtral_pin.py` until it runs
+- **The venv follows the requirements, not a frozen set**: last upgraded 2026-11-17 to what a
+  fresh install gets (transformers 5.23.0, huggingface_hub 2.4, pyannote.audio 4.1.0, pyobjc 13)
+  with the Voxtral pins (mlx 0.32.4, mlx-lm 0.32.2) and torch still 2.13; every result stayed
+  bit-identical. That upgrade moves every unpinned library at once, so measure after it
+  (`tools/upgrade-checks/`), not only the one library that prompted it. A machine on an older venv fails `tests/test_voxtral_pin.py` until it runs
   `pip install --upgrade --upgrade-strategy eager -r` on both requirements files, with `datasets`
   named in the same call: the measurement scripts need it, no requirements file lists it, and
   left out it is ignored while fsspec moves past what it allows. 5.18.0 is the
